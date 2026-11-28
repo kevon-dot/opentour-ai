@@ -1131,15 +1131,17 @@ def test_c7_operating_point_is_bound_through_substituted_terms_without_the_slice
         "operating_point_digest_mismatch",
     )
     plain = terms_for(("critical-plain-name",))
-    held(
-        run(
-            tmp_path / "b",
-            s,
-            pol=policy(operating_point_terms=plain, operating_point_digest=digest(plain)),
-        ),
-        "integrity_failure",
-        "operating_point_slice_names_not_substituted",
+    assert iv.operating_point_binding(plain, digest(plain)) == (
+        "operating_point_slice_names_not_substituted"
     )
+    # A held verdict would publish the plain name in its policy, so nothing is issued at all.
+    for pol_b in (
+        policy(operating_point_terms=plain, operating_point_digest=digest(plain)),
+        policy(critical_slices=("critical-plain-name",)),
+    ):
+        with pytest.raises(iv.VerdictInputError, match="slice_names_not_substituted"):
+            run(tmp_path / "b", s, pol=pol_b)
+    assert list((tmp_path / "b" / "evaluator-custody" / "verdicts").iterdir()) == []
     unbound = policy(critical_slices=(CRITICAL,), operating_point_terms=terms_for())
     held(
         run(
@@ -1154,6 +1156,7 @@ def test_c7_operating_point_is_bound_through_substituted_terms_without_the_slice
     )
     doc = run(tmp_path / "d", s, pol=pol).document
     assert doc["operating_point_digest"] == pol.operating_point_digest
+    assert doc["operating_point_digest_form"] == cp.OPERATING_POINT_DIGEST_FORM
     assert doc["policy"]["operating_point_terms"]["critical_slices"] == [CRITICAL]
 
 

@@ -38,6 +38,12 @@ What it verifies, as three separately reported statements:
 The operating point is supplied in its OPE-571 form, the frozen terms with every slice name
 already replaced by its keyed digest plus the plain SHA-256 over them, and is checked by
 ``operating_point_binding`` alone. The evaluator never holds the slice key or plain slice names.
+A policy whose slice entries are not digest-shaped is refused before anything is issued
+(``operating_point_slice_names_not_substituted``), so no verdict echoes a name it can tell is
+plain. Every verdict declares ``operating_point_digest_form`` as
+``comparison_packet.OPERATING_POINT_DIGEST_FORM`` (``slice_substituted.v1``), the only form the
+OPE-421 packet accepts; the packet still recomputes the digest from the comparison under the
+engagement key and refuses any other value with ``verdict_binding_mismatch``.
 
 Comparator gaps never hide candidate errors: more comparator missing or malformed outputs than
 the policy's ``max_missing`` hold the comparison as incompatible; the candidate's total wrong
@@ -150,6 +156,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
+from opentour_cell.pilot import comparison_packet
 from opentour_cell.pilot import open_weight as ow
 from opentour_cell.pilot.operating_point import digest
 
@@ -718,6 +725,15 @@ class GatePolicy:
             or not all(_ID.fullmatch(n) for n in (*names, *self.critical_slices))
         ):
             raise VerdictInputError("invalid_gate_policy")
+        if not all(_is_sha(n) for n in self.critical_slices) or not all(
+            isinstance(self.operating_point_terms.get(k, []), list)
+            and all(_is_sha(n) for n in self.operating_point_terms.get(k, []))
+            for k in comparison_packet._SLICE_TERMS
+        ):
+            # OPE-571: the evaluator only ever receives keyed slice digests. An entry that is
+            # not digest-shaped is a plain name, and a held verdict would publish it in its
+            # policy, so nothing is issued. Format only: see ``operating_point_binding``.
+            raise VerdictInputError("operating_point_slice_names_not_substituted")
         if self.decoding != "deterministic":
             raise VerdictInputError("stochastic_decoding_not_supported")
 
@@ -1223,13 +1239,12 @@ def operating_point_binding(
 ) -> str | None:
     """Check an operating-point digest against its slice-substituted terms (OPE-571 form).
 
-    REBASE POINT (OPE-571, branch claude/ope-571-slice-digests, unmerged): the digest is a plain
-    SHA-256 over ``terms`` after every ``critical_slices``/``material_slices`` name has been
-    replaced by its keyed digest, so it is checkable without the per-engagement slice key. The
-    rebase target is ``comparison_packet.operating_point_digest`` (comparison_packet.py:411 on
-    that branch); until it merges this uses ``operating_point.digest``, the canonicalization
-    ``comparison_packet`` applies to ``terms`` on main. Returns ``None`` when bound, else the
-    hold reason.
+    The digest is ``comparison_packet.operating_point_digest``: a plain canonical SHA-256 over
+    ``terms`` after every ``comparison_packet._SLICE_TERMS`` (critical and material) name has
+    been replaced by its keyed digest, so it is checkable without the per-engagement slice key.
+    It is the packet's own function, not a copy, so the two cannot drift. A verdict binding it
+    declares ``operating_point_digest_form: comparison_packet.OPERATING_POINT_DIGEST_FORM``.
+    Returns ``None`` when bound, else the hold reason.
 
     The substitution check is FORMAT ONLY: a slice entry must be 64 lowercase hex. Without the
     slice key the evaluator cannot tell a keyed digest from a plain SHA-256 of a name (or a name
@@ -1237,12 +1252,12 @@ def operating_point_binding(
     """
     if not isinstance(substituted_terms, Mapping) or not _is_sha(operating_point_digest):
         return "operating_point_unverifiable"
-    for key in ("critical_slices", "material_slices"):
+    for key in comparison_packet._SLICE_TERMS:
         names = substituted_terms.get(key, [])
         if not isinstance(names, list) or not all(_is_sha(n) for n in names):
             return "operating_point_slice_names_not_substituted"
     try:
-        computed = digest(dict(substituted_terms))
+        computed = comparison_packet.operating_point_digest(dict(substituted_terms))
     except (TypeError, ValueError):
         return "operating_point_unverifiable"
     if computed != operating_point_digest:
@@ -2816,6 +2831,10 @@ class IndependentEvaluator:
             # The same key without ids, so an answer-key revocation survives renamed ids.
             "answer_key_content_digest": population.answer_key_content_digest,
             "inputs_digest": population.inputs_digest,
+            # OPE-571: the only digest form ``comparison_packet`` accepts. The value is the
+            # claim's, bound to the substituted terms by ``operating_point_binding``; the packet
+            # recomputes it from the comparison under the engagement key before trusting it.
+            "operating_point_digest_form": comparison_packet.OPERATING_POINT_DIGEST_FORM,
             "operating_point_digest": claim.operating_point_digest,
             "target_metric": TARGET_METRIC,
             "policy": policy.as_json(),
