@@ -29,9 +29,15 @@ the journal directory can set ``cap_verified`` or ``maximum_minor_units`` direct
 the journal is trusted storage that only this connector can write. Closing that would need
 authenticated events (an HMAC or signature over each event, keyed outside the state directory).
 
-Over-cap usage: provider-reported usage above the journaled approved maximum is returned with its
-real figure, ``cap_status == "over_cap"`` and ``settleable is False``. No code in this repository
-reconciles it; the caller that owns the reservation must handle it (see ``ReportedUsage``).
+Over-cap usage is a hard refusal. A COMPLETED job whose provider-reported usage is above the
+journaled approved maximum is held with the fixed reason ``over_cap``: ``collect`` builds no
+candidate, and ``handoff_reference`` and ``predict_for_replay`` never use its tuned-model id.
+Usage that cannot be shown to be within the cap (missing, non-finite, negative or non-integer, in
+another currency, or with no journaled maximum) is held the same way: fail closed. Usage exactly
+at the cap is accepted. ``hold_reason`` reports the hold. The receipt state stays the provider's
+own (COMPLETED); the hold is enforced where the result would be released. ``usage`` still returns
+the real figure with ``cap_status == "over_cap"`` and ``settleable is False``; no code in this
+repository reconciles it, so the reservation owner must handle it (see ``ReportedUsage``).
 
 Simulated: tests drive this connector through a generated in-memory provider double (the transport
 port is the only boundary). Every receipt, evidence ref and tuned-model id is a ``simulated:*``
@@ -280,6 +286,37 @@ def _usage_valid(usage: ProviderUsage) -> bool:
         and bool(usage.currency)
         and all(type(count) is int and count >= 0 for count in counts)
     )
+
+
+HOLD_OVER_CAP = CAP_OVER  # the one fixed hold reason, also used for unverifiable usage
+
+
+def _approved_cap(view: _View) -> tuple[int | None, str | None]:
+    """The journaled approved maximum and currency, or ``None`` for one that is not valid."""
+    recorded = view.maximum_minor_units
+    approved = recorded if type(recorded) is int and recorded >= 0 else None
+    currency = view.currency if isinstance(view.currency, str) and view.currency else None
+    return approved, currency
+
+
+def _cap_status(view: _View) -> str | None:
+    """Compare journaled usage to the journaled cap; ``None`` when the usage itself is invalid."""
+    reported = view.usage
+    if reported is None or not _usage_valid(reported):
+        return None
+    approved, approved_currency = _approved_cap(view)
+    if approved is None or approved_currency is None or reported.currency != approved_currency:
+        # Units differ or are unrecorded (exact, case-sensitive match): the numbers are not
+        # comparable, so fail closed.
+        return CAP_UNKNOWN
+    return CAP_OVER if reported.minor_units > approved else CAP_WITHIN
+
+
+def _hold(view: _View) -> str | None:
+    """A COMPLETED result is released only when its usage is verifiably within the cap."""
+    if view.terminal and view.state is mc.JobState.COMPLETED and _cap_status(view) != CAP_WITHIN:
+        return HOLD_OVER_CAP
+    return None
 
 
 def _append(path: Path, event: Mapping[str, Any]) -> None:
@@ -734,6 +771,9 @@ class ManagedConnector:
             or not view.tuned_model_id
         ):
             raise ValueError("job_not_collectable")
+        hold = _hold(view)
+        if hold is not None:
+            raise ValueError(hold)
         return key, view
 
     def collect(self, job: mc.JobReceipt) -> mc.Candidate:
@@ -762,7 +802,17 @@ class ManagedConnector:
             or candidate.parent_revision != candidate.intent.binding.immutable_revision
         ):
             raise ValueError("candidate_lineage_unverified")
+        hold = _hold(view)
+        if hold is not None:
+            raise ValueError(hold)  # a held job's tuned-model id is never used or released
         return view
+
+    def hold_reason(self, job: mc.JobReceipt) -> str | None:
+        """``over_cap`` when a COMPLETED job's result is held, else ``None``."""
+        view = self._view(self._key_from_ref(job.job_ref))
+        if view.intent_sha != intent_digest(job.intent):
+            raise ValueError("job_receipt_mismatched")
+        return _hold(view)
 
     def handoff_reference(self, candidate: mc.Candidate, recipient: str) -> str:
         """Release the tuned-model id only to a recipient the customer permitted."""
@@ -791,19 +841,8 @@ class ManagedConnector:
             return None
         reported = view.usage
         state = view.state
-        recorded = view.maximum_minor_units
-        approved = recorded if type(recorded) is int and recorded >= 0 else None
-        approved_currency = (
-            view.currency if isinstance(view.currency, str) and view.currency else None
-        )
-        if approved is None or approved_currency is None or reported.currency != approved_currency:
-            # Units differ or are unrecorded (exact, case-sensitive match): the numbers are not
-            # comparable, so fail closed.
-            status = CAP_UNKNOWN
-        elif reported.minor_units > approved:
-            status = CAP_OVER
-        else:
-            status = CAP_WITHIN
+        approved, approved_currency = _approved_cap(view)
+        status = _cap_status(view) or CAP_UNKNOWN
         return ReportedUsage(
             self._job_ref(key),
             reported.currency,

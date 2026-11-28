@@ -977,3 +977,167 @@ def test_c3_negative_journaled_maximum_reports_no_approved_maximum(stack):
     usage = connector.usage(receipt)
     assert usage.cap_status == "cap_unknown" and usage.settleable is False
     assert usage.approved_maximum_minor_units is None
+
+
+# ------------------------------------------- follow-up: over-cap usage is a hard refusal (H1-H6)
+# H1 a COMPLETED job reporting usage over its cap is held as ``over_cap``: no candidate, no handoff
+# H2 missing, non-finite, negative or non-integer usage is unverifiable and held the same way
+# H3 usage that cannot be compared to the approved cap (currency, unrecorded maximum) is held
+# H4 a job exactly at the cap is accepted
+# H5 an under-cap job is unchanged
+# H6 ``hold_reason`` checks the receipt and reports nothing for a job without a result
+TUNED = "simulated:tuned-model-1"
+
+
+def _hand_built(receipt):
+    """What ``collect`` would return; built by hand so handoff is tested without ``collect``."""
+    return mc.Candidate(
+        receipt.intent,
+        receipt.job_ref,
+        receipt.intent.binding.immutable_revision,
+        TUNED,
+        "simulated:managed-replay:hand-built",
+    )
+
+
+def _assert_held(provider, connector, pre, receipt):
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.collect(receipt)
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        pre.collect_candidate(ACTOR, receipt)
+    candidate = _hand_built(receipt)
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.handoff_reference(candidate, "simulated:recipient-1")
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.predict_for_replay(candidate, ({"input_text": "generated-x"},))
+    assert provider.predictions == []
+    assert connector.hold_reason(receipt) == "over_cap"
+
+
+def _assert_accepted(provider, connector, pre, receipt):
+    assert receipt.state is mc.JobState.COMPLETED
+    candidate = pre.collect_candidate(ACTOR, receipt)
+    assert candidate == connector.collect(receipt)
+    assert candidate.artifact_or_serving_revision == TUNED
+    assert connector.handoff_reference(candidate, "simulated:recipient-1") == TUNED
+    assert connector.predict_for_replay(candidate, ({"input_text": "generated-x"},))
+    assert provider.predictions[-1][0] == TUNED
+    assert connector.hold_reason(receipt) is None
+
+
+@pytest.mark.parametrize("minor_units", [10**9, 501])
+def test_h1_completed_job_over_its_cap_is_held_and_never_handed_off(stack, minor_units):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: managed.ProviderUsage("USD", minor_units, 25, 4, 12)
+    receipt = dispatch(pre, intent, reservations)
+    _assert_held(provider, connector, pre, receipt)
+    usage = connector.usage(receipt)  # the real figure stays visible and unsettleable
+    assert usage.incurred_minor_units == minor_units and usage.cap_status == "over_cap"
+    assert usage.settleable is False
+    # a restart replays the hold from the journal alone
+    restarted = managed.ManagedConnector(provider, SETTINGS, connector.root)
+    _assert_held(provider, restarted, mc.Preflight(restarted, pre.current_grant), receipt)
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        None,  # the provider reported no usage
+        managed.ProviderUsage("USD", float("inf"), 25, 4, 12),
+        managed.ProviderUsage("USD", float("nan"), 25, 4, 12),
+        managed.ProviderUsage("USD", -1, 25, 4, 12),
+        managed.ProviderUsage("USD", 5.5, 25, 4, 12),
+        managed.ProviderUsage("USD", 400.0, 25, 4, 12),
+        managed.ProviderUsage("USD", True, 25, 4, 12),
+        managed.ProviderUsage("USD", "400", 25, 4, 12),
+        managed.ProviderUsage("USD", 400, -1, 4, 12),
+        managed.ProviderUsage("", 400, 25, 4, 12),
+    ],
+)
+def test_h2_unverifiable_provider_usage_is_held(stack, reported):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: reported
+    receipt = dispatch(pre, intent, reservations)
+    assert connector.usage(receipt) is None  # unknown, never an invented zero
+    _assert_held(provider, connector, pre, receipt)
+
+
+@pytest.mark.parametrize(
+    "journaled",
+    [
+        {"minor_units": "Infinity"},
+        {"minor_units": "NaN"},
+        {"minor_units": -1},
+        {"minor_units": 5.5},
+        {"minor_units": 400.0},
+        {"minor_units": True},
+        {"minor_units": "400"},
+        {"minor_units": None},
+        {"seconds": -1},
+    ],
+)
+def test_h2b_unverifiable_usage_read_back_from_the_journal_is_held(stack, journaled):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)  # usage 80, within the cap of 500
+    path = connector._journal(connector._key(intent))
+    lines = []
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        if event["event"] == "terminal":
+            event["usage"].update(journaled)
+        lines.append(json.dumps(event))
+    text = "\n".join(lines) + "\n"
+    text = text.replace('"Infinity"', "Infinity").replace('"NaN"', "NaN")  # non-finite JSON
+    path.write_text(text)
+    _assert_held(provider, connector, pre, receipt)
+
+
+@pytest.mark.parametrize("currency", ["JPY", "usd", "XXX"])
+def test_h3_usage_in_another_currency_is_held(stack, currency):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: managed.ProviderUsage(currency, 400, 25, 4, 12)
+    receipt = dispatch(pre, intent, reservations)
+    assert connector.usage(receipt).cap_status == "cap_unknown"
+    _assert_held(provider, connector, pre, receipt)
+
+
+@pytest.mark.parametrize("field", ["maximum_minor_units", "currency"])
+def test_h3b_unrecorded_approved_cap_is_held(stack, field):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+    path = connector._journal(connector._key(intent))
+    lines = []
+    for line in path.read_text().splitlines():
+        event = json.loads(line)
+        event.pop(field, None)
+        lines.append(json.dumps(event))
+    path.write_text("\n".join(lines) + "\n")
+    _assert_held(provider, connector, pre, receipt)
+
+
+def test_h4_job_exactly_at_its_cap_is_accepted(stack):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: managed.ProviderUsage("USD", BOUND.maximum_minor_units, 25, 4, 12)
+    receipt = dispatch(pre, intent, reservations)
+    _assert_accepted(provider, connector, pre, receipt)
+    assert connector.usage(receipt).settleable is True
+
+
+@pytest.mark.parametrize("minor_units", [0, 80, 499])
+def test_h5_under_cap_job_is_unchanged(stack, minor_units):
+    provider, connector, pre, intent, reservations = stack
+    provider._usage = lambda: managed.ProviderUsage("USD", minor_units, 25, 4, 12)
+    receipt = dispatch(pre, intent, reservations)
+    _assert_accepted(provider, connector, pre, receipt)
+    usage = connector.usage(receipt)
+    assert usage.incurred_minor_units == minor_units and usage.cap_status == "within_cap"
+
+
+def test_h6_hold_reason_checks_the_receipt_and_is_none_for_jobs_without_a_result(stack):
+    provider, connector, pre, intent, reservations = stack
+    provider.autocomplete = False
+    live = dispatch(pre, intent, reservations)
+    assert live.state is mc.JobState.RUNNING and connector.hold_reason(live) is None
+    forged = mc.JobReceipt(make_intent("generated-other"), live.state, live.job_ref, "x")
+    with pytest.raises(ValueError, match="job_receipt_mismatched"):
+        connector.hold_reason(forged)
