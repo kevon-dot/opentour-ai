@@ -7,6 +7,7 @@ customer or real-workplace evidence, and no real model is fitted.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 
 import pytest
@@ -1065,11 +1066,13 @@ _BAD_PARTS = [
     "\t",
     "d\x00",
     "\x00",
-    "d​",
-    "​",
-    "﻿d",
-    "d a",
-    "é",  # NFD of "é"
+    "d\u200b",
+    "\u200b",
+    "\ufeffd",
+    "d\u2028a",
+    "d\ud800",  # lone surrogate (Cs): not UTF-8 encodable
+    "\udfff",
+    "e\u0301",  # NFD of U+00E9
     "x" * 257,
 ]
 _BAD_PART_IDS = [
@@ -1083,6 +1086,8 @@ _BAD_PART_IDS = [
     "zwsp-only",
     "bom",
     "line-separator",
+    "lone-surrogate",
+    "lone-surrogate-only",
     "nfd",
     "too-long",
 ]
@@ -1110,8 +1115,8 @@ def test_ledger_reload_refuses_ill_formed_digest_or_arm(bad: str) -> None:
 def test_visually_identical_parts_are_not_charged_twice() -> None:
     # Reviewer vector: "d" vs "d " and NFC vs NFD were two keys and two charges.
     ledger = SpendLedger(spend_cap=10, fits_authorized=1)
-    assert ledger.reserve("d", "é", "generation", 6) == "reserved"
-    for digest_, arm in (("d ", "é"), ("d", "é"), ("d​", "é")):
+    assert ledger.reserve("d", "\u00e9", "generation", 6) == "reserved"
+    for digest_, arm in (("d ", "\u00e9"), ("d", "e\u0301"), ("d\u200b", "\u00e9")):
         with pytest.raises(TuningBenefitError) as err:
             ledger.reserve(digest_, arm, "generation", 6)
         assert err.value.code == "reservation_key_invalid"
@@ -1123,7 +1128,7 @@ def test_well_formed_edge_parts_are_admitted_and_round_trip() -> None:
     longest = "x" * 256
     assert ledger.reserve(longest, longest, "fit", 1) == "reserved"
     assert ledger.reserve("sha256:" + "0" * 64, "real only", "generation", 1) == "reserved"
-    assert ledger.reserve("d", "é", "generation", 1) == "reserved"  # NFC is admitted
+    assert ledger.reserve("d", "\u00e9", "generation", 1) == "reserved"  # NFC is admitted
     assert ledger.settle(longest, longest, "fit", 1) == "settled"
     raw = ledger.to_json()
     restored = SpendLedger.from_json(raw)
@@ -1138,4 +1143,40 @@ def test_ledger_reload_refuses_a_list_subclass_reservation_value() -> None:
 
     raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
     raw["reserved"]["d|a|fit"] = _Row(["fit", 1])
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize("surrogate", ["d\ud800", "\udfff", "\ud800d"])
+def test_lone_surrogate_part_is_refused_before_any_state_change(surrogate: str) -> None:
+    # Re-review vector (Cs): without the category rule, reserve("d\ud800", ...) was admitted and
+    # the ledger then could not be written as UTF-8 (UnicodeEncodeError).
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    assert ledger.reserve("d", "a", "generation", 1) == "reserved"
+    before = ledger.to_json()
+    for digest_, arm in ((surrogate, "a"), ("d", surrogate)):
+        for call in (ledger.reserve, ledger.settle):
+            with pytest.raises(TuningBenefitError) as err:
+                call(digest_, arm, "generation", 1)
+            assert err.value.code == "reservation_key_invalid"
+    assert ledger.to_json() == before and ledger.charged == 0
+    json.dumps(ledger.to_json(), ensure_ascii=False).encode("utf-8")  # still writable
+
+
+@pytest.mark.parametrize("entry", ["reserve", "settle"])
+def test_kind_is_checked_before_the_amount(entry: str) -> None:
+    # Pins the order: a bad kind with a bad amount reports the kind, never the amount.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    with pytest.raises(TuningBenefitError) as kind_first:
+        getattr(ledger, entry)("d", "a", "bogus", -1)
+    assert kind_first.value.code == "reservation_kind_unknown"
+    with pytest.raises(TuningBenefitError) as key_first:
+        getattr(ledger, entry)("d|x", "a", "generation", -1)
+    assert key_first.value.code == "reservation_key_invalid"
+    assert ledger.to_json()["reserved"] == {}
+
+
+@pytest.mark.parametrize("field", ["spend_cap", "fits_authorized", "reserved", "settled"])
+def test_ledger_reload_refuses_a_missing_top_level_field(field: str) -> None:
+    raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
+    del raw[field]
     assert _forged_refusal(raw) == "ledger_forged_reservation"

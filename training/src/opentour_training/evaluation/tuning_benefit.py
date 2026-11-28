@@ -782,6 +782,7 @@ def plan_arms(
 
 LEDGER_KINDS: frozenset[str] = frozenset({"fit", "generation"})
 _KEY_SEPARATOR = "|"
+_LEDGER_FIELDS = ("spend_cap", "fits_authorized", "reserved", "settled")
 # Control, format (zero-width), surrogate and line/paragraph-separator code points make two keys
 # that look identical charge twice, so no key part may carry one.
 _KEY_PART_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
@@ -887,6 +888,7 @@ class SpendLedger:
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> SpendLedger:
+        _need(all(f in raw for f in _LEDGER_FIELDS), "ledger_forged_reservation", "field missing")
         ledger = cls(spend_cap=raw["spend_cap"], fits_authorized=raw["fits_authorized"])
         reserved: dict[str, tuple[str, int]] = {}
         for k, v in raw["reserved"].items():
