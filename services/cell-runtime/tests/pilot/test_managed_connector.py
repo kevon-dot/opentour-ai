@@ -1269,24 +1269,54 @@ def test_h8_verified_excess_wins_over_an_unusable_money_cap(stack, currency, unr
     [
         ("maximum_seconds", True),
         ("maximum_seconds", 60.0),
-        ("maximum_seconds", -1),
         ("maximum_seconds", None),
         ("maximum_steps", True),
         ("maximum_steps", 100.0),
-        ("maximum_steps", -1),
         ("maximum_steps", None),
-        ("maximum_rows", 20.0),  # rows also bound the payload, so only a float can dispatch
+        ("maximum_rows", 20.0),
+        ("maximum_minor_units", 500.0),
+        ("maximum_minor_units", None),
     ],
 )
-def test_h9_missing_or_invalid_intent_bound_is_cap_unverifiable(tmp_path, limit, value):
+def test_h9_intent_bound_that_is_not_exactly_int_is_refused_before_dispatch(tmp_path, limit, value):
+    # OPE-508 L1 decision: a bool, float or missing maximum is refused at dispatch (it used to
+    # dispatch and then be held as ``cap_unverifiable``).
     provider = FakeProvider()
     connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
     intent = make_intent(bound=replace(BOUND, **{limit: value}))
-    pre = mc.Preflight(connector, conformance.standard_grants(BINDING, intent))
-    receipt = connector.submit(intent, managed.serialize_rows(ROWS))
-    assert receipt.state is mc.JobState.COMPLETED
-    _assert_held(provider, connector, pre, receipt, "cap_unverifiable")
-    assert connector.usage(receipt).cap_status == "cap_unknown"
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        connector.submit(intent, managed.serialize_rows(ROWS))
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
+
+
+@pytest.mark.parametrize(
+    "limit", ["maximum_minor_units", "maximum_seconds", "maximum_rows", "maximum_steps"]
+)
+def test_h9_negative_intent_bound_is_refused_before_dispatch(tmp_path, limit):
+    # Review of #241, F4 (owner-delegate decision: refuse before spend). A negative maximum used
+    # to dispatch and then be held as ``cap_unverifiable``; it is now refused on a direct
+    # ``submit`` that bypasses Preflight, before anything is journaled or sent.
+    provider = FakeProvider()
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent(bound=replace(BOUND, **{limit: -1}))
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        connector.submit(intent, managed.serialize_rows(ROWS))
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
+
+
+@pytest.mark.parametrize("currency", ["", "usd", "US", "USDX", " USD", None, 840])
+def test_h9_invalid_intent_currency_is_refused_before_dispatch(tmp_path, currency):
+    provider = FakeProvider()
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent(bound=replace(BOUND, currency=currency))
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        connector.submit(intent, managed.serialize_rows(ROWS))
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        managed.intent_digest(intent)
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
 
 
 @pytest.mark.parametrize("journaled_cap", [True, 500.0, False, 0.0])
@@ -1354,3 +1384,124 @@ def test_h12_hold_reason_is_none_for_failed_and_unknown_jobs(stack):
     path.write_text("\n".join(kept) + "\n")
     unknown = connector.status(done)
     assert unknown.state is mc.JobState.UNKNOWN and connector.hold_reason(unknown) is None
+
+
+# ------------------------------------ OPE-508 follow-ups: L1 exact-int bounds, journaled maxima
+# L1a an intent bound whose maximum is an ``int`` subclass is refused at dispatch
+# L1b a receipt whose bound is an ``int`` subclass is refused everywhere; it can no longer turn a
+#     genuine ``over_cap`` into ``cap_unverifiable`` (the reviewer's reproduction)
+# L1c dispatch journals all four maxima and the currency
+# L1d release compares usage to the journaled maxima, not the caller's
+# L1e a journal without a dimension maximum (an older journal) is ``cap_unverifiable``
+MAXIMA = {
+    "maximum_minor_units": "minor_units",
+    "maximum_seconds": "seconds",
+    "maximum_rows": "rows",
+    "maximum_steps": "steps",
+}
+
+
+class SneakyInt(int):
+    """An ``int`` subclass. It serializes like the plain int, so it matches the intent digest."""
+
+
+@pytest.mark.parametrize("limit", sorted(MAXIMA))
+def test_l1a_int_subclass_intent_bound_is_refused_before_dispatch(stack, limit):
+    provider, connector, _, intent, _ = stack
+    forged = replace(intent, bound=replace(BOUND, **{limit: SneakyInt(getattr(BOUND, limit))}))
+    assert managed._canonical([getattr(forged.bound, limit)]) == managed._canonical(
+        [getattr(BOUND, limit)]
+    )  # the precondition of the defect: JSON alone cannot tell them apart
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        connector.submit(forged, managed.serialize_rows(ROWS))
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        managed.intent_digest(forged)
+    assert provider.uploaded == [] and provider.executions == 0
+    assert journal_text(connector) == ""
+
+
+@pytest.mark.parametrize("limit", sorted(MAXIMA))
+def test_l1b_int_subclass_receipt_cannot_reclassify_a_genuine_over_cap(stack, limit):
+    provider, connector, pre, intent, reservations = stack
+    used = MAXIMA[limit]
+    provider._usage = lambda: _usage_with(**{used: getattr(BOUND, limit) + 1})
+    receipt = dispatch(pre, intent, reservations)
+    assert connector.hold_reason(receipt) == "over_cap"
+    sneaky = replace(intent, bound=replace(BOUND, **{limit: SneakyInt(getattr(BOUND, limit))}))
+    forged = replace(receipt, intent=sneaky)
+    candidate = replace(_hand_built(receipt), intent=sneaky)
+    calls = [
+        lambda: connector.hold_reason(forged),
+        lambda: connector.collect(forged),
+        lambda: connector.usage(forged),
+        lambda: connector.status(forged),
+        lambda: connector.lookup(sneaky),
+        lambda: connector.cancel(forged),
+        lambda: connector.retention_disposition(forged),
+        lambda: connector.dispose_training_file(forged),
+        lambda: connector.handoff_reference(candidate, "simulated:recipient-1"),
+        lambda: connector.predict_for_replay(candidate, ({"input_text": "generated-x"},)),
+    ]
+    for call in calls:
+        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+            call()
+    assert provider.predictions == [] and provider.cancel_calls == 0
+    _assert_held(provider, connector, pre, receipt, "over_cap")  # the genuine reason stands
+    assert '"cancel_requested"' not in journal_text(connector)
+
+
+def test_l1c_dispatch_journals_all_four_maxima_and_the_currency(stack):
+    provider, connector, pre, intent, reservations = stack
+    dispatch(pre, intent, reservations)
+    first = json.loads(connector._journal(connector._key(intent)).read_text().splitlines()[0])
+    assert first["event"] == "dispatching"
+    assert {name: first.get(name) for name in ("currency", *MAXIMA)} == {
+        "currency": "USD",
+        "maximum_minor_units": 500,
+        "maximum_seconds": 60,
+        "maximum_rows": 20,
+        "maximum_steps": 100,
+    }
+
+
+@pytest.mark.parametrize("limit", ["maximum_seconds", "maximum_rows", "maximum_steps"])
+def test_l1d_release_compares_usage_to_the_journaled_maxima_not_the_callers(stack, limit):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)  # usage 80, 25, 4, 12: within the caller's bound
+    _assert_accepted(provider, connector, pre, receipt)
+    provider.predictions.clear()  # the accepted replay above; the held one below must add none
+    journaled = getattr(managed.ProviderUsage("USD", 80, 25, 4, 12), MAXIMA[limit]) - 1
+
+    def lower(event):
+        if event["event"] == "dispatching":
+            event[limit] = journaled
+
+    _rewrite_journal(connector, intent, lower)
+    _assert_held(provider, connector, pre, receipt, "over_cap")
+    usage = connector.usage(receipt)
+    assert usage.cap_status == "over_cap" and usage.settleable is False
+
+
+@pytest.mark.parametrize("limit", ["maximum_seconds", "maximum_rows", "maximum_steps"])
+def test_l1e_journal_without_a_dimension_maximum_is_cap_unverifiable(stack, limit):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+    _rewrite_journal(connector, intent, lambda event: event.pop(limit, None))
+    _assert_held(provider, connector, pre, receipt, "cap_unverifiable")
+    usage = connector.usage(receipt)
+    assert usage.cap_status == "cap_unknown" and usage.settleable is False
+
+
+@pytest.mark.parametrize("journaled", [True, 60.0, "60", -1])
+def test_l1e_journaled_dimension_maximum_that_is_not_a_plain_int_is_cap_unverifiable(
+    stack, journaled
+):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+
+    def corrupt(event):
+        if event["event"] == "dispatching":
+            event["maximum_seconds"] = journaled
+
+    _rewrite_journal(connector, intent, corrupt)
+    _assert_held(provider, connector, pre, receipt, "cap_unverifiable")
