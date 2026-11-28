@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from html import unescape
+from threading import Barrier
 from urllib.parse import urlencode
 
 import jwt
@@ -188,6 +190,7 @@ def test_current_browser_identity_and_form_controls_deny_without_catalog_disclos
         page.request(token=False, extras=((b"x-authenticated-subject", _SUBJECT.encode()),)),
         page.request(token=page.issue(sub="generated-other")),
         page.request(token=page.issue(iss="https://other.example.test")),
+        page.request(token=page.issue(aud="https://other.example.test")),
         page.request(token=page.issue(iat=1, auth_time=1, exp=2)),
         page.request(query=b"tenant=generated-other"),
     ):
@@ -205,6 +208,64 @@ def test_current_browser_identity_and_form_controls_deny_without_catalog_disclos
     assert page.setup.protocol() == before
     assert page.request(form={**form, "source_pair": "a" * 64})[0] == 403
     assert page.setup.service.inspect(actor=page.setup.owner)["current"] is None
+
+
+def test_current_private_page_renews_and_can_withdraw_when_catalog_is_held(page):
+    def apply(operation, base):
+        status, _, current = page.request()
+        assert status == 200
+        form = page.form(current, operation=operation, base=base)
+        status, _, preview = page.request(form=form)
+        assert status == 200
+        body = page.submission(form, preview, page.kit.customer, page.kit.operator)
+        status, _, receipt = page.request(form=body)
+        assert status == 200 and "Saved settings" in receipt
+        return page.setup.service.inspect(actor=page.setup.owner)["current"]
+
+    initial = apply("save", "initial")
+    page.setup.policy["mandate"].update(mandate_id="generated-renewed-settings", max_runs=1)
+    renewed = apply("renew", initial["revision"])
+    assert renewed["prior_revision"] == initial["revision"] and renewed["state"] == "active"
+    assert renewed["policy"]["mandate"]["max_runs"] == 1
+
+    save(page.binding, {**page.config, "connection_file": None, "connection_revision": None})
+    before = page.setup.protocol()
+    assert 'name="source_pair" required' not in page.request()[2]
+    paused = apply("pause", renewed["revision"])
+    assert paused["prior_revision"] == renewed["revision"] and paused["state"] == "pause"
+    revoked = apply("revoke", paused["revision"])
+    assert revoked["prior_revision"] == paused["revision"] and revoked["state"] == "revoke"
+    assert page.setup.protocol() == before
+
+
+def test_two_signed_browser_edits_on_one_reviewed_revision_commit_only_once(page):
+    status, _, original = page.request()
+    assert status == 200
+    signed = []
+    for name in ("generated-competing-edit-a", "generated-competing-edit-b"):
+        form = page.form(original)
+        policy = json.loads(form["policy"])
+        policy["mandate"]["mandate_id"] = name
+        form["policy"] = json.dumps(policy)
+        status, _, preview = page.request(form=form)
+        assert status == 200
+        signed.append(page.submission(form, preview, page.kit.customer, page.kit.operator))
+
+    together = Barrier(2, timeout=5)
+
+    def submit(packet):
+        together.wait()
+        return page.request(form=packet)
+
+    with ThreadPoolExecutor(max_workers=2) as concurrent:
+        outcomes = sorted(concurrent.map(submit, signed), key=lambda result: result[0])
+    assert [status for status, _, _ in outcomes] == [200, 409]
+    current = page.setup.service.inspect(actor=page.setup.owner)["current"]
+    assert current["revision"] in outcomes[0][2]
+    assert 'href="/owner/setup">Review current settings</a>' in outcomes[1][2]
+    with page.setup.service.ledger._db(write=False) as db:
+        assert db.execute("SELECT count(*) FROM owner_settings_revisions").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM mandates").fetchone()[0] == 2
 
 
 def test_gateway_binding_change_before_commit_rolls_back_settings(page, monkeypatch):
