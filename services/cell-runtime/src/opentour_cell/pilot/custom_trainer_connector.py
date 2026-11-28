@@ -23,7 +23,8 @@ placeholders resolved server-side and never logged or placed in errors.
 Not proven: no real customer trainer, GPU, paid compute, provider or real credential is touched.
 Tests prove software behavior only and establish no provider or customer evidence. Passing here
 yields ``EvidenceTier.FIXTURE`` at most (see ``integration_tier``); real-trainer qualification and
-customer witnessing are unsatisfied external gates.
+customer witnessing are unsatisfied external gates. ``CUSTOMER_WITNESSED`` is unreachable until an
+issuer-authenticated ``CustomerWitnessVerifier`` is injected (pending OPE-566 and OPE-582).
 """
 
 from __future__ import annotations
@@ -34,7 +35,9 @@ import hmac
 import json
 import math
 import os
+import re
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -212,20 +215,181 @@ def check_compatibility(
     return verdict("compatible")
 
 
-def integration_tier(
-    trainer_origin: str, qualification_ref: str | None, customer_witness_ref: str | None
-) -> EvidenceTier:
-    """Classify an integration. A generated or simulated trainer is FIXTURE whatever refs claim."""
-    generated = trainer_origin.startswith(("generated-", "simulated:")) or trainer_origin.endswith(
-        ".invalid"
+# ---- Integration evidence tier ----
+#
+# The tiers are FIXTURE < SOFTWARE_QUALIFIED < CUSTOMER_WITNESSED. A caller can claim anything, so
+# every step up fails closed:
+#
+# * A generated, simulated, reference or fixture trainer is FIXTURE whatever is supplied. The
+#   identity is NFKC-normalised and casefolded before it is matched, and an identity carrying
+#   invisible, control or non-ASCII characters is refused outright (FIXTURE), so case, fullwidth,
+#   zero-width and homoglyph variants of a fixture marker cannot pass as a customer trainer.
+# * SOFTWARE_QUALIFIED needs a non-blank qualification reference (still caller-asserted).
+# * CUSTOMER_WITNESSED needs software qualification plus a structured ``CustomerWitness`` record
+#   (never a bare string) bound to the exact tenant, engagement, trainer identity, trainer revision
+#   and job or run under classification, naming the customer-owner witness role, and authenticated
+#   by an injected ``CustomerWitnessVerifier``. No issuer-authenticated witness exists yet (the
+#   OPE-566 verifier and the OPE-582 issuer keys are pending), so no verifier is wired and this
+#   module never builds one: without a verifier, or when the verifier refuses or raises, the result
+#   is at most SOFTWARE_QUALIFIED with the reason ``customer_witness_unverifiable`` or
+#   ``customer_witness_refused``.
+
+WITNESS_ROLE_CUSTOMER_OWNER = "customer_owner"
+_WITNESS_ROLES = frozenset({WITNESS_ROLE_CUSTOMER_OWNER})
+# Any one of these tokens anywhere in a normalised trainer identity marks a fixture trainer.
+_FIXTURE_TOKENS = frozenset({"generated", "simulated", "reference", "fixture", "sentinel"})
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Co", "Cs", "Cn", "Zl", "Zp"})
+
+
+@dataclass(frozen=True)
+class WitnessSubject:
+    """The exact integration a witness must be about, supplied by the classifying caller."""
+
+    tenant: str
+    engagement: str
+    trainer_id: str
+    trainer_revision: str
+    job_ref: str
+
+
+@dataclass(frozen=True)
+class CustomerWitness:
+    """A structured customer-witness record. Unverified data until a verifier authenticates it.
+
+    ``attestation`` is the opaque issuer evidence (for example signatures under the OPE-566
+    profile) that a ``CustomerWitnessVerifier`` checks. This module never interprets it.
+    """
+
+    tenant: str
+    engagement: str
+    trainer_id: str
+    trainer_revision: str
+    job_ref: str
+    witness_role: str
+    attestation: str
+
+
+class CustomerWitnessVerifier(Protocol):
+    """Injection seam for an issuer-authenticated customer-witness verifier.
+
+    Must return exactly ``True`` only when ``witness`` is authenticated by its issuer and is about
+    ``subject``. Any other return value, and any exception, is a refusal. No implementation exists
+    in this module; one is pending OPE-566 and the OPE-582 key ceremony.
+    """
+
+    def verify_customer_witness(
+        self, witness: CustomerWitness, subject: WitnessSubject
+    ) -> bool: ...
+
+
+@dataclass(frozen=True)
+class IntegrationVerdict:
+    tier: EvidenceTier
+    reason: str
+
+
+def _invisible(text: str) -> bool:
+    return any(unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in text)
+
+
+def _trainer_key(origin: object) -> str | None:
+    """NFKC, casefold and strip a trainer identity; ``None`` when it is not a clean identity."""
+    if not isinstance(origin, str) or _invisible(origin):
+        return None
+    key = unicodedata.normalize("NFKC", origin).casefold().strip()
+    if not key or _invisible(key) or not all(" " <= ch <= "~" for ch in key):
+        return None
+    return key
+
+
+def is_fixture_trainer(origin: object) -> bool:
+    """True for a generated, simulated, reference or fixture trainer, or an unclean identity."""
+    key = _trainer_key(origin)
+    if key is None:
+        return True
+    tokens = {token for token in re.split(r"[^a-z0-9]+", key) if token}
+    return bool(tokens & _FIXTURE_TOKENS) or key.rstrip(".").endswith(".invalid")
+
+
+def _clean_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and not _invisible(value)
+
+
+def classify_integration(
+    trainer_origin: str,
+    qualification_ref: str | None,
+    customer_witness: CustomerWitness | None = None,
+    *,
+    subject: WitnessSubject | None = None,
+    witness_verifier: CustomerWitnessVerifier | None = None,
+) -> IntegrationVerdict:
+    """Classify an integration with a fixed reason. Fails closed at every step up the ladder."""
+    if _trainer_key(trainer_origin) is None:
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "trainer_identity_unverifiable")
+    if is_fixture_trainer(trainer_origin):
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "fixture_trainer")
+    if not _clean_text(qualification_ref):
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "software_qualification_absent")
+
+    def capped(reason: str) -> IntegrationVerdict:
+        return IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, reason)
+
+    witness = customer_witness
+    if witness is None:
+        return capped("customer_witness_absent")
+    if type(witness) is not CustomerWitness:
+        return capped("customer_witness_unstructured")
+    bound = (
+        witness.tenant,
+        witness.engagement,
+        witness.trainer_id,
+        witness.trainer_revision,
+        witness.job_ref,
     )
-    if generated or not trainer_origin:
-        return EvidenceTier.FIXTURE
-    if customer_witness_ref:
-        return EvidenceTier.CUSTOMER_WITNESSED
-    if qualification_ref:
-        return EvidenceTier.SOFTWARE_QUALIFIED
-    return EvidenceTier.FIXTURE
+    if not all(_clean_text(value) for value in (*bound, witness.witness_role, witness.attestation)):
+        return capped("customer_witness_malformed")
+    if witness.witness_role not in _WITNESS_ROLES:
+        return capped("customer_witness_role_refused")
+    if (
+        type(subject) is not WitnessSubject
+        or subject.trainer_id != trainer_origin
+        or bound
+        != (
+            subject.tenant,
+            subject.engagement,
+            subject.trainer_id,
+            subject.trainer_revision,
+            subject.job_ref,
+        )
+    ):
+        return capped("customer_witness_binding_mismatch")
+    if witness_verifier is None:
+        return capped("customer_witness_unverifiable")
+    try:
+        verified = witness_verifier.verify_customer_witness(witness, subject)
+    except Exception:  # any verifier failure is a refusal, never "skip and continue"
+        return capped("customer_witness_refused")
+    if verified is not True:
+        return capped("customer_witness_refused")
+    return IntegrationVerdict(EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified")
+
+
+def integration_tier(
+    trainer_origin: str,
+    qualification_ref: str | None,
+    customer_witness: CustomerWitness | None = None,
+    *,
+    subject: WitnessSubject | None = None,
+    witness_verifier: CustomerWitnessVerifier | None = None,
+) -> EvidenceTier:
+    """The tier alone; ``classify_integration`` holds the rules and gives the reason."""
+    return classify_integration(
+        trainer_origin,
+        qualification_ref,
+        customer_witness,
+        subject=subject,
+        witness_verifier=witness_verifier,
+    ).tier
 
 
 def sign_result(secret: str, result: TrainerResult | Mapping[str, str]) -> str:

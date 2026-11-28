@@ -22,14 +22,20 @@ from opentour_cell.pilot import trainer_conformance as tc
 from opentour_cell.pilot.connector_ext import EvidenceTier, Usage
 from opentour_cell.pilot.custom_trainer_connector import (
     ADAPTER_VERSION,
+    WITNESS_ROLE_CUSTOMER_OWNER,
     Credential,
+    CustomerWitness,
     CustomTrainerConnector,
+    IntegrationVerdict,
     TrainerJobRequest,
     TrainerRegistration,
     TrainerUsage,
     TrainerView,
+    WitnessSubject,
     check_compatibility,
+    classify_integration,
     integration_tier,
+    is_fixture_trainer,
     replay_matches,
     settle_callback,
     sign_result,
@@ -364,6 +370,60 @@ def test_trainer_quote_above_authorized_bound_is_refused(tmp_path):
 # ---- A6: evidence tiers ----
 
 
+REAL_ORIGIN = "customer-trainer-a"
+WITNESS_SUBJECT = WitnessSubject(
+    tenant="tenant-sentinel-1",
+    engagement="engagement-sentinel-1",
+    trainer_id=REAL_ORIGIN,
+    trainer_revision="trainer-revision-sentinel-1",
+    job_ref="job-sentinel-1",
+)
+
+
+def _witness(**changes):
+    base = CustomerWitness(
+        tenant=WITNESS_SUBJECT.tenant,
+        engagement=WITNESS_SUBJECT.engagement,
+        trainer_id=WITNESS_SUBJECT.trainer_id,
+        trainer_revision=WITNESS_SUBJECT.trainer_revision,
+        job_ref=WITNESS_SUBJECT.job_ref,
+        witness_role=WITNESS_ROLE_CUSTOMER_OWNER,
+        attestation="generated-attestation-sentinel",
+    )
+    return replace(base, **changes)
+
+
+class AcceptingWitnessVerifierDouble:
+    """Test double only: accepts every record. No production verifier exists (OPE-566/OPE-582)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def verify_customer_witness(self, witness, subject):
+        self.calls.append((witness, subject))
+        return True
+
+
+class RefusingWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        return False
+
+
+class RaisingWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        raise RuntimeError("generated verifier failure")
+
+
+class TruthyWitnessVerifierDouble:
+    def verify_customer_witness(self, witness, subject):
+        return "yes"
+
+
+def _classify(origin=REAL_ORIGIN, qualification="qualification-1", witness=None, **kwargs):
+    kwargs.setdefault("subject", replace(WITNESS_SUBJECT, trainer_id=origin))
+    return classify_integration(origin, qualification, witness, **kwargs)
+
+
 def test_generated_trainer_is_fixture_tier_whatever_refs_are_claimed():
     for origin in ("generated-reference-trainer", "simulated:trainer", "trainer.generated.invalid"):
         assert integration_tier(origin, "qual-ref", "witness-ref") is EvidenceTier.FIXTURE
@@ -371,12 +431,189 @@ def test_generated_trainer_is_fixture_tier_whatever_refs_are_claimed():
 
 
 def test_real_origin_tiers_need_their_own_refs():
-    assert integration_tier("customer-trainer-a", None, None) is EvidenceTier.FIXTURE
-    assert integration_tier("customer-trainer-a", "qualification-1", None) is (
+    assert integration_tier(REAL_ORIGIN, None, None) is EvidenceTier.FIXTURE
+    assert integration_tier(REAL_ORIGIN, "  ", None) is EvidenceTier.FIXTURE
+    assert integration_tier(REAL_ORIGIN, "qualification-1", None) is (
         EvidenceTier.SOFTWARE_QUALIFIED
     )
-    assert integration_tier("customer-trainer-a", "qualification-1", "witness-1") is (
-        EvidenceTier.CUSTOMER_WITNESSED
+
+
+def test_bare_witness_string_never_reaches_customer_witnessed():
+    # The old classifier returned CUSTOMER_WITNESSED for any non-empty string.
+    verifier = AcceptingWitnessVerifierDouble()
+    for bare in ("witness-1", "customer_witnessed", "signed-by-customer"):
+        verdict = _classify(witness=bare, witness_verifier=verifier)
+        assert verdict == IntegrationVerdict(
+            EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unstructured"
+        )
+        assert integration_tier(REAL_ORIGIN, "qualification-1", bare) is (
+            EvidenceTier.SOFTWARE_QUALIFIED
+        )
+    assert verifier.calls == []
+
+
+def test_empty_or_whitespace_witness_is_not_a_witness():
+    verifier = AcceptingWitnessVerifierDouble()
+    for bare in ("", " ", "\t\n"):
+        assert _classify(witness=bare, witness_verifier=verifier).tier is (
+            EvidenceTier.SOFTWARE_QUALIFIED
+        )
+    for field_name in ("tenant", "engagement", "trainer_id", "job_ref", "attestation"):
+        for blank in ("", "   ", "job​"):
+            verdict = _classify(witness=_witness(**{field_name: blank}), witness_verifier=verifier)
+            assert verdict == IntegrationVerdict(
+                EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_malformed"
+            )
+    assert verifier.calls == []
+
+
+def test_structured_witness_without_a_verifier_is_unverifiable():
+    verdict = _classify(witness=_witness())
+    assert verdict == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_unverifiable"
+    )
+    assert integration_tier(
+        REAL_ORIGIN, "qualification-1", _witness(), subject=WITNESS_SUBJECT
+    ) is (EvidenceTier.SOFTWARE_QUALIFIED)
+
+
+def test_a_verifier_that_refuses_raises_or_answers_truthy_is_a_refusal():
+    for verifier in (
+        RefusingWitnessVerifierDouble(),
+        RaisingWitnessVerifierDouble(),
+        TruthyWitnessVerifierDouble(),
+    ):
+        verdict = _classify(witness=_witness(), witness_verifier=verifier)
+        assert verdict == IntegrationVerdict(
+            EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_refused"
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["tenant", "engagement", "trainer_id", "trainer_revision", "job_ref"]
+)
+def test_witness_for_another_subject_is_refused_before_verification(field_name):
+    verifier = AcceptingWitnessVerifierDouble()
+    wrong = _witness(**{field_name: "other-" + getattr(WITNESS_SUBJECT, field_name)})
+    verdict = _classify(witness=wrong, witness_verifier=verifier)
+    assert verdict == IntegrationVerdict(
+        EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_binding_mismatch"
+    )
+    # A case-only difference is a different binding, not a normalised match.
+    upper = _witness(**{field_name: getattr(WITNESS_SUBJECT, field_name).upper()})
+    assert _classify(witness=upper, witness_verifier=verifier).tier is (
+        EvidenceTier.SOFTWARE_QUALIFIED
+    )
+    assert verifier.calls == []
+
+
+def test_witness_needs_a_subject_for_this_trainer_and_the_customer_owner_role():
+    verifier = AcceptingWitnessVerifierDouble()
+    assert _classify(witness=_witness(), subject=None, witness_verifier=verifier).reason == (
+        "customer_witness_binding_mismatch"
+    )
+    other_trainer = replace(WITNESS_SUBJECT, trainer_id="customer-trainer-b")
+    assert _classify(
+        witness=_witness(), subject=other_trainer, witness_verifier=verifier
+    ).reason == ("customer_witness_binding_mismatch")
+    for role in ("operator_custodian", "Customer_Owner", "auditor"):
+        verdict = _classify(witness=_witness(witness_role=role), witness_verifier=verifier)
+        assert verdict == IntegrationVerdict(
+            EvidenceTier.SOFTWARE_QUALIFIED, "customer_witness_role_refused"
+        )
+    assert verifier.calls == []
+
+
+def test_witness_cannot_stand_in_for_missing_software_qualification():
+    verdict = _classify(
+        qualification=None, witness=_witness(), witness_verifier=AcceptingWitnessVerifierDouble()
+    )
+    assert verdict == IntegrationVerdict(EvidenceTier.FIXTURE, "software_qualification_absent")
+
+
+def test_duck_typed_witness_record_is_unstructured():
+    class LookalikeWitness:
+        tenant = WITNESS_SUBJECT.tenant
+        engagement = WITNESS_SUBJECT.engagement
+        trainer_id = WITNESS_SUBJECT.trainer_id
+        trainer_revision = WITNESS_SUBJECT.trainer_revision
+        job_ref = WITNESS_SUBJECT.job_ref
+        witness_role = WITNESS_ROLE_CUSTOMER_OWNER
+        attestation = "generated-attestation-sentinel"
+
+    verdict = _classify(
+        witness=LookalikeWitness(), witness_verifier=AcceptingWitnessVerifierDouble()
+    )
+    assert verdict.reason == "customer_witness_unstructured"
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "Generated-trainer",
+        "GENERATED-trainer",
+        "GENERATED-",
+        "generated_trainer",
+        "Simulated:trainer",
+        "acme-reference-trainer",
+        "Reference-Trainer",
+        "FIXTURE trainer",
+        "Ｇｅｎｅｒａｔｅｄ-trainer",  # fullwidth "Generated"
+        "ＧＥＮＥＲＡＴＥＤ－trainer",  # fullwidth upper
+        "gen​erated-trainer",  # zero-width space
+        "​generated-trainer",
+        "generated⁠-trainer",  # word joiner
+        "﻿customer-trainer-a",  # byte-order mark on an otherwise real id
+        "gеnerated-trainer",  # Cyrillic homoglyph
+        "trainer.GENERATED.INVALID",
+        "customer-trainer.invalid.",
+        "  ",
+    ],
+)
+def test_generated_variants_are_fixture_even_with_a_verified_witness(origin):
+    verifier = AcceptingWitnessVerifierDouble()
+    verdict = _classify(
+        origin=origin, witness=_witness(trainer_id=origin), witness_verifier=verifier
+    )
+    assert verdict.tier is EvidenceTier.FIXTURE
+    assert verdict.reason in ("fixture_trainer", "trainer_identity_unverifiable")
+    assert is_fixture_trainer(origin)
+    assert verifier.calls == []
+
+
+def test_reference_trainer_with_a_valid_looking_witness_stays_fixture():
+    verifier = AcceptingWitnessVerifierDouble()
+    for origin in ("generated-reference-trainer", TRAINER_VERSION, "reference-trainer"):
+        witness = _witness(trainer_id=origin, trainer_revision=TRAINER_VERSION)
+        subject = replace(WITNESS_SUBJECT, trainer_id=origin, trainer_revision=TRAINER_VERSION)
+        verdict = _classify(
+            origin=origin, witness=witness, subject=subject, witness_verifier=verifier
+        )
+        assert verdict == IntegrationVerdict(EvidenceTier.FIXTURE, "fixture_trainer")
+    assert verifier.calls == []
+
+
+def test_non_string_trainer_identity_is_fixture():
+    for origin in (None, 7, b"customer-trainer-a"):
+        assert integration_tier(origin, "qualification-1", _witness()) is EvidenceTier.FIXTURE
+
+
+def test_customer_witnessed_only_with_an_injected_verifier_that_authenticates_the_record():
+    verifier = AcceptingWitnessVerifierDouble()
+    verdict = _classify(witness=_witness(), witness_verifier=verifier)
+    assert verdict == IntegrationVerdict(
+        EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified"
+    )
+    assert verifier.calls == [(_witness(), WITNESS_SUBJECT)]
+    assert (
+        integration_tier(
+            REAL_ORIGIN,
+            "qualification-1",
+            _witness(),
+            subject=WITNESS_SUBJECT,
+            witness_verifier=AcceptingWitnessVerifierDouble(),
+        )
+        is EvidenceTier.CUSTOMER_WITNESSED
     )
 
 
