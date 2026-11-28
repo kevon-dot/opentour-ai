@@ -265,66 +265,135 @@ def read_dockerfile(path: Path = GPU / "trainer.Dockerfile") -> str:
     return path.read_bytes().decode("utf-8", "surrogateescape")
 
 
-# Printable ASCII and tab only. \n separates lines and one trailing \r per line is dropped.
+# Printable ASCII and tab only, checked after one trailing \r per line is dropped (so a CRLF
+# file passes). BuildKit drops every trailing \r; a second one is still refused here.
 DOCKERFILE_FORBIDDEN = re.compile(r"[^\t\x20-\x7e]")
-# BuildKit's line-continuation test and trim (default escape character `\`).
-CONTINUATION = re.compile(r"\\[ \t]*$")
-CONTINUATION_TRIM = re.compile(r"([^\\])\\[ \t]*$")
+# BuildKit's line model, rule for rule (frontend/dockerfile/parser/parser.go, the same in every
+# release checked: v0.11.6, v0.12.5, v0.15.2, v0.18.2, v0.21.1, v0.24.0 and master). Lines split
+# on \n only (scanLines), every trailing \r is dropped (trimNewline), and every trim and blank
+# test uses Go's unicode.IsSpace, which, unlike Python's str.strip(), leaves \x1c-\x1f alone.
+GO_SPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+# BuildKit's continuation regex for the default escape `\`, used both to test a line and to trim
+# it: `\` continues a line only after a character other than `\`, or alone on the line. So an
+# escaped backslash (`foo \\`) ends the instruction, and group 1 is what the trim keeps.
+CONTINUATION = re.compile(r"([^\\])\\[ \t]*\Z|\A\\[ \t]*\Z")
+# BuildKit's reWhitespace: splitCommand splits the keyword off with it, and the arguments of
+# FROM, COPY, ADD and the like are split with it. Python's str.split() also splits on \x1c-\x1f.
+BLANKS = re.compile(r"[\t\v\f\r ]+")
+# Parser directives. parser.DetectSyntax, which picks the frontend image that builds the file,
+# also takes `//syntax=` or a JSON document, and reads past a byte-order mark and a `#!` line.
+# Matched on every line, so a directive anywhere is refused, not only where BuildKit reads one.
+DIRECTIVE = re.compile(r"^\s*(?:#|//)\s*(?:escape|syntax|check)\s*=", re.I | re.M)
+
+
+def go_trim_left(text: str) -> str:
+    return text.lstrip(GO_SPACE)
+
+
+def go_trim_space(text: str) -> str:
+    return text.strip(GO_SPACE)
+
+
+def continuation(line: str) -> tuple[str, bool]:
+    """BuildKit's trimContinuationCharacter: (the line without a trailing `\\`, continued)."""
+    if CONTINUATION.search(line):
+        return CONTINUATION.sub(r"\1", line), True
+    return line, False
+
+
+def has_parser_directive(text: str) -> bool:
+    body = text.removeprefix("\ufeff")
+    if DIRECTIVE.search(body):
+        return True
+    if body.startswith("#!"):
+        body = body.partition("\n")[2]
+    try:
+        document = json.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(document, dict) and any(str(key).lower() == "syntax" for key in document)
+
+
+def dockerfile_instructions(text: str) -> tuple[list[str], list[str]]:
+    """Return (hazards, instructions): each instruction joined exactly as BuildKit's parser
+    joins it and trimmed as splitCommand trims it. Constructs BuildKit accepts but that only
+    obscure what it builds are hazards; the join still follows BuildKit through them."""
+    hazards: list[str] = []
+    # BuildKit splits lines on \n only. str.splitlines() also breaks on \r, \v, \f,
+    # \x1c-\x1e, \x85, U+2028 and U+2029, which BuildKit keeps inside the line, so a `#` after
+    # one of them would look like a comment here and run as shell there.
+    physical = text.split("\n")
+    if any(DOCKERFILE_FORBIDDEN.search(line.removesuffix("\r")) for line in physical):
+        hazards.append("dockerfile_non_ascii_or_control")
+    if physical[-1] == "":
+        physical.pop()  # what follows the final \n is not a line
+    lines = [line.rstrip("\r") for line in physical]
+    if lines:
+        lines[0] = lines[0].removeprefix("\ufeff")  # discardBOM
+    instructions: list[str] = []
+    index = 0
+    while index < len(lines):
+        # An instruction's first line is trimmed on the left, and a comment there is no line.
+        first = go_trim_left(lines[index])
+        index += 1
+        if first.startswith("#"):
+            continue
+        if go_trim_space(first) == "\\":
+            hazards.append("dockerfile_lone_continuation_line")
+        joined, continued = continuation(first)
+        if not continued and not joined:
+            continue
+        while continued and index < len(lines):
+            line = lines[index]
+            index += 1
+            if go_trim_left(line).startswith("#"):
+                # BuildKit skips a comment line inside a continuation. The real file has none.
+                hazards.append("dockerfile_comment_in_continuation")
+                continue
+            if not go_trim_left(line):
+                # BuildKit skips an empty or blank line inside a continuation and keeps joining,
+                # so `WORKDIR /x \` + blank line swallows the next instruction (for example
+                # USER). Refused; the skip is still emulated so the other checks see what
+                # BuildKit builds.
+                hazards.append("dockerfile_empty_continuation_line")
+                continue
+            if go_trim_space(line) == "\\":
+                # BuildKit's trim drops a lone `\`, so the line adds nothing but obscures the join.
+                hazards.append("dockerfile_lone_continuation_line")
+            piece, continued = continuation(line)
+            # BuildKit appends a continued line verbatim: no space is added, so `A="x"\` followed
+            # by an unindented `B=y` is the single word `A=xB=y` and B is never set. Refused,
+            # and joined exactly as BuildKit does so the allowlists compare what it builds.
+            if joined[-1:] not in ("", " ", "\t") and piece[:1] not in ("", " ", "\t"):
+                hazards.append("dockerfile_continuation_without_separator")
+            joined += piece
+        if continued:
+            # BuildKit builds a file that ends inside a continuation; it is refused here.
+            hazards.append("dangling_continuation")
+        instructions.append(go_trim_space(joined))
+    return hazards, instructions
 
 
 def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
     """Return (hazards, stages). Keywords are case-insensitive; continuations are joined and
     comment lines inside them dropped, as BuildKit does. Each stage lists its instructions."""
     hazards: list[str] = []
-    if re.search(r"^\s*#\s*(?:escape|syntax|check)\s*=", text, re.I | re.M):
+    if has_parser_directive(text):
         hazards.append("parser_directive")
-    # BuildKit splits lines on \n only and drops one trailing \r. str.splitlines() also breaks
-    # on \r, \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029, which BuildKit keeps inside the
-    # line, so a `#` after one of them would look like a comment here and run as shell there.
-    lines = [line.removesuffix("\r") for line in text.split("\n")]
-    if any(DOCKERFILE_FORBIDDEN.search(line) for line in lines):
-        hazards.append("dockerfile_non_ascii_or_control")
-    joined: list[str] = []
-    pending = ""
-    continuing = False
-    glued = False  # the last continuation had no blank before its backslash
-    for line in lines:
-        if not line.strip():
-            # BuildKit skips an empty or blank line inside a continuation and keeps joining, so
-            # `WORKDIR /x \` + blank line swallows the next instruction (for example USER).
-            # Refused; the skip is still emulated so the other checks see what BuildKit builds.
-            if continuing:
-                hazards.append("dockerfile_empty_continuation_line")
-            continue
-        if line.lstrip().startswith("#"):
-            # BuildKit also skips comment lines inside a continuation. The real file has none.
-            if continuing:
-                hazards.append("dockerfile_comment_in_continuation")
-            continue
-        # BuildKit appends a continued line verbatim: no space is added, so `A="x"\` followed by
-        # an unindented `B=y` is the single word `A=xB=y` and B is never set. Refused, and
-        # joined exactly as BuildKit does so the allowlists compare what it builds.
-        if continuing and glued and not line.startswith((" ", "\t")):
-            hazards.append("dockerfile_continuation_without_separator")
-        if CONTINUATION.search(line):
-            glued = not re.search(r"[ \t]\\[ \t]*$", line)
-            pending += CONTINUATION_TRIM.sub(r"\1", line)
-            continuing = True
-            continue
-        joined.append((pending + line).strip())
-        pending = ""
-        continuing = False
-    if continuing:
-        hazards.append("dangling_continuation")
+    line_hazards, joined = dockerfile_instructions(text)
+    hazards += line_hazards
     stages: list[dict] = [{"from": None, "steps": []}]
     for raw in joined:
         # BuildKit splits the keyword on ASCII blanks; a tab after RUN is still RUN.
-        keyword, args = (re.split(r"[ \t\v\f\r]+", raw, maxsplit=1) + [""])[:2]
+        keyword, args = (BLANKS.split(raw, maxsplit=1) + [""])[:2]
         # str.upper() folds some non-ASCII letters to ASCII (\u017f -> S); BuildKit does not.
         if not keyword.isascii():
             hazards.append("instruction_not_allowed")
         keyword = keyword.upper()
-        args = args.strip()
+        args = go_trim_space(args)
         if keyword not in ALLOWED_KEYWORDS:
             hazards.append("instruction_not_allowed")
         if "<<" in args and keyword in {"RUN", "COPY", "ADD"}:
@@ -334,12 +403,13 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
         # Collapse whitespace left by joined continuations; RUN and ENV are re-split later and
         # the exec-form CMD/ENTRYPOINT JSON is compared verbatim.
         verbatim = keyword in {"RUN", "ENV", "CMD", "ENTRYPOINT"}
-        stages[-1]["steps"].append((keyword, args if verbatim else " ".join(args.split())))
+        stages[-1]["steps"].append((keyword, args if verbatim else " ".join(BLANKS.split(args))))
     return hazards, stages
 
 
 def normalize_run(args: str) -> str:
-    return " ".join(args.split())
+    # Only what the shell itself treats as a blank between words is collapsed.
+    return " ".join(re.split(r"[ \t]+", args.strip(" \t")))
 
 
 def stage_args(stages: list[dict[str, Any]], keyword: str) -> list[list[str]]:
@@ -1169,6 +1239,142 @@ def test_x1_reviewer_payload_is_refused() -> None:
     found = image_hazards(text)
     assert "dockerfile_empty_continuation_line" in found, found
     assert "not_final_non_root_user" in found, found
+
+
+# Full parity with BuildKit's line rules, checked against BuildKit's own parser rather than a
+# description of it: each value is what github.com/moby/buildkit v0.24.0
+# frontend/dockerfile/parser.Parse makes of the text (Node.Original after strings.TrimSpace).
+# Its continuation regex, trimNewline and scanLines are the same in v0.11.6, v0.12.5, v0.15.2,
+# v0.18.2, v0.21.1 and master. Rerun that parser for any new case.
+BUILDKIT_PARSES: dict[str, tuple[str, list[str]]] = {
+    "blank_line_inside_continuation": ("RUN a \\\n\n b\n", ["RUN a  b"]),
+    "bom_first_line": ("\ufeffRUN a\n", ["RUN a"]),
+    "bom_then_syntax_directive": ("\ufeff# syntax=docker.io/x/y\nRUN a\n", ["RUN a"]),
+    "c_style_syntax_directive": (
+        "//syntax=docker.io/x/y\nRUN a\n",
+        ["//syntax=docker.io/x/y", "RUN a"],
+    ),
+    "comment_inside_continuation": ("RUN a \\\n# c\n b\n", ["RUN a  b"]),
+    "comment_with_backslash_does_not_continue": ("# c \\\nRUN a\n", ["RUN a"]),
+    "continuation_keeps_leading_blanks": ("RUN a \\\n    b \\\n\tc\n", ["RUN a     b \tc"]),
+    "cr_before_backslash_is_content": ("RUN a\r\\\n b\n", ["RUN a\r b"]),
+    "crcr_line_end_continues": ("RUN a \\\r\r\n b\n", ["RUN a  b"]),
+    "crcr_plain_line_end": ("RUN a\r\r\nUSER root\n", ["RUN a", "USER root"]),
+    "crlf_file": ("RUN a \\\r\n b\r\nUSER root\r\n", ["RUN a  b", "USER root"]),
+    "dangling_continuation_at_eof": ("RUN a \\", ["RUN a"]),
+    "dangling_continuation_with_newline": ("RUN a \\\n", ["RUN a"]),
+    "escaped_backslash_ends_instruction": ("RUN a \\\\\nUSER root\n", ["RUN a \\\\", "USER root"]),
+    "escaped_backslash_then_blanks": ("RUN a \\\\ \t\nUSER root\n", ["RUN a \\\\", "USER root"]),
+    "file_separator_before_hash_is_not_a_comment": ("\x1c# c\nRUN a\n", ["\x1c# c", "RUN a"]),
+    "file_separator_line_is_content": ("RUN a \\\n\x1c\n b\n", ["RUN a \x1c", "b"]),
+    "file_separator_trailing_is_kept": ("RUN a\x1c\n", ["RUN a\x1c"]),
+    "first_line_leading_blanks_trimmed": ("   RUN a\n\t USER root\n", ["RUN a", "USER root"]),
+    "glued_join": ("ENV A=1\\\nB=2\n", ["ENV A=1B=2"]),
+    "ideographic_space_blank_line_in_continuation": ("RUN a \\\n\u3000\n b\n", ["RUN a  b"]),
+    "indented_comment_inside_continuation": ("RUN a \\\n  # c\n b\n", ["RUN a  b"]),
+    "indented_lone_backslash": ("RUN a \\\n   \\\n b\n", ["RUN a     b"]),
+    "json_syntax_directive": ('{"syntax": "docker.io/x/y"}', ['{"syntax": "docker.io/x/y"}']),
+    "line_separator_blank_line_in_continuation": ("RUN a \\\n\u2028\n b\n", ["RUN a  b"]),
+    "lone_backslash_first_line": ("\\\nRUN a\n", ["RUN a"]),
+    "lone_backslash_inside_continuation": ("RUN a \\\n\\\n b\n", ["RUN a  b"]),
+    "lone_backslash_with_blanks_inside": ("RUN a \\\n\\ \t\n b\n", ["RUN a  b"]),
+    "nbsp_indented_comment": ("\xa0# c\nRUN a\n", ["RUN a"]),
+    "nel_indented_comment": ("\x85# c\nRUN a\n", ["RUN a"]),
+    "shebang_then_syntax_directive": ("#!/bin/sh\n# syntax=docker.io/x/y\nRUN a\n", ["RUN a"]),
+    "syntax_directive": ("# syntax=docker.io/x/y\nRUN a\n", ["RUN a"]),
+    "tab_after_keyword": ("RUN\ta\n", ["RUN\ta"]),
+    "three_backslashes_end_instruction": (
+        "RUN a \\\\\\\nUSER root\n",
+        ["RUN a \\\\\\", "USER root"],
+    ),
+    "unit_separator_line_is_content": ("RUN a \\\n\x1f\n b\n", ["RUN a \x1f", "b"]),
+    "vertical_tab_after_backslash_does_not_continue": ("RUN a \\\x0b\n b\n", ["RUN a \\", "b"]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BUILDKIT_PARSES))
+def test_the_line_join_matches_buildkit(name: str) -> None:
+    text, expected = BUILDKIT_PARSES[name]
+    assert dockerfile_instructions(text)[1] == expected
+
+
+def test_an_escaped_backslash_ends_the_instruction_as_in_buildkit() -> None:
+    # `\\` at the end of a line is an escaped backslash, not a continuation, so USER stays its
+    # own instruction. A join that treated it as a continuation would swallow USER instead.
+    text = read_dockerfile().replace(WORKDIR, "WORKDIR /home/trainer\\\\\n")
+    assert image_hazards(text) == ["workdir_not_allowlisted"]
+
+
+def test_a_lone_backslash_line_is_dropped_by_the_join_and_refused() -> None:
+    # BuildKit's trim removes a `\\` that stands alone, so the ENV it builds is unchanged; the
+    # line is still refused, like a blank or comment line inside a continuation.
+    for lone in ("\\", "  \\", "\\ \t"):
+        text = read_dockerfile().replace(LD, LD + lone + "\n")
+        assert image_hazards(text) == ["dockerfile_lone_continuation_line"], lone
+        # Alone before an instruction it continues into that instruction, changing nothing.
+        text = read_dockerfile().replace(WORKDIR, lone + "\n" + WORKDIR)
+        assert image_hazards(text) == ["dockerfile_lone_continuation_line"], lone
+
+
+def test_extra_carriage_returns_are_trimmed_by_the_join_and_refused() -> None:
+    # BuildKit drops every trailing \r (trimNewline), so the parse is the real file's; only the
+    # character rule, which allows one \r per line, refuses it.
+    text = read_dockerfile().replace("\n", "\r\r\n")
+    assert image_hazards(text) == ["dockerfile_non_ascii_or_control"]
+
+
+def test_a_byte_order_mark_is_discarded_by_the_join_and_refused() -> None:
+    assert image_hazards("\ufeff" + read_dockerfile()) == ["dockerfile_non_ascii_or_control"]
+
+
+@pytest.mark.parametrize("separator", ["\x1c", "\x1d", "\x1e", "\x1f"])
+def test_a_separator_only_line_is_content_not_a_blank_line(separator: str) -> None:
+    # Python's str.strip() treats \x1c-\x1f as whitespace and Go's unicode.IsSpace does not,
+    # so BuildKit ends the ENV at such a line and parses the lines after it as instructions.
+    found = image_hazards(read_dockerfile().replace(LD, LD + separator + "\n"))
+    assert "dockerfile_non_ascii_or_control" in found, found
+    assert {"env_not_allowlisted", "instruction_not_allowed"} <= set(found), found
+    assert "dockerfile_empty_continuation_line" not in found, found
+
+
+@pytest.mark.parametrize("end", ["", "\n"])
+def test_a_dangling_final_continuation_keeps_its_instruction(end: str) -> None:
+    # BuildKit builds the CMD even when the file ends inside a continuation. It is refused here,
+    # but the join keeps the instruction, so nothing else looks missing.
+    text = read_dockerfile().replace(FINAL_CMD, FINAL_CMD.removesuffix("\n") + " \\" + end)
+    assert image_hazards(text) == ["dangling_continuation"]
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "# syntax=docker.io/x/y\n",
+        "#syntax=docker.io/x/y\n",
+        "  # SyNtAx = docker.io/x/y\n",
+        "//syntax=docker.io/x/y\n",
+        "// syntax=docker.io/x/y\n",
+        "\ufeff# syntax=docker.io/x/y\n",
+        "#!/bin/sh\n# syntax=docker.io/x/y\n",
+        "# escape=`\n",
+        "# check=skip=all\n",
+    ],
+)
+def test_every_buildkit_directive_form_is_refused(header: str) -> None:
+    # BuildKit hands the whole build to the image a syntax directive names, in each of these
+    # forms (parser.DetectSyntax), so an unpinned frontend could build anything from this file.
+    assert "parser_directive" in image_hazards(header + read_dockerfile())
+
+
+@pytest.mark.parametrize("prefix", ["", "#!/bin/sh\n"])
+def test_a_json_syntax_document_is_refused(prefix: str) -> None:
+    assert "parser_directive" in image_hazards(prefix + '{"syntax": "docker.io/x/y"}')
+
+
+def test_instruction_arguments_keep_what_go_does_not_trim() -> None:
+    # BuildKit's USER here is `10001:10001\x1c`: strings.TrimSpace keeps \x1c, which Python's
+    # str.strip() would drop, and the final-user check would then pass.
+    text = read_dockerfile().replace("USER 10001:10001\n", "USER 10001:10001\x1c\n")
+    assert "not_final_non_root_user" in image_hazards(text)
 
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
