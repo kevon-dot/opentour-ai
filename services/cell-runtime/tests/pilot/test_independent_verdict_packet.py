@@ -282,7 +282,8 @@ def test_packet_assembles_and_verifies_a_528_verdict_on_the_improvement_path(tmp
 
 def test_every_other_hold_still_applies_to_an_accepted_528_verdict(tmp_path):
     """Assembly grants nothing: the issuer hold, D11 and ``authorize`` still hold the gain."""
-    assert iv.REGISTERED_POLICY_FLOOR is None
+    assert iv.REGISTERED_POLICY_FLOOR is not None
+    assert iv.REGISTERED_POLICY_FLOOR.floor_id == "d11.v1"
     run = named_run(tmp_path / "run")
     issued = Issued(run, tmp_path / "eval")
     # OPE-526/OPE-566: no issuer can be verified, so live staging always holds.
@@ -290,13 +291,22 @@ def test_every_other_hold_still_applies_to_an_accepted_528_verdict(tmp_path):
     out, store = stage(run, issued, tmp_path / "live")
     assert out.status == "refused" and out.reason == "audit_and_verdict_issuers_unverified"
     assert out.scoped_hold["release_authority"] is False and empty(store)
-    # D11: no consumer may act on the gain until an owner floor is registered.
+    # D11: this fixture's preregistered policy is laxer than the registered d11.v1 floor, so no
+    # consumer may act on the gain even though it is reproduced.
     doc = issued.doc
-    assert doc["alert_gates"]["policy_floor_hold"] == "policy_floor_unset"
+    assert doc["verdict"] == "reproduced"
+    assert iv.REGISTERED_POLICY_FLOOR.shortfalls(doc["policy"]) == [
+        "min_families",
+        "max_coverage_loss_bps",
+        "operating_point_terms.minimum_verified_cases",
+        "operating_point_terms.minimum_slice_cases",
+    ]
+    assert doc["alert_gates"]["policy_floor_hold"] == "policy_floor_below_registered_floor"
     assert not any(doc["effects"].values())
     for effect in ("improvement_alert", "release_request", "handoff_request"):
         refused = issued.ev.authorize(doc, effect=effect)
-        assert refused["authorized"] is False and refused["reason"] == "policy_floor_unset"
+        assert refused["authorized"] is False
+        assert refused["reason"] == "policy_below_registered_floor"
     # A copy the evaluator did not store digests fine, but ``authorize`` refuses it.
     forged = reseal_verdict({**doc, "producer_id": "generated-other-worker"})
     assert cp._verdict_ok(forged)
