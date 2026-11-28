@@ -2843,6 +2843,25 @@ def test_p8_review_l3_a_trainer_route_without_an_artifact_digest_fails_closed(tm
     managed, _ = provider_run(tmp_path / "c", s, "managed_provider")
     drift = managed.document["statements"]["candidate_served_evaluation"]["drift_checks"]
     assert managed.outcome == "verified_gain" and drift["artifact_digest"] == "unavailable"
+    # Where a managed provider does report a digest on both sides, they must agree.
+    reporting = provider_job("managed_provider", artifact_digest=TRAINER_DIGEST)
+    for name, served_digest, outcome in (
+        ("same", TRAINER_DIGEST, "verified_gain"),
+        ("other", sha("other-managed-bytes"), "integrity_failure"),
+    ):
+        v, _ = provider_run(
+            tmp_path / name,
+            s,
+            "managed_provider",
+            job=reporting,
+            readback=readback_for("managed_provider", artifact_digest=served_digest),
+        )
+        assert v.outcome == outcome
+        if outcome == "integrity_failure":
+            held(v, outcome, "served_candidate_served_other_revision")
+        else:
+            served = v.document["statements"]["candidate_served_evaluation"]
+            assert served["drift_checks"]["artifact_digest"] == "checked"
 
 
 @pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
