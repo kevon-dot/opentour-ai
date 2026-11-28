@@ -78,10 +78,12 @@ RUN groupadd --gid 10001 trainer \
 # LD_LIBRARY_PATH keeps only the base image's /usr/local/nvidia/lib{,64} driver entries and drops
 # /usr/local/cuda/lib64, so the base cudart is not preferred over the wheels' through the
 # environment. (The ld.so.conf entry remains; item 10 records the path actually loaded.)
+# PYTHONSAFEPATH keeps the working directory (for example a writable operator mount passed with
+# `-w`) and a script's directory off sys.path, so `python -c` and `-m` never import from them.
 ENV PATH="/opt/venv/bin:${PATH}" \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     NVIDIA_REQUIRE_CUDA="cuda>=13.0" \
-    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
     HF_HOME=/home/trainer/.cache/huggingface \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 \

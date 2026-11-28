@@ -111,7 +111,11 @@ a recorded commit. Each run records:
 9. **Runtime isolation.** The container runs with `--network none`, as UID 10001, with the
    weights mounted read-only. The image cannot enforce this. Its offline variables only stop
    the Hub and package clients from trying to connect. The operator enforces
-   `--network none`, and the record must show it.
+   `--network none`, and the record must show it. The image sets `PYTHONSAFEPATH=1`. Python
+   then never puts the working directory or a script's own directory on `sys.path`, so a
+   writable mount such as `/run/opentour` cannot shadow the venv, even under `-w`. The OPE-558
+   trainer must therefore run as an installed module (`python -m`), not as a script that
+   imports files next to it.
 10. **Loaded CUDA libraries.** During the fit and the replay, read `/proc/self/maps` in the
     training process after the first CUDA operation. Record the resolved path and version of
     each loaded `libcudart`, `libcublas` and `libnccl`. Each path must be under

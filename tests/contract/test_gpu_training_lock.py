@@ -206,6 +206,7 @@ ALLOWED_ENV: tuple[tuple[tuple[str, str], ...], ...] = (
         ("PYTHONDONTWRITEBYTECODE", "1"),
         ("PYTHONUNBUFFERED", "1"),
         ("PYTHONNOUSERSITE", "1"),
+        ("PYTHONSAFEPATH", "1"),
         ("HF_HOME", "/home/trainer/.cache/huggingface"),
         ("HF_HUB_OFFLINE", "1"),
         ("TRANSFORMERS_OFFLINE", "1"),
@@ -217,6 +218,23 @@ ALLOWED_ENV: tuple[tuple[tuple[str, str], ...], ...] = (
         ("OPENTOUR_GPU_LOCK", "training/gpu/uv.lock"),
         ("OPENTOUR_GPU_QUALIFICATION", "NOT_RUN"),
     ),
+)
+# The default command only reports versions. Its exact JSON is allowlisted with ENTRYPOINT and
+# WORKDIR: a start-time install, an env wrapper or an operator-mount working directory is refused.
+CMD_PROGRAM = (
+    "import importlib.metadata as m,json,platform; print(json.dumps({'kind':'component',"
+    "'check':'gpu-trainer-image-versions','python':platform.python_version(),"
+    "'versions':{p:m.version(p) for p in ('torch','transformers','peft','bitsandbytes',"
+    "'accelerate','safetensors','tokenizers')},'gpu_qualification':'NOT_RUN',"
+    "'product_acceptance':'NOT_RUN'}))"
+)
+ALLOWED_WORKDIRS: tuple[tuple[str, ...], ...] = ((), (), ("/src",), ("/home/trainer",))
+ALLOWED_ENTRYPOINTS: tuple[tuple[str, ...], ...] = ((), (), (), ("[]",))
+ALLOWED_CMDS: tuple[tuple[str, ...], ...] = (
+    (),
+    (),
+    (),
+    (json.dumps(["python", "-c", CMD_PROGRAM]),),
 )
 FINAL_LIBRARY_PATH = ("/usr/local/nvidia/lib", "/usr/local/nvidia/lib64")
 ALLOWED_KEYWORDS = {"ARG", "FROM", "COPY", "ADD", "RUN", "ENV", "WORKDIR", "USER"}
@@ -241,15 +259,31 @@ def is_secret_name(name: str) -> bool:
     return any(s in upper for s in SECRET_SUBSTRINGS) or bool(SECRET_PARTS & set(upper.split("_")))
 
 
+def read_dockerfile(path: Path = GPU / "trainer.Dockerfile") -> str:
+    """The bytes BuildKit reads: no newline translation (read_text() turns a lone \\r into \\n);
+    bytes that are not UTF-8 survive as surrogates and are refused as non-ASCII."""
+    return path.read_bytes().decode("utf-8", "surrogateescape")
+
+
+# Printable ASCII and tab only. \n separates lines and one trailing \r per line is dropped.
+DOCKERFILE_FORBIDDEN = re.compile(r"[^\t\x20-\x7e]")
+
+
 def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
     """Return (hazards, stages). Keywords are case-insensitive; continuations are joined and
     comment lines inside them dropped, as BuildKit does. Each stage lists its instructions."""
     hazards: list[str] = []
     if re.search(r"^\s*#\s*(?:escape|syntax|check)\s*=", text, re.I | re.M):
         hazards.append("parser_directive")
+    # BuildKit splits lines on \n only and drops one trailing \r. str.splitlines() also breaks
+    # on \r, \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029, which BuildKit keeps inside the
+    # line, so a `#` after one of them would look like a comment here and run as shell there.
+    lines = [line.removesuffix("\r") for line in text.split("\n")]
+    if any(DOCKERFILE_FORBIDDEN.search(line) for line in lines):
+        hazards.append("dockerfile_non_ascii_or_control")
     joined: list[str] = []
     pending = ""
-    for line in text.splitlines():
+    for line in lines:
         if not pending and not line.strip():
             continue
         if line.lstrip().startswith("#"):
@@ -276,10 +310,10 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
             hazards.append("heredoc_not_allowed")
         if keyword == "FROM":
             stages.append({"from": args, "steps": []})
-        # Collapse whitespace left by joined continuations; quoted values are re-split later.
-        stages[-1]["steps"].append(
-            (keyword, args if keyword in {"RUN", "ENV"} else " ".join(args.split()))
-        )
+        # Collapse whitespace left by joined continuations; RUN and ENV are re-split later and
+        # the exec-form CMD/ENTRYPOINT JSON is compared verbatim.
+        verbatim = keyword in {"RUN", "ENV", "CMD", "ENTRYPOINT"}
+        stages[-1]["steps"].append((keyword, args if verbatim else " ".join(args.split())))
     return hazards, stages
 
 
@@ -469,6 +503,13 @@ def image_hazards(text: str) -> list[str]:
     ]
     if stage_env != [list(stage) for stage in ALLOWED_ENV]:
         hazards.append("env_not_allowlisted")
+    for keyword, allowed, hazard in (
+        ("WORKDIR", ALLOWED_WORKDIRS, "workdir_not_allowlisted"),
+        ("ENTRYPOINT", ALLOWED_ENTRYPOINTS, "entrypoint_not_allowlisted"),
+        ("CMD", ALLOWED_CMDS, "cmd_not_allowlisted"),
+    ):
+        if stage_args(stages, keyword) != [list(stage) for stage in allowed]:
+            hazards.append(hazard)
     froms = [stage["from"] for stage in stages[1:]]
     if froms != EXPECTED_FROMS:
         hazards.append("from_not_pinned")
@@ -498,7 +539,7 @@ def image_hazards(text: str) -> list[str]:
 
 
 def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
-    text = (GPU / "trainer.Dockerfile").read_text()
+    text = read_dockerfile()
     toolchain = json.loads((ROOT / "tools/toolchain.json").read_text())
     _, stages = parse_dockerfile(text)
     steps = [step for stage in stages for step in stage["steps"]]
@@ -535,11 +576,31 @@ def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
     assert final_env["OPENTOUR_GPU_QUALIFICATION"] == "NOT_RUN"
     assert final_env["NVIDIA_REQUIRE_CUDA"] == "cuda>=13.0"
     assert final_env["LD_LIBRARY_PATH"] == ":".join(FINAL_LIBRARY_PATH)
-    assert (GPU / ".dockerignore").read_text().splitlines() == ["**", "!pyproject.toml", "!uv.lock"]
+    assert final_env["PYTHONSAFEPATH"] == "1"
+    assert json.loads(ALLOWED_CMDS[-1][0]) == ["python", "-c", CMD_PROGRAM]
+    # Bytes, not lines: BuildKit reads .dockerignore with the same \n-only line rule.
+    assert (GPU / ".dockerignore").read_bytes() == b"**\n!pyproject.toml\n!uv.lock\n"
 
 
 def test_trainer_image_has_no_hazard():
-    assert image_hazards((GPU / "trainer.Dockerfile").read_text()) == []
+    assert image_hazards(read_dockerfile()) == []
+
+
+def test_whole_file_crlf_is_accepted() -> None:
+    """Positive control: BuildKit drops one trailing \\r per line, so CRLF is the same file."""
+    assert image_hazards(read_dockerfile().replace("\n", "\r\n")) == []
+
+
+def test_reader_keeps_bytes_that_read_text_would_translate(tmp_path: Path) -> None:
+    source = read_dockerfile().replace(
+        COMPAT_TAIL, COMPAT_TAIL.removesuffix("\n") + "\r" + COMPAT_PAYLOAD + "\n"
+    )
+    path = tmp_path / "trainer.Dockerfile"
+    path.write_bytes(source.encode())
+    assert "\r" in read_dockerfile(path)
+    assert "dockerfile_non_ascii_or_control" in image_hazards(read_dockerfile(path))
+    path.write_bytes(read_dockerfile().encode() + b"# \xff\n")
+    assert "dockerfile_non_ascii_or_control" in image_hazards(read_dockerfile(path))
 
 
 LD = "    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \\\n"
@@ -567,6 +628,32 @@ COMPAT_RUN = (
 FINAL_COPIES = "COPY --from=build /opt/python /opt/python\nCOPY --from=build /opt/venv /opt/venv\n"
 OBFUSCATED = ("run_not_allowlisted", "run_shell_metacharacter")
 LOCK_COPY = "COPY pyproject.toml uv.lock ./\n"
+FINAL_CMD = f"CMD {json.dumps(['python', '-c', CMD_PROGRAM])}\n"
+COMPAT_TAIL = " && test ! -e /usr/local/cuda/compat\n"
+COMPAT_PAYLOAD = "# && /opt/python/bin/pip3 install requests"
+FINAL_ENV_TAIL = "    OPENTOUR_GPU_LOCK=training/gpu/uv.lock OPENTOUR_GPU_QUALIFICATION=NOT_RUN\n"
+FINAL_ENV_PAYLOAD = "#X=1 LD_LIBRARY_PATH=/usr/local/cuda/lib64"
+BUILD_ENV_TAIL = f"    UV_PYTHON={PINNED_PYTHON}\n"
+BUILD_ENV_PAYLOAD = "#X=1 UV_INDEX_URL=https://x.invalid/simple"
+# Every character Python's splitlines() or str.split() treats as a break and BuildKit does not.
+SEPARATORS = {
+    "cr": "\r",
+    "vt": "\v",
+    "ff": "\f",
+    "fs": "\x1c",
+    "gs": "\x1d",
+    "rs": "\x1e",
+    "nel": "\x85",
+    "line_separator": "\u2028",
+    "paragraph_separator": "\u2029",
+    "nbsp": "\xa0",
+}
+# (line to extend, smuggled text, the guard that must see the smuggled text as content)
+SMUGGLED = {
+    "run_compat": (COMPAT_TAIL, COMPAT_PAYLOAD, "run_not_allowlisted"),
+    "final_env": (FINAL_ENV_TAIL, FINAL_ENV_PAYLOAD, "env_not_allowlisted"),
+    "build_env": (BUILD_ENV_TAIL, BUILD_ENV_PAYLOAD, "env_not_allowlisted"),
+}
 _PYTHON_ARTIFACT = json.loads((ROOT / "tools/toolchain.json").read_text())["tools"]["python"]
 _PYTHON_ARTIFACT = _PYTHON_ARTIFACT["artifacts"]["Linux-x86_64"]
 ADD_BLOCK = (
@@ -877,6 +964,65 @@ MUTATIONS = {
         before_workdir("ENV PYTHONPATH=/tmp"),
         "env_not_allowlisted",
     ),
+    "env_safepath_dropped": (
+        ((" PYTHONSAFEPATH=1 \\\n", " \\\n"),),
+        "env_not_allowlisted",
+    ),
+    # M1: start-time commands. C1 installs from CMD; C2 and C4 wrap the command in ENTRYPOINT.
+    "c1_cmd_installs_at_start": (
+        (
+            (
+                FINAL_CMD,
+                'CMD ["/bin/sh", "-c", "/opt/python/bin/pip3 install requests && exec python"]\n',
+            ),
+        ),
+        "cmd_not_allowlisted",
+    ),
+    "c2_entrypoint_env_library_path": (
+        (
+            (
+                "ENTRYPOINT []\n",
+                'ENTRYPOINT ["/usr/bin/env","LD_LIBRARY_PATH=/usr/local/cuda/lib64"]\n',
+            ),
+        ),
+        "entrypoint_not_allowlisted",
+    ),
+    "c4_entrypoint_shell_install": (
+        (
+            (
+                "ENTRYPOINT []\n",
+                'ENTRYPOINT ["/bin/sh","-c","/opt/python/bin/pip3 install requests;'
+                ' exec \\"$@\\"","--"]\n',
+            ),
+        ),
+        "entrypoint_not_allowlisted",
+    ),
+    "cmd_json_respaced": (
+        ((FINAL_CMD, FINAL_CMD.replace('", "-c"', '","-c"')),),
+        "cmd_not_allowlisted",
+    ),
+    # CMD is compared verbatim, so whitespace inside the JSON is not collapsed away.
+    "cmd_double_space": (
+        ((FINAL_CMD, FINAL_CMD.replace('", "-c"', '",  "-c"')),),
+        "cmd_not_allowlisted",
+    ),
+    "cmd_second_instruction": (
+        ((FINAL_CMD, FINAL_CMD + 'CMD ["python"]\n'),),
+        "cmd_not_allowlisted",
+    ),
+    "entrypoint_in_build_stage": (
+        (("WORKDIR /src\n", "WORKDIR /src\nENTRYPOINT []\n"),),
+        "entrypoint_not_allowlisted",
+    ),
+    # L1 (W1): the working directory must not be the writable operator mount.
+    "w1_workdir_operator_mount": (
+        ((WORKDIR, "WORKDIR /run/opentour\n"),),
+        "workdir_not_allowlisted",
+    ),
+    "workdir_build_stage_changed": (
+        (("WORKDIR /src\n", "WORKDIR /tmp\n"),),
+        "workdir_not_allowlisted",
+    ),
     # Inventories are per stage: the same instruction in another stage is refused.
     "add_moved_to_final_stage": (
         ((ADD_BLOCK, ""), (WORKDIR, ADD_BLOCK + WORKDIR)),
@@ -893,10 +1039,24 @@ MUTATIONS = {
 }
 
 
+@pytest.mark.parametrize("separator", sorted(SEPARATORS))
+@pytest.mark.parametrize("variant", sorted(SMUGGLED))
+def test_line_separators_cannot_smuggle_content(variant: str, separator: str) -> None:
+    """H1 (E1-E3): text after a separator BuildKit keeps in the line is content, not a comment."""
+    line, payload, guard = SMUGGLED[variant]
+    text = read_dockerfile()
+    assert text.count(line) == 1, line
+    text = text.replace(line, line.removesuffix("\n") + SEPARATORS[separator] + payload + "\n")
+    found = image_hazards(text)
+    assert "dockerfile_non_ascii_or_control" in found, found
+    # Independent of the character rule: the parser itself must see the payload.
+    assert guard in found, found
+
+
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
 def test_image_hazard_checks_reject_each_mutation(name):
     edits, expected = MUTATIONS[name]
-    text = (GPU / "trainer.Dockerfile").read_text()
+    text = read_dockerfile()
     for old, new in edits:
         assert text.count(old) == 1, old
         text = text.replace(old, new)
@@ -989,6 +1149,7 @@ def test_readme_names_the_writer_driver_range_and_evidence_limits():
         "Component evidence only",
         "Unverified: the toolkit check may not run in CDI mode",
         "whether the container toolkit injected the GPU",
+        "The image sets `PYTHONSAFEPATH=1`.",
     ):
         assert required in text, required
     assert (
