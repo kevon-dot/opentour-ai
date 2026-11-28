@@ -1711,8 +1711,8 @@ def _fragments(
         elif op in (b"g", b"rg", b"k") and nums:
             wanted = {b"g": 1, b"rg": 3, b"k": 4}[op]
             if len(nums) >= wanted:
-                verdict = bool(_invisible_on_white(nums[-wanted:]))
-                gs = replace(gs, fill_invisible=verdict, fill_space_known=True)
+                invisible = bool(_invisible_on_white(nums[-wanted:]))
+                gs = replace(gs, fill_invisible=invisible, fill_space_known=True)
         elif op in (b"sc", b"scn") and nums:
             verdict = _invisible_on_white(nums)
             if verdict is not None:
