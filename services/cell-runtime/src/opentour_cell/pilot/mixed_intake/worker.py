@@ -69,6 +69,7 @@ REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 ROLES = frozenset({"owner", "observer"})
 KINDS = frozenset({"local-directory", "mcp-resource"})
 GENERATED_TRANSPORT = "mcp-resource-generated-transport"
+ADMITTED = "ope505_admitted"
 # Stated on every result. Nothing this worker produces is a provider or customer witness.
 EVIDENCE: Json = {
     "evidence_tier": "simulated_unwitnessed",
@@ -245,10 +246,16 @@ class StarterBenchmarkSink:
     `create_draft` submits one `Starter` intake through `BenchmarkIntake`, which durably admits
     the run and creates or reuses its versioned benchmark draft before any dispatch. The request
     values come from the owner's sealed setup grant; the frozen payload only has to contain that
-    exact eligible policy occurrence. The idempotency key derives from the draft key, so a replay
-    or a crash between admission and dispatch returns the same run and the same benchmark.
-    `enqueue_job` creates nothing: the admitted run is the OPE-505 job, and this call only
-    confirms it was recorded.
+    exact eligible policy occurrence, and the principal must be the draft's own tenant.
+
+    The sealed grant, not the draft, fixes the OPE-505 run identity (the grant pins
+    `creation_ref` and both revisions). One OPE-505 run is bound to one draft: a successor or any
+    other draft that would resolve to an already bound run is held before anything is
+    submitted, and a successor is admitted only on a fresh owner grant, as a new run that OPE-505
+    links to its predecessor in its own benchmark lineage. The ledger is keyed by draft, so
+    reopening the same evidence in another session reads the same admission. `enqueue_job`
+    creates nothing: the admitted run is the OPE-505 job, and this call only confirms it was
+    recorded.
     """
 
     def __init__(self, selection: Path, tenant: str, store: IntakeStore):
@@ -268,15 +275,43 @@ class StarterBenchmarkSink:
             admission = BenchmarkIntake(DurableIntake(self.selection.parent, authority))
         return authority, admission
 
-    def _admitted(self, session_id: str, draft_key: str) -> Json | None:
-        for entry in self.store.ledger(session_id, "ope505_admitted"):
-            if entry["draft_key"] == draft_key:
-                return entry
+    def _entry(self, field: str, value: str, *, other_than: str | None = None) -> Json | None:
+        with self.store.tx() as db:
+            rows = db.execute(
+                "SELECT payload FROM ledger WHERE kind=? AND json_extract(payload, ?)=? "
+                "ORDER BY id",
+                (ADMITTED, f"$.{field}", value),
+            ).fetchall()
+        for row in rows:
+            found: Json = json.loads(row["payload"])
+            if other_than is None or found["draft_key"] != other_than:
+                return found
         return None
 
+    def admitted(self, draft_key: str) -> Json | None:
+        return self._entry("draft_key", draft_key)
+
+    def _draft_tenant(self, session_id: object) -> str | None:
+        with self.store.tx() as db:
+            row = db.execute(
+                "SELECT tenant FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return None if row is None else str(row["tenant"])
+
     def create_draft(self, draft_key: str, payload: Json) -> None:
-        session_id = payload["session_id"]
+        if self.admitted(draft_key) is not None:
+            return  # recorded: a replay after a crash before the draft was marked dispatched
+        predecessor = payload.get("supersedes")
+        prior = self.admitted(predecessor) if type(predecessor) is str else None
+        link = {
+            "predecessor_draft_key": predecessor if type(predecessor) is str else None,
+            "predecessor_run_ref": prior["run_ref"] if prior else None,
+        }
         try:
+            _refuse(
+                self._draft_tenant(payload["session_id"]) == self.tenant,
+                "OPE505_TENANT_MISMATCH",
+            )
             authority, admission = self._open()
             principal = authority.principal
             with authority.setup_grant(principal) as grant:
@@ -289,6 +324,26 @@ class StarterBenchmarkSink:
                 for item in payload["included"]
             )
             _refuse(covered, "OPE505_GRANT_DOES_NOT_COVER_POLICY")
+            identity = digest(
+                [
+                    "ope505-starter-run",
+                    principal.tenant,
+                    authority.selected.engagement_epoch,
+                    policy_ref,
+                    revision,
+                    setup_revision,
+                    creation_ref,
+                ]
+            )
+            bound = self._entry("run_identity", identity, other_than=draft_key)
+            if bound is not None:
+                successor = prior is not None and prior["run_ref"] == bound["run_ref"]
+                raise IntakeError(
+                    "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT"
+                    if successor
+                    else "OPE505_RUN_BOUND_TO_OTHER_DRAFT",
+                    link if successor else None,
+                )
             request = Starter(
                 policy_resource_ref=policy_ref,
                 source_revision=revision,
@@ -300,36 +355,42 @@ class StarterBenchmarkSink:
             receipt = admission.submit_intake(principal, request)
             if isinstance(receipt, AdmissionHold):
                 raise WorkerRefused("OPE505_HOLD")
+            # OPE-505 deduplicates by its own intent; never claim another draft's run.
+            _refuse(
+                self._entry("run_ref", receipt.run_ref, other_than=draft_key) is None,
+                "OPE505_RUN_BOUND_TO_OTHER_DRAFT",
+            )
             status = admission.get_run(principal, receipt.run_ref)
+            with admission.intake.admitted_work(principal, receipt.run_ref) as work:
+                parent_run = work.benchmark_parent_run
         except WorkerRefused as refused:
             raise IntakeError(refused.code) from refused
         except (AdmissionError, OSError, sqlite3.Error, ValueError) as error:
             raise IntakeError("OPE505_UNAVAILABLE") from error
-        if self._admitted(session_id, draft_key) is None:
-            benchmark = status.benchmark
-            with self.store.tx() as db:
-                self.store.log(
-                    db,
-                    session_id,
-                    "ope505_admitted",
-                    {
-                        "draft_key": draft_key,
-                        "run_ref": receipt.run_ref,
-                        "correlation_ref": receipt.correlation_ref,
-                        "run_state": receipt.state,
-                        "workflow_ref": status.workflow_ref,
-                        "benchmark_ref": benchmark.benchmark_ref if benchmark else None,
-                        "benchmark_version": benchmark.version if benchmark else None,
-                        "benchmark_state": benchmark.benchmark_state if benchmark else None,
-                    },
-                )
+        benchmark = status.benchmark
+        with self.store.tx() as db:
+            self.store.log(
+                db,
+                str(payload["session_id"]),
+                ADMITTED,
+                {
+                    "draft_key": draft_key,
+                    "run_identity": identity,
+                    "run_ref": receipt.run_ref,
+                    "correlation_ref": receipt.correlation_ref,
+                    "run_state": receipt.state,
+                    "workflow_ref": status.workflow_ref,
+                    "benchmark_ref": benchmark.benchmark_ref if benchmark else None,
+                    "benchmark_version": benchmark.version if benchmark else None,
+                    "benchmark_state": benchmark.benchmark_state if benchmark else None,
+                    **link,
+                    # OPE-505's own lineage field for the benchmark this run admitted.
+                    "ope505_parent_run": parent_run,
+                },
+            )
 
     def enqueue_job(self, job_key: str, draft_key: str) -> None:
-        with self.store.tx() as db:
-            row = db.execute(
-                "SELECT session_id FROM drafts WHERE draft_key=?", (draft_key,)
-            ).fetchone()
-        if row is None or self._admitted(row["session_id"], draft_key) is None:
+        if self.admitted(draft_key) is None:
             raise IntakeError("OPE505_ADMISSION_NOT_RECORDED")
 
 
@@ -402,11 +463,11 @@ class MixedIntakeWorker:
 
     # -------------------------------------------------------------- authority
 
-    def _authorize(self, actor: object, operation: str) -> tuple[WorkerRecord, Operation]:
+    def _authorize(self, actor: object, operation: object) -> tuple[WorkerRecord, Operation]:
         record = WorkerRecord.read(self.record_path)  # current authority on every call
         _refuse(type(actor) is str and actor in record.actors, "ACTOR_NOT_AUTHORIZED")
         assert type(actor) is str
-        spec = OPERATIONS.get(operation)
+        spec = OPERATIONS.get(operation) if type(operation) is str else None
         _refuse(spec is not None, "UNKNOWN_OPERATION")
         assert spec is not None
         role = record.actors[actor]
@@ -479,9 +540,10 @@ class MixedIntakeWorker:
 
     # -------------------------------------------------------------- the single entry
 
-    def call(self, actor: object, operation: str, arguments: object) -> Json:
+    def call(self, actor: object, operation: object, arguments: object) -> Json:
         """The one entry point. The UI route and the MCP tool both call exactly this."""
         record, spec = self._authorize(actor, operation)
+        assert type(operation) is str
         _refuse(type(arguments) is dict, "INVALID_ARGUMENTS")
         assert type(arguments) is dict
         keys = set(arguments)
@@ -547,27 +609,12 @@ class MixedIntakeWorker:
                 },
             )
         if operation == "mixed_intake_freeze_starter":
-            return self._freeze(record, service, session_id)
+            return self._freeze(service, session_id)
         return self._triage(service, session_id)
 
-    def _freeze(self, record: WorkerRecord, service: MixedIntakeService, session_id: str) -> Json:
+    def _freeze(self, service: MixedIntakeService, session_id: str) -> Json:
         # Admission is committed first; dispatch is a separate step that may be retried.
         frozen = service.freeze_starter(session_id, fault=self.fault)
-        sink = self._sink(record)
-        if sink is None:
-            ope505: Json = {"state": "not_configured", "reason": "starter_selection_absent"}
-        else:
-            try:
-                MixedIntakeService(self.store, sink=sink).dispatch_pending()
-            except IntakeError as error:
-                ope505 = {"state": "held", "reason": error.code}
-            else:
-                admitted = sink._admitted(session_id, frozen["draft_key"])
-                ope505 = (
-                    {"state": "admitted", **{k: v for k, v in admitted.items() if k != "kind"}}
-                    if admitted is not None
-                    else {"state": "held", "reason": "OPE505_ADMISSION_NOT_RECORDED"}
-                )
         return {
             "session_id": session_id,
             "draft_key": frozen["draft_key"],
@@ -576,8 +623,70 @@ class MixedIntakeWorker:
             "broader_claim_held": frozen["broader_claim_held"],
             "missing_strata": frozen["missing_strata"],
             "exclusions": frozen["exclusions"],
-            "ope505": ope505,
+            # Only this session's own draft is dispatched, under its current authority.
+            "ope505": self._dispatch(session_id, frozen["draft_key"]),
         }
+
+    def _session_tenant(self, session_id: str) -> str | None:
+        with self.store.tx() as db:
+            row = db.execute(
+                "SELECT tenant FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return None if row is None else str(row["tenant"])
+
+    def _dispatch(self, session_id: str, draft_key: str) -> Json:
+        """Submit one draft to OPE-505 under the current authority of `session_id`.
+
+        The record is re-read immediately before submit: the session's connection grant and
+        binding must still be current, its tenant must be the record's tenant, and the sink
+        re-opens the owner's setup grant. A draft whose authority changed is held, not sent.
+        """
+        service = MixedIntakeService(self.store)
+        try:
+            record = WorkerRecord.read(self.record_path)
+            self._session(record, session_id)
+            _refuse(self._session_tenant(session_id) == record.tenant, "GRANT_CHANGED")
+        except WorkerRefused as refused:
+            hold = IntakeError(refused.code)
+        else:
+            sink = self._sink(record)
+            if sink is None:
+                return {"state": "not_configured", "reason": "starter_selection_absent"}
+            try:
+                MixedIntakeService(self.store, sink=sink).dispatch_draft(draft_key)
+                admitted = sink.admitted(draft_key)
+                if admitted is not None:
+                    hidden = {"kind", "run_identity"}
+                    return {
+                        "state": "admitted",
+                        **{k: v for k, v in admitted.items() if k not in hidden},
+                    }
+                hold = IntakeError("OPE505_ADMISSION_NOT_RECORDED")
+            except IntakeError as error:
+                hold = error
+        service.record_hold(session_id, draft_key, hold)
+        return {"state": "held", "reason": hold.code}
+
+    def dispatch_pending(self) -> Json:
+        """Background recovery: dispatch every pending draft that its own session still may.
+
+        Each draft is re-validated against the current record and its own session's tenant;
+        a held draft is skipped and recorded, and never stops the others.
+        """
+        with self.store.tx() as db:
+            rows = db.execute(
+                "SELECT draft_key, session_id FROM drafts WHERE dispatched=0 ORDER BY rowid"
+            ).fetchall()
+        admitted: list[str] = []
+        held: list[Json] = []
+        for row in rows:
+            key = str(row["draft_key"])
+            result = self._dispatch(str(row["session_id"]), key)
+            if result["state"] == "admitted":
+                admitted.append(key)
+            elif result["state"] == "held":
+                held.append({"draft_key": key, "reason": result["reason"]})
+        return {"admitted": admitted, "held": held}
 
     def _triage(self, service: MixedIntakeService, session_id: str) -> Json:
         """Dispositions as the worker triaged them, ready for an independent reviewer."""

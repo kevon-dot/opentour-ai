@@ -126,6 +126,34 @@ def test_twelve_entry_local_manifest_expected_inventory(svc, fixture) -> None:
     assert svc.counts(sid)["parse_reuse_hits"] == 1  # the copy reused permitted parse work
 
 
+def test_parse_cache_is_never_reused_across_a_reader_upgrade(
+    tmp_path: Path, fixture, monkeypatch
+) -> None:
+    """Review F6: cached parse work is keyed by the reader revisions that produced it."""
+    from opentour_cell.pilot.mixed_intake import readers
+
+    svc = MixedIntakeService(IntakeStore(tmp_path / "cache.db"))
+    adapter = local(fixture)
+    full_run(svc, adapter, binding(page_size=3))
+    reused = full_run(svc, adapter, binding(page_size=4))
+    assert svc.counts(reused)["parse_reuse_hits"] > 1  # control: a new session reuses the cache
+    reads: list[str | None] = []
+    original = readers.read_object
+
+    def spy(data, name, *args, **kw):  # type: ignore[no-untyped-def]
+        reads.append(name)
+        return original(data, name, *args, **kw)
+
+    monkeypatch.setattr(readers, "read_object", spy)
+    monkeypatch.setitem(readers.READER_REVISIONS, "markdown", "opentour.reader.text@9.9.9")
+    upgraded = full_run(svc, adapter, binding(page_size=5))
+    # only the in-session copy reuses work; nothing parsed by the old reader is reused
+    assert svc.counts(upgraded)["parse_reuse_hits"] == 1
+    assert reads, "the upgraded session must parse again"
+    policy = {o.native_id: o for o in svc.store.latest(upgraded)}["generated-n01"]
+    assert policy.parser_revision == "opentour.reader.text@9.9.9"
+
+
 def test_shortcut_has_zero_target_reads_and_symlink_is_guarded(svc, fixture) -> None:
     adapter = local(fixture)
     full_run(svc, adapter)
@@ -458,6 +486,44 @@ def test_replayed_page_and_crash_before_dispatch_yield_one_draft_and_one_job(
     restarted.replay_page(sid, adapter, "generated-root", None)
     assert restarted.dispatch_pending() == 0
     assert len(sink.drafts) == 1 and len(sink.jobs) == 1
+
+
+def test_dispatch_pending_records_a_hold_and_continues_and_freeze_sends_only_its_own(
+    tmp_path: Path, fixture
+) -> None:
+    """Review F1 at the service port: one held draft never stops another draft's dispatch."""
+
+    class Holding(Sink):
+        def __init__(self, refuse: set[str]) -> None:
+            super().__init__()
+            self.refuse = refuse
+
+        def create_draft(self, draft_key: str, payload: Json) -> None:
+            if draft_key in self.refuse:
+                raise IntakeError("GENERATED_HOLD")
+            super().create_draft(draft_key, payload)
+
+    store = IntakeStore(tmp_path / "held.db")
+    adapter = local(fixture)
+    plain = MixedIntakeService(store)
+    held_sid = full_run(plain, adapter, binding(deselected=("generated-n07",)))
+    held = plain.freeze_starter(held_sid)
+    sink = Holding({held["draft_key"]})
+    svc = MixedIntakeService(store, sink=sink)
+    own_sid = full_run(svc, adapter)
+    own = svc.freeze_starter(own_sid)
+    assert own["dispatched"] == 1  # only its own draft, never the other pending one
+    assert [k for k, _ in sink.drafts] == [own["draft_key"]]
+    other_sid = full_run(plain, adapter, binding(deselected=("generated-n06",)))
+    other = plain.freeze_starter(other_sid)
+    assert svc.dispatch_pending() == 1  # the held draft is skipped, the next one still goes
+    assert [k for k, _ in sink.drafts] == [own["draft_key"], other["draft_key"]]
+    hold = {"kind": "dispatch_held", "draft_key": held["draft_key"], "reason": "GENERATED_HOLD"}
+    assert store.ledger(held_sid, "dispatch_held") == [hold]
+    assert svc.dispatch_pending() == 0
+    assert store.ledger(held_sid, "dispatch_held") == [hold]  # recorded once per reason
+    sink.refuse.clear()
+    assert svc.dispatch_pending() == 1 and svc.dispatch_pending() == 0
 
 
 # ------------------------------------------------------------------ changes over time

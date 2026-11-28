@@ -50,11 +50,15 @@ FaultHook = Callable[[str], None]
 
 
 class IntakeError(Exception):
-    """Fail-closed hold with an UPPER_SNAKE code and no object names."""
+    """Fail-closed hold with an UPPER_SNAKE code and no object names.
 
-    def __init__(self, code: str):
+    `link` may carry opaque refs (draft keys, run refs) that a recorded hold keeps, never names.
+    """
+
+    def __init__(self, code: str, link: Mapping[str, str | None] | None = None):
         super().__init__(code)
         self.code = code
+        self.link = dict(link or {})
 
 
 class DraftSink(Protocol):
@@ -769,7 +773,10 @@ class MixedIntakeService:
         variant = "attested" if res.id in b.formula_attested else "plain"
         scope = ancestors[0] if ancestors else ""
         content = sha256(data)
-        cache_key = (b.tenant, scope, content, label, variant + (":r" if export else ""))
+        # Cached work is keyed by the reader revisions that produced it, so an upgraded reader
+        # never inherits an older reader's disposition.
+        revision = f"{label}|{digest(sorted(readers.READER_REVISIONS.items()))}"
+        cache_key = (b.tenant, scope, content, revision, variant + (":r" if export else ""))
         row = None
         if ctx.sid != "trial":
             with self.store.tx() as db:
@@ -1286,7 +1293,8 @@ class MixedIntakeService:
                 self.store.log(db, sid, "draft_admitted", {"draft_key": draft_key})
         if fault:
             fault("after_intake_admission_before_dispatch")
-        dispatched = self.dispatch_pending()
+        # A freeze dispatches only its own draft; other pending drafts never block or ride along.
+        dispatched = int(self.dispatch_draft(draft_key))
         return {
             "draft_key": draft_key,
             "created": not existing,
@@ -1295,23 +1303,54 @@ class MixedIntakeService:
             **{k: payload[k] for k in ("broader_claim_held", "missing_strata", "exclusions")},
         }
 
+    def dispatch_draft(self, draft_key: str) -> bool:
+        """Dispatch one admitted draft exactly once. A sink hold propagates as `IntakeError`."""
+        if self.sink is None:
+            return False
+        with self.store.tx() as db:
+            row = db.execute(
+                "SELECT payload FROM drafts WHERE draft_key=? AND dispatched=0", (draft_key,)
+            ).fetchone()
+        if row is None:
+            return False
+        self.sink.create_draft(draft_key, json.loads(row["payload"]))
+        job_key = digest(["ope505-job", draft_key])
+        self.sink.enqueue_job(job_key, draft_key)
+        with self.store.tx() as db:
+            db.execute("UPDATE drafts SET dispatched=1 WHERE draft_key=?", (draft_key,))
+            db.execute("INSERT OR IGNORE INTO jobs VALUES (?,?)", (job_key, draft_key))
+        return True
+
     def dispatch_pending(self) -> int:
-        """Dispatch admitted drafts exactly once per key. Safe to call after any crash."""
+        """Dispatch admitted drafts exactly once per key. Safe to call after any crash.
+
+        A held draft stays pending with its typed hold recorded; it never stops the others.
+        """
         if self.sink is None:
             return 0
-        sent = 0
         with self.store.tx() as db:
-            rows = db.execute("SELECT draft_key, payload FROM drafts WHERE dispatched=0").fetchall()
+            rows = db.execute(
+                "SELECT draft_key, session_id FROM drafts WHERE dispatched=0 ORDER BY rowid"
+            ).fetchall()
+        sent = 0
         for row in rows:
-            key = row["draft_key"]
-            self.sink.create_draft(key, json.loads(row["payload"]))
-            job_key = digest(["ope505-job", key])
-            self.sink.enqueue_job(job_key, key)
-            with self.store.tx() as db:
-                db.execute("UPDATE drafts SET dispatched=1 WHERE draft_key=?", (key,))
-                db.execute("INSERT OR IGNORE INTO jobs VALUES (?,?)", (job_key, key))
-            sent += 1
+            try:
+                sent += self.dispatch_draft(row["draft_key"])
+            except IntakeError as error:
+                self.record_hold(row["session_id"], row["draft_key"], error)
         return sent
+
+    def record_hold(self, sid: str, draft_key: str, error: IntakeError) -> None:
+        """Record a dispatch hold once per distinct reason, keyed by the draft."""
+        entry: Json = {"draft_key": draft_key, "reason": error.code, **error.link}
+        with self.store.tx() as db:
+            last = db.execute(
+                "SELECT payload FROM ledger WHERE kind='dispatch_held' "
+                "AND json_extract(payload, '$.draft_key')=? ORDER BY id DESC LIMIT 1",
+                (draft_key,),
+            ).fetchone()
+            if last is None or json.loads(last["payload"]) != entry:
+                self.store.log(db, sid, "dispatch_held", entry)
 
     # ------------------------------------------------------------------ surfaces
 
