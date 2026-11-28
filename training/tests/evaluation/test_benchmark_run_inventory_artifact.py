@@ -1,21 +1,23 @@
-"""OPE-526: the committed run inventory is labelled, bound to the commit it measured, and current.
+"""OPE-526: the committed run inventory is labelled, pinned to its measured commit, and current.
 
-Fixture kind: generated. The file is evidence measured at ``MEASURED_SHA``, the parent of the
-commit that wrote it. Two checks bind it:
+Fixture kind: generated. The file was generated at ``MEASURED_SHA`` on the PR #227 branch, where
+that commit was the parent of the commit that wrote the file. PR #227 was squash-merged, so on
+``main`` neither commit is in history and the git binding cannot be checked there. What binds the
+file on ``main`` is this test:
 
 * the measured SHA is pinned here in full, so any other 40-hex value fails;
 * the inventory is regenerated at this checkout (with the committed measurement injected) and
   must equal the committed file apart from wall-clock timestamps and observed CPU time. A
   hand-edited verdict, a changed receipt digest or drift in any code it depends on fails.
 
-Whenever the generator, the audit or the release check changes output (for example after the
-OPE-526 exposure fail-open change, PR #219, lands), regenerate the file from a clean checkout and
-update ``MEASURED_SHA`` to the commit it was measured at.
-
 Git ancestry (the measured SHA is an ancestor of HEAD and the parent of the commit that wrote
-the file) is not asserted here: CI checks out a single commit with no history, and squash merges
-drop the measured commit from ``main``. It is checked by
-``ope526_run_inventory.py --verify-committed`` on a full clone instead.
+the file) is not asserted here: CI checks out a single commit with no history. It is checked by
+``ope526_run_inventory.py --verify-committed`` on the writing branch, before it merges. Off that
+branch, including on ``main`` after the squash merge, ``--verify-committed`` fails closed with
+``measured_sha_not_ancestor_of_head`` and ``measured_sha_not_parent_of_commit_that_wrote_the_file``.
+
+Whenever the generator, the audit or the release check changes output, regenerate the file from a
+clean checkout in its own commit and update ``MEASURED_SHA`` to the commit it was measured at.
 """
 
 from __future__ import annotations

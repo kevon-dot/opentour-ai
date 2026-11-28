@@ -18,7 +18,7 @@ import inspect
 import os
 import shutil
 import sqlite3
-from dataclasses import fields, replace
+from dataclasses import fields, make_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -627,6 +627,71 @@ def test_resealed_forgery_is_still_held_because_the_issuer_is_unauthenticated(
 def test_unrecognized_verdict_with_consistent_digest_is_refused(tmp_path: Path) -> None:
     forged = reseal({**allowed(), "verdict": "accepted"})
     assert check(forged, issued(tmp_path, forged)).refusals == ("audit_verdict_unrecognized",)
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [[V.EVALUATION_ALLOWED.value], {"value": V.EVALUATION_ALLOWED.value}, 1, None],
+    ids=["list", "dict", "int", "null"],
+)
+def test_non_string_verdict_with_consistent_digest_is_refused_not_raised(
+    tmp_path: Path, verdict: object,
+) -> None:  # fmt: skip
+    """Finding 2a: an unhashable verdict raised TypeError; it is now a typed refusal."""
+    forged = reseal({**allowed(), "verdict": verdict})
+    store = issued(tmp_path, forged)  # the store checks only self-consistency, so it accepts it
+    assert store.state().ledger.receipts[forged["receipt_id"]]["verdict"] == verdict
+    result = check(forged, store)
+    assert result.refusals == ("audit_verdict_malformed",)
+    assert result.outcome == "refused" and result.holds == ()
+    assert result.release_permitted is False
+    assert "audit_verdict_malformed" in REFUSAL_CODES
+
+
+def test_mixed_type_family_ids_are_refused_not_raised(tmp_path: Path) -> None:
+    """Finding 2b: str and int family ids cannot be ordered, so no manifest can be recomputed."""
+    records = baseline_records()
+    mixed = (replace(records[0], family_id=7), *records[1:])  # type: ignore[arg-type]
+    receipt = allowed()
+    store = issued(tmp_path, receipt, records=mixed)  # set_benchmark accepts it
+    stored = store.state().benchmarks[BENCH].records
+    with pytest.raises(TypeError):
+        store.state().benchmarks[BENCH].bindings()
+    assert {type(r["family_id"]) for r in stored} == {str, int}
+    result = check(receipt, store)
+    assert result.refusals == ("audit_binding_unavailable_to_worker",)
+    assert result.release_permitted is False
+    names = sorted(f.name for f in fields(BindingDigests))
+    assert result.as_json()["decision_basis"]["bindings_absent"] == names
+    assert result.as_json()["decision_basis"]["bindings_recomputed_by_worker"] == []
+
+
+def test_a_binding_field_unknown_to_the_worker_store_is_refused_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Finding 2c: simulates the planned M1 design-manifest field (not reachable today).
+
+    ``BenchmarkState.bindings`` builds its result from ``fields(BindingDigests)``, so a field it
+    computes no value for raised KeyError. Today the six fields are exactly the six bindings the
+    worker store computes; the first assertion fails when that changes.
+    """
+    from opentour_training.evaluation.benchmark_audit import release_check
+
+    known = (*worker_store.RECORD_BINDINGS, *MATERIAL_BINDINGS)
+    assert sorted(f.name for f in fields(BindingDigests)) == sorted(known)
+    receipt = allowed()
+    store = issued(tmp_path, receipt)
+    extended = make_dataclass(
+        "BindingDigests", [(f.name, str) for f in fields(BindingDigests)] + [("design", str)]
+    )
+    monkeypatch.setattr(worker_store, "BindingDigests", extended)
+    monkeypatch.setattr(release_check, "BindingDigests", extended)
+    with pytest.raises(KeyError):
+        store.state().benchmarks[BENCH].bindings()
+    result = check(receipt, store)
+    assert result.refusals == ("audit_binding_unavailable_to_worker",)
+    assert result.release_permitted is False
+    assert dict(result.binding_basis)["design"] == worker_store.BASIS_ABSENT
 
 
 def test_missing_bindings_are_stale(tmp_path: Path) -> None:

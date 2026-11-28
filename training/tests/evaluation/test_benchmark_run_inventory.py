@@ -18,9 +18,17 @@ import ope526_run_inventory
 import pytest
 from ope526_run_inventory import (
     POPULATIONS,
+    ROOT,
+    CheckoutNotMeasurableError,
     DirtyWorkingTreeError,
+    ForeignCodeError,
+    HiddenIndexChangeError,
     build_document,
+    dirty_paths,
+    foreign_project_modules,
     git_measurement,
+    hidden_index_paths,
+    imported_project_files,
     require_clean_tree,
     verify_committed,
     write_document,
@@ -413,11 +421,30 @@ def _committed_inventory(repo: Path, measured: Measurement) -> Path:
     return target
 
 
+def _code_from(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Commit a stand-in project module and report it as the only imported project code.
+
+    The real project modules were imported from this checkout, not from the throwaway ``repo``,
+    so without this every throwaway verification is refused as foreign code (as it should be).
+    """
+    module = repo / "code" / "generated_project_module.py"
+    module.parent.mkdir(exist_ok=True)
+    module.write_text("GENERATED = True\n")
+    _git(repo, "add", "code/generated_project_module.py")
+    _git(repo, "commit", "-q", "-m", "generated project code")
+    monkeypatch.setattr(
+        ope526_run_inventory, "imported_project_files",
+        lambda: {"generated_project_module": str(module)},
+    )  # fmt: skip
+    return module
+
+
 def test_verify_committed_reads_the_committed_blob_and_refuses_a_dirty_tree(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # fmt: skip
     """A throwaway repository holding a freshly built inventory; its measured SHA is absent."""
     repo = _repo(tmp_path)
+    _code_from(repo, monkeypatch)
     target = _committed_inventory(repo, MEASURED)
     clean = verify_committed(repo, target)
     assert "regenerated_inventory_differs_from_committed" not in clean
@@ -443,10 +470,11 @@ def test_verify_committed_reads_the_committed_blob_and_refuses_a_dirty_tree(
 
 
 def test_verify_committed_requires_the_measured_sha_to_be_the_writing_commits_parent(
-    tmp_path: Path,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
     """V3: an ancestor of HEAD that is not the parent of the writing commit is refused."""
     repo = _repo(tmp_path)
+    _code_from(repo, monkeypatch)
     measured_sha = _git(repo, "rev-parse", "HEAD").strip()
     measured = Measurement("2026-01-01T00:00:00Z", measured_sha, False)
     bound = _committed_inventory(repo, measured)
@@ -454,6 +482,7 @@ def test_verify_committed_requires_the_measured_sha_to_be_the_writing_commits_pa
 
     (tmp_path / "second").mkdir()
     repo2 = _repo(tmp_path / "second")
+    _code_from(repo2, monkeypatch)
     measured_sha = _git(repo2, "rev-parse", "HEAD").strip()
     (repo2 / "later.txt").write_text("a commit between the measurement and the inventory\n")
     _git(repo2, "add", "later.txt")
@@ -463,3 +492,146 @@ def test_verify_committed_requires_the_measured_sha_to_be_the_writing_commits_pa
     assert verify_committed(repo2, unbound) == [
         "measured_sha_not_parent_of_commit_that_wrote_the_file"
     ]
+
+
+@pytest.mark.parametrize("shape", ["later_commit", "merge_commit"])
+def test_verify_committed_binds_the_commit_that_wrote_the_file_not_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str,
+) -> None:  # fmt: skip
+    """V3 with HEAD past the writing commit: a later commit, or a merge of the writing branch.
+
+    The writing commit is the last one that changed the file (``git log -1 -- <path>``), not
+    HEAD. HEAD's parent is not the measured commit here, so a check of ``HEAD^`` refuses these.
+    """
+    repo = _repo(tmp_path)
+    _code_from(repo, monkeypatch)
+    measured_sha = _git(repo, "rev-parse", "HEAD").strip()
+    measured = Measurement("2026-01-01T00:00:00Z", measured_sha, False)
+    mainline = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    if shape == "merge_commit":
+        _git(repo, "checkout", "-q", "-b", "writing-branch")
+    target = _committed_inventory(repo, measured)
+    writer = _git(repo, "rev-parse", "HEAD").strip()
+    if shape == "merge_commit":
+        _git(repo, "checkout", "-q", mainline)
+    (repo / "later.txt").write_text("a commit after the inventory was written\n")
+    _git(repo, "add", "later.txt")
+    _git(repo, "commit", "-q", "-m", "later commit")
+    if shape == "merge_commit":
+        _git(repo, "merge", "-q", "--no-ff", "-m", "merge the writing branch", "writing-branch")
+        assert len(_git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()) == 3
+    assert _git(repo, "rev-parse", "HEAD^").strip() != measured_sha
+    assert _git(repo, "log", "-1", "--format=%H", "--", "fixtures/inventory.json").strip() == writer
+    assert verify_committed(repo, target) == []
+
+
+def test_verify_committed_refuses_project_code_imported_from_another_checkout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Finding 1: the throwaway repo is clean, but the code that would run is this checkout's.
+
+    This is the shared-venv case: ``opentour_training``, ``audit_fixtures`` and the script were
+    imported from a different checkout than the one being verified.
+    """
+    repo = _repo(tmp_path)
+    target = _committed_inventory(repo, MEASURED)
+    assert dirty_paths(repo) == () and hidden_index_paths(repo) == ()
+    with pytest.raises(ForeignCodeError) as raised:
+        verify_committed(repo, target)
+    assert raised.value.code == "imported_code_outside_checkout"
+    foreign = {line.partition(": ")[0] for line in raised.value.paths}
+    assert {
+        "audit_fixtures",
+        "ope526_run_inventory",
+        "opentour_training.evaluation.benchmark_audit.audit",
+        "opentour_training.evaluation.benchmark_audit.release_check",
+    } <= foreign
+    monkeypatch.setattr(ope526_run_inventory, "ROOT", repo)
+    assert ope526_run_inventory.main(["--verify-committed", "--output", str(target)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "imported_code_outside_checkout"
+    output = tmp_path / "generated.json"
+    assert ope526_run_inventory.main(["--output", str(output)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "imported_code_outside_checkout"
+    assert not output.exists()
+
+
+def test_project_code_of_this_checkout_is_not_foreign() -> None:
+    """The positive of the case above: the modules this test imported are tracked at ROOT."""
+    files = imported_project_files()
+    assert {"ope526_run_inventory", "audit_fixtures", "opentour_training"} <= set(files)
+    assert foreign_project_modules(ROOT) == ()
+
+
+def test_foreign_project_modules_requires_a_tracked_file_by_realpath(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("*.so\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "tracked.py").write_text("X = 1\n")
+    outside = tmp_path / "elsewhere.py"
+    outside.write_text("X = 2\n")
+    (repo / "pkg" / "link.py").symlink_to(outside)
+    _git(repo, "add", ".gitignore", "pkg")
+    _git(repo, "commit", "-q", "-m", "generated package")
+    # An ignored extension module would load in place of the tracked .py of the same name, and
+    # git status does not report it.
+    shadow = repo / "pkg" / "tracked.cpython-312-x86_64-linux-gnu.so"
+    shadow.write_bytes(b"generated")
+    assert dirty_paths(repo) == ()
+    files: dict[str, str | None] = {
+        "opentour_tracked": str(repo / "pkg" / "tracked.py"),
+        "opentour_tracked_via_dotdot": str(repo / "pkg" / ".." / "pkg" / "tracked.py"),
+        "opentour_namespace": None,
+    }
+    assert foreign_project_modules(repo, files) == ()
+    adverse = {
+        "opentour_outside": str(outside),
+        "opentour_tracked_symlink_to_outside": str(repo / "pkg" / "link.py"),
+        "opentour_ignored_shadow": str(shadow),
+        "opentour_missing": str(repo / "pkg" / "missing.py"),
+    }
+    for name, file in adverse.items():
+        assert foreign_project_modules(repo, {**files, name: file}) == (f"{name}: {file}",)
+
+
+@pytest.mark.parametrize(("flag", "tag"), [("--skip-worktree", "S"), ("--assume-unchanged", "h")])
+def test_require_clean_tree_refuses_an_index_flag_that_hides_an_edit(
+    tmp_path: Path, flag: str, tag: str,
+) -> None:  # fmt: skip
+    repo = _repo(tmp_path)
+    _git(repo, "update-index", flag, "tracked.txt")
+    # Refused before any edit too: with the flag set, git status may not report one.
+    with pytest.raises(HiddenIndexChangeError):
+        require_clean_tree(repo)
+    (repo / "tracked.txt").write_text("hidden edit\n")
+    assert dirty_paths(repo) == ()  # git status does not see the edit
+    with pytest.raises(HiddenIndexChangeError) as raised:
+        require_clean_tree(repo)
+    assert raised.value.code == "index_hides_working_tree_changes"
+    assert raised.value.paths == (f"{tag} tracked.txt",)
+    assert isinstance(raised.value, CheckoutNotMeasurableError)
+    _git(repo, "update-index", flag.replace("--", "--no-"), "tracked.txt")
+    with pytest.raises(DirtyWorkingTreeError):
+        require_clean_tree(repo)
+
+
+def test_verify_committed_refuses_a_reverted_edit_hidden_with_skip_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Finding 1, second vector: a committed edit, reverted on disk and hidden from git status."""
+    repo = _repo(tmp_path)
+    _code_from(repo, monkeypatch)
+    target = _committed_inventory(repo, MEASURED)
+    committed_text = target.read_text()
+    edited = json.loads(committed_text)
+    edited["runs"][0]["verdict"] = "claim_limited_to_named_population"
+    target.write_text(json.dumps(edited))
+    _git(repo, "commit", "-q", "-am", "hand-edited inventory")
+    assert "regenerated_inventory_differs_from_committed" in verify_committed(repo, target)
+    target.write_text(committed_text)
+    _git(repo, "update-index", "--skip-worktree", "fixtures/inventory.json")
+    assert dirty_paths(repo) == ()
+    with pytest.raises(HiddenIndexChangeError):
+        verify_committed(repo, target)
+    monkeypatch.setattr(ope526_run_inventory, "ROOT", repo)
+    assert ope526_run_inventory.main(["--verify-committed", "--output", str(target)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "index_hides_working_tree_changes"

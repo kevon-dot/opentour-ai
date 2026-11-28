@@ -11,12 +11,23 @@ it cannot satisfy a real-population, provider or customer-evidence gate.
 
 The output path must end in ``.json`` (never ``.jsonl``). It is written whole to a temporary
 file and moved into place; it is never opened in append mode. Every row carries its run id,
-timestamp, measured git SHA and dirty flag. The SHA and flag describe the checkout measured,
-which is the commit *before* the one that adds this output.
+timestamp, measured git SHA and dirty flag. The SHA and flag describe the checkout measured; on
+the branch that adds the output, that is the parent of the commit that adds it. A squash merge
+drops both commits from ``main`` (see ``test_benchmark_run_inventory_artifact``).
 
-Both generation and ``--verify-committed`` refuse a dirty working tree (any modified, staged or
-untracked path, raised as ``DirtyWorkingTreeError``): the code that runs is the working tree, so
-only a clean tree makes "measured at HEAD" true.
+Both generation and ``--verify-committed`` refuse a checkout whose running code may not be
+HEAD's, with a ``CheckoutNotMeasurableError`` naming the reason:
+
+* ``working_tree_dirty`` (``DirtyWorkingTreeError``): any modified, staged or untracked path;
+* ``index_hides_working_tree_changes`` (``HiddenIndexChangeError``): any index entry flagged
+  skip-worktree or assume-unchanged, because ``git status`` does not report an edit to it;
+* ``imported_code_outside_checkout`` (``ForeignCodeError``): any imported project module
+  (``opentour_*``, ``audit_fixtures``, this script) whose file does not resolve, through
+  symlinks, to a path tracked in the checkout. This refuses a virtual environment installed
+  from another checkout and an ignored file shadowing a tracked module.
+
+Not covered: a hand-crafted bytecode cache in ``__pycache__`` whose recorded source size and
+mtime match the tracked ``.py`` file is loaded in its place and is not detected here.
 """
 
 from __future__ import annotations
@@ -28,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -270,21 +281,104 @@ def dirty_paths(root: Path) -> tuple[str, ...]:
     return tuple(line for line in status.splitlines() if line.strip())
 
 
-class DirtyWorkingTreeError(RuntimeError):
+class CheckoutNotMeasurableError(RuntimeError):
+    """The code that would run may not be HEAD's, so nothing is measured or verified."""
+
+    code = "checkout_not_measurable"
+
+    def __init__(self, paths: tuple[str, ...]) -> None:
+        super().__init__(f"{self.code}: {len(paths)} path(s)")
+        self.paths = paths
+
+
+class DirtyWorkingTreeError(CheckoutNotMeasurableError):
     """The checkout has uncommitted changes, so the code that would run is not HEAD's."""
 
     code = "working_tree_dirty"
 
-    def __init__(self, paths: tuple[str, ...]) -> None:
-        super().__init__(f"{self.code}: {len(paths)} uncommitted path(s)")
-        self.paths = paths
+
+class HiddenIndexChangeError(CheckoutNotMeasurableError):
+    """Index entries flagged skip-worktree or assume-unchanged hide edits from ``git status``."""
+
+    code = "index_hides_working_tree_changes"
+
+
+class ForeignCodeError(CheckoutNotMeasurableError):
+    """An imported project module was not loaded from a file tracked in this checkout."""
+
+    code = "imported_code_outside_checkout"
+
+
+def hidden_index_paths(root: Path) -> tuple[str, ...]:
+    """Index entries tagged skip-worktree (``S``, ``s``) or assume-unchanged (lowercase).
+
+    Tags are those of ``git ls-files -v``; each entry is returned as ``"<tag> <path>"``.
+    """
+    listing = _git_stdout(root, "ls-files", "-v", "-z")
+    entries = (entry for entry in listing.split("\0") if entry)
+    return tuple(e for e in entries if e[0].islower() or e[0] == "S")
 
 
 def require_clean_tree(root: Path) -> None:
-    """Raise ``DirtyWorkingTreeError`` unless the working tree matches HEAD exactly."""
+    """Raise unless the working tree matches HEAD exactly and no index flag hides a change."""
     paths = dirty_paths(root)
     if paths:
         raise DirtyWorkingTreeError(paths)
+    hidden = hidden_index_paths(root)
+    if hidden:
+        raise HiddenIndexChangeError(hidden)
+
+
+PROJECT_SCRIPT_MODULES = frozenset({"audit_fixtures", "ope526_run_inventory"})
+
+
+def imported_project_files() -> dict[str, str | None]:
+    """Each imported project module and the file it was loaded from (``None`` if it has none).
+
+    Project modules are the ``opentour_*`` packages, ``audit_fixtures`` and this script. A
+    module without a file (a namespace package) runs no code of its own and is reported as
+    ``None``.
+    """
+    found: dict[str, str | None] = {__name__: __file__}  # this script, also when run as __main__
+    for name, module in list(sys.modules.items()):
+        top = name.partition(".")[0]
+        if top.startswith("opentour_") or top in PROJECT_SCRIPT_MODULES:
+            file = getattr(module, "__file__", None)
+            found[name] = file if isinstance(file, str) else None
+    return found
+
+
+def foreign_project_modules(
+    root: Path, files: Mapping[str, str | None] | None = None
+) -> tuple[str, ...]:
+    """Project modules whose file's realpath is not a path tracked in the checkout at ``root``."""
+    files = imported_project_files() if files is None else files
+    top = Path(os.path.realpath(root))
+    tracked = set(_git_stdout(root, "ls-files", "-z").split("\0"))
+    foreign = []
+    for name, file in sorted(files.items()):
+        if file is None:
+            continue
+        try:
+            relative = Path(os.path.realpath(file)).relative_to(top).as_posix()
+        except ValueError:
+            relative = None
+        if relative not in tracked:
+            foreign.append(f"{name}: {file}")
+    return tuple(foreign)
+
+
+def require_checkout_code(root: Path) -> None:
+    """Raise ``ForeignCodeError`` unless every imported project module is tracked at ``root``."""
+    foreign = foreign_project_modules(root)
+    if foreign:
+        raise ForeignCodeError(foreign)
+
+
+def require_measurable_checkout(root: Path) -> None:
+    """Clean tree, no hiding index flags, and the running project code is this checkout's."""
+    require_clean_tree(root)
+    require_checkout_code(root)
 
 
 def git_measurement(root: Path, clock: Callable[[], str]) -> Measurement:
@@ -453,17 +547,21 @@ def regenerate_like(document: dict[str, Any]) -> dict[str, Any]:
 def verify_committed(root: Path, path: Path) -> list[str]:
     """Git-backed checks of a committed inventory; needs full history (not a shallow clone).
 
-    Refuses a dirty working tree with ``DirtyWorkingTreeError`` before anything else: the
-    regeneration runs the working-tree code, so it only speaks for HEAD when the tree is clean.
+    Before anything else it raises ``CheckoutNotMeasurableError`` (see the module docstring)
+    unless the code that runs is HEAD's: a clean tree, no skip-worktree or assume-unchanged
+    entry, and every imported project module loaded from a file tracked under ``root``.
     Reads the blob committed at HEAD (``git show HEAD:<path>``). The measured SHA must be an
     ancestor of HEAD and the parent of the last commit that changed the file, and regenerating
     at HEAD must reproduce the committed blob apart from timestamps and CPU ms.
+
+    The two git checks hold only on the branch that wrote the file. After a squash merge
+    neither the measured commit nor the writing commit is on ``main``, so both fail there.
     """
 
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
-    require_clean_tree(root)
+    require_measurable_checkout(root)
     relative = path.relative_to(root).as_posix()
     problems = []
     blob = git("show", f"HEAD:{relative}")
@@ -513,8 +611,8 @@ def main(argv: list[str] | None = None) -> int:
             problems = verify_committed(ROOT, args.output.resolve())
             print(json.dumps({"output": str(args.output), "problems": problems}, sort_keys=True))
             return 1 if problems else 0
-        require_clean_tree(ROOT)
-    except DirtyWorkingTreeError as exc:
+        require_measurable_checkout(ROOT)
+    except CheckoutNotMeasurableError as exc:
         print(json.dumps({"error": exc.code, "paths": list(exc.paths)}, sort_keys=True))
         return 1
     measured = git_measurement(ROOT, utc_now)
