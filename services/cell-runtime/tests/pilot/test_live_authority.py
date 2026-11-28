@@ -670,7 +670,14 @@ def test_every_production_live_evidence_site_takes_the_authority_default():
                 and node.func.id == "LiveEvidence"
             ):
                 sites.append((source.name, node))
-    assert len(sites) == 5, [name for name, _ in sites]
+    assert sorted(name for name, _ in sites) == [
+        "live_authority.py",
+        "live_outcome_history.py",
+        "local_decision_context.py",
+        "readiness_selection.py",
+        "slack_adapter.py",
+        "slack_adapter.py",
+    ]
     for name, node in sites:
         assert len(node.args) == 2 and not node.keywords, name
         authority = ast.unparse(node.args[1])
