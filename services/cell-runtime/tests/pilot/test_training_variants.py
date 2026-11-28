@@ -12,6 +12,7 @@ import copy
 import dataclasses
 import inspect
 import json
+import shutil
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -1449,3 +1450,416 @@ def test_caller_assertions_alone_never_make_a_child_fit_eligible() -> None:
     last = ledger.children()[-1]
     assert (last["disposition"], last["reason"]) == (QUARANTINED, "validator_policy_disagreement")
     assert manifest(ledger)["admitted_count"] == 0
+
+
+# --------------------------------------- cross-session review of PR #225 (N1, G3, L1, survivors)
+
+AGREE_FREIGHT = ValidatorDecision("generated-independent-validator", "FREIGHT")
+AGREE_REVIEW = ValidatorDecision("generated-independent-validator", "REVIEW")
+
+
+def _world(base: Path, name: str) -> FitWorld:
+    directory = base / name
+    directory.mkdir(mode=0o700)
+    return FitWorld(directory)
+
+
+class _NeverDiffers(str):
+    """A look-alike value for which `!=` is always False."""
+
+    __slots__ = ()
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+
+def test_a_stale_shared_experiment_cannot_admit_a_co_member_held_child(tmp_path: Path) -> None:
+    """N1a: root-1 and root-2 share one fit; retracting root-1 stops root-2's held child."""
+    world = FitWorld(tmp_path)
+    rid = world.reserve(1)
+    gate = FitGate(rid, DELEGATE)
+    ledger = new_ledger(world=world)
+    ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    shared = plan((PARAPHRASE,), root(2), fit_gate=gate, plan_ref="generated-plan-r2")
+    held = ledger.submit(shared, now=NOW).child_ids[0]
+    ledger.retract_root("generated-root-1", "generated-fam-1", "reopened")
+    (child,) = ledger.children("generated-root-2")
+    assert (child["disposition"], child["reason"], child["prior_disposition"]) == (
+        REJECTED,
+        "fit_experiment_stale",
+        HELD,
+    )
+    assert ledger.validate(held, AGREE_FREIGHT) == REJECTED  # the late callback admits nothing
+    assert manifest(ledger)["admitted_count"] == 0
+    (exp,) = ledger.experiments()
+    assert exp["state"] == "stale" and exp["reheld_child_ids"] == [held]
+    # Only in-flight experiments count as a binding: the still-permitted root may move to a
+    # fresh reservation, and its re-held child is re-evaluated in place.
+    fresh = world.reserve(2)
+    moved = plan(
+        (PARAPHRASE,), root(2), fit_gate=FitGate(fresh, DELEGATE), plan_ref="generated-plan-r2b"
+    )
+    ledger.run(moved, VALIDATOR, now=NOW)
+    (child,) = ledger.children("generated-root-2")
+    assert (child["child_id"], child["disposition"]) == (held, ADMITTED)
+    assert child["history"][-1]["reason"] == "fit_experiment_stale"
+    states = [(e["reservation_id"], e["state"]) for e in ledger.experiments()]
+    assert states == sorted([(rid, "stale"), (fresh, "in_flight")])
+    assert manifest(ledger)["admitted_count"] == 1
+
+
+def test_admission_rechecks_the_bound_experiment_state(tmp_path: Path) -> None:
+    """N1: an experiment staled out of band is still refused at admission."""
+    world = _world(tmp_path, "mandates")
+    path = tmp_path / "variants.sqlite3"
+    ledger = new_ledger(path, world)
+    held = ledger.submit(plan((PARAPHRASE,), fit_gate=FitGate(world.reserve(1), DELEGATE)), now=NOW)
+    db = sqlite3.connect(path)
+    db.execute("UPDATE experiments SET state='stale', reason='generated-out-of-band'")
+    db.commit()
+    db.close()
+    assert ledger.validate(held.child_ids[0], AGREE_FREIGHT) == REJECTED
+    assert ledger.children()[0]["reason"] == "fit_experiment_stale"
+    assert manifest(ledger)["admitted_count"] == 0
+
+
+def test_a_withdrawn_mandate_cannot_admit_a_held_child(tmp_path: Path) -> None:
+    """N1b: the reservation is re-read at admission, so withdrawal holds the child."""
+    world = FitWorld(tmp_path)
+    ledger = new_ledger(world=world)
+    held = ledger.submit(plan((PARAPHRASE,), fit_gate=FitGate(world.reserve(1), DELEGATE)), now=NOW)
+    world.mandates.withdraw(MANDATE, actor=OWNER)
+    assert ledger.validate(held.child_ids[0], AGREE_FREIGHT) == REJECTED
+    (child,) = ledger.children()
+    assert child["reason"] == "fit_gate_closed"
+    assert child["history"][-1] == {
+        "disposition": HELD,
+        "reason": "independent_validation_absent",
+        "plan_ref": "generated-plan-1",
+    }
+    assert manifest(ledger)["admitted_count"] == 0
+
+
+def test_co_member_admitted_children_of_a_stale_experiment_leave_fit_counts(
+    tmp_path: Path,
+) -> None:
+    """N1: already-admitted co-member children are marked stale, history untouched."""
+    world = FitWorld(tmp_path)
+    rid = world.reserve(1)
+    gate = FitGate(rid, DELEGATE)
+    ledger = new_ledger(world=world)
+    ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    ledger.run(
+        plan((PARAPHRASE,), root(2), fit_gate=gate, plan_ref="generated-plan-r2"),
+        VALIDATOR,
+        now=NOW,
+    )
+    (before,) = ledger.children("generated-root-2")
+    assert (before["disposition"], before["weight"]) == (ADMITTED, "1")
+    assert manifest(ledger)["admitted_count"] == 2
+    ledger.retract_root("generated-root-1", "generated-fam-1", "reopened")
+    (after,) = ledger.children("generated-root-2")
+    assert (after["disposition"], after["reason"]) == (ADMITTED, "validated")
+    assert after.get("history") == before.get("history")
+    assert after["fit_stale"] == {"reservation_id": rid, "reason": "root_reopened"}
+    assert (after["weight"], after["prior_weight"]) == (None, "1")
+    m = manifest(ledger)
+    assert (m["admitted_count"], m["stale_admitted_count"]) == (0, 1)
+    assert m["stale_admitted_child_ids"] == [after["child_id"]]
+    assert m["final_weights"] == {}
+    assert m["family_sibling_counts"] == {} and m["root_sibling_counts"] == {}
+    assert m["observed_mistake_count"] == 1  # root-2 itself is still a live real root
+    (exp,) = ledger.experiments()
+    assert exp["stale_admitted_child_ids"] == [after["child_id"]]
+
+
+def test_a_copied_mandate_store_cannot_stand_in_for_the_pinned_one(tmp_path: Path) -> None:
+    """G3a/a': copy the store, withdraw the original; the copy is refused, also on restart."""
+    world = _world(tmp_path, "mandates")
+    rid = world.reserve(1)
+    gate = FitGate(rid, DELEGATE)
+    path = tmp_path / "variants.sqlite3"
+    new_ledger(path, world).run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    pending = plan((NO_PO,), fit_gate=gate, plan_ref="generated-plan-held")
+    held = new_ledger(path, world).submit(pending, now=NOW).child_ids[0]
+    shutil.copytree(world.mandates.directory, tmp_path / "copy")
+    copied = LearningMandates(tmp_path / "copy", "generated-org", world.mandates.engagement)
+    world.mandates.withdraw(MANDATE, actor=OWNER)
+    # The copy still answers as an active mandate, so only the pin stops it.
+    assert LearningMandates.grant(copied, rid, actor=DELEGATE)["reservation_id"] == rid
+    assert VariantLedger(path, fit_authority=copied).validate(held, AGREE_REVIEW) == REJECTED
+    assert VariantLedger(path).children()[1]["reason"] == "fit_authority_mismatch"
+    for n, layout in enumerate(("generated-copy-a", "generated-copy-b")):  # each a restart
+        over_copy = VariantLedger(path, fit_authority=copied)
+        attempt = ProposedChild("layout-v1", {"layout": layout}, "FREIGHT")
+        over_copy.run(
+            plan((attempt,), fit_gate=gate, plan_ref=f"generated-plan-copy-{n}"), VALIDATOR, now=NOW
+        )
+        assert over_copy.children()[-1]["reason"] == "fit_authority_mismatch"
+    original = new_ledger(path, world)
+    late = ProposedChild("layout-v1", {"layout": "generated-late"}, "FREIGHT")
+    original.run(plan((late,), fit_gate=gate, plan_ref="generated-plan-late"), VALIDATOR, now=NOW)
+    assert original.children()[-1]["fit_gate"]["status"] == "standing_mandate_withdrawn"
+    assert manifest(original)["admitted_count"] == 1
+
+
+def test_a_store_replaced_at_the_same_path_is_refused(tmp_path: Path) -> None:
+    """G3b: an older snapshot moved back, or rm -rf and recreate, at the same path."""
+    base = tmp_path / "mandates"
+    base.mkdir(mode=0o700)
+    world = FitWorld(base)
+    rid = world.reserve(1)
+    gate = FitGate(rid, DELEGATE)
+    path = tmp_path / "variants.sqlite3"
+    ledger = new_ledger(path, world)
+    ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    held = ledger.submit(plan((NO_PO,), fit_gate=gate, plan_ref="generated-plan-held"), now=NOW)
+    shutil.copytree(base, tmp_path / "snapshot")
+    world.mandates.withdraw(MANDATE, actor=OWNER)
+    shutil.rmtree(base)
+    shutil.move(tmp_path / "snapshot", base)  # same path, organization and engagement
+    restored = LearningMandates(base, "generated-org", world.mandates.engagement)
+    assert LearningMandates.grant(restored, rid, actor=DELEGATE)["reservation_id"] == rid
+    again = VariantLedger(path, fit_authority=restored)
+    assert again.validate(held.child_ids[0], AGREE_REVIEW) == REJECTED
+    assert again.children()[1]["reason"] == "fit_authority_mismatch"
+    shutil.rmtree(base)
+    base.mkdir(mode=0o700)
+    fresh = FitWorld(base)
+    recreated = VariantLedger(path, fit_authority=fresh.mandates)
+    recreated.run(
+        plan(
+            (LAYOUT,), fit_gate=FitGate(fresh.reserve(1), DELEGATE), plan_ref="generated-plan-new"
+        ),
+        VALIDATOR,
+        now=NOW,
+    )
+    assert recreated.children()[-1]["reason"] == "fit_authority_mismatch"
+    assert manifest(recreated)["admitted_count"] == 1
+
+
+def test_an_instance_level_grant_override_is_refused(tmp_path: Path) -> None:
+    """G3c: an exact LearningMandates whose instance shadows `grant` is not the worker ledger."""
+    world = FitWorld(tmp_path)
+    ledger = new_ledger(world=world)
+    held = ledger.submit(plan((PARAPHRASE,), fit_gate=FitGate(world.reserve(1), DELEGATE)), now=NOW)
+
+    def forged(reservation_id: str, *, actor: str) -> dict[str, Any]:
+        return {"reservation_id": reservation_id, "allowed_uses": ["train"], "delegate": actor}
+
+    vars(world.mandates)["grant"] = forged
+    with pytest.raises(TrainingError, match="fit_authority_must_be_worker_mandate_ledger"):
+        VariantLedger(fit_authority=world.mandates)
+    assert ledger.validate(held.child_ids[0], AGREE_FREIGHT) == REJECTED
+    assert ledger.children()[0]["reason"] == "fit_authority_mismatch"
+    invented = plan(
+        (LAYOUT,), fit_gate=FitGate("fit-generated-forged", DELEGATE), plan_ref="generated-plan-f"
+    )
+    ledger.run(invented, VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "fit_authority_mismatch"
+    assert manifest(ledger)["admitted_count"] == 0
+
+
+def _sql(path: Path, statement: str, *args: object) -> None:
+    db = sqlite3.connect(path)
+    try:
+        db.execute(statement, args)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _pinned(path: Path) -> str | None:
+    db = sqlite3.connect(path)
+    try:
+        row = db.execute("SELECT authority_identity FROM authority_pin").fetchone()
+    finally:
+        db.close()
+    return None if row is None else str(row[0])
+
+
+def test_a_rewritten_or_cleared_pin_cannot_hand_experiments_to_another_store(
+    tmp_path: Path,
+) -> None:
+    """G3 fault injection: each experiment records its store; a lost pin is never re-pinned."""
+    world = _world(tmp_path, "mandates")
+    gate = FitGate(world.reserve(1), DELEGATE)
+    path = tmp_path / "variants.sqlite3"
+    ledger = new_ledger(path, world)
+    ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    held = ledger.submit(plan((NO_PO,), fit_gate=gate, plan_ref="generated-plan-held"), now=NOW)
+    shutil.copytree(world.mandates.directory, tmp_path / "copy")
+    copied = LearningMandates(tmp_path / "copy", "generated-org", world.mandates.engagement)
+    scratch = tmp_path / "scratch.sqlite3"
+    VariantLedger(scratch, fit_authority=copied).submit(plan((LAYOUT,), fit_gate=gate), now=NOW)
+    copy_identity = _pinned(scratch)
+    assert copy_identity is not None and copy_identity != _pinned(path)
+    # (1) The pin is rewritten to the copy: the experiment's own recorded store still refuses.
+    _sql(path, "UPDATE authority_pin SET authority_identity=?", copy_identity)
+    over_copy = VariantLedger(path, fit_authority=copied)
+    assert over_copy.validate(held.child_ids[0], AGREE_REVIEW) == REJECTED
+    assert over_copy.children()[1]["reason"] == "fit_authority_mismatch"
+    moved = ProposedChild("layout-v1", {"layout": "generated-rewritten"}, "FREIGHT")
+    over_copy.submit(plan((moved,), fit_gate=gate, plan_ref="generated-plan-rw"), now=NOW)
+    last = over_copy.children()[-1]  # refused at bind, before any admission check
+    assert (last["disposition"], last["reason"]) == (REJECTED, "fit_authority_mismatch")
+    # (2) The pin is deleted: with experiments present that is a mismatch, never a fresh pin.
+    _sql(path, "DELETE FROM authority_pin")
+    cleared = ProposedChild("layout-v1", {"layout": "generated-cleared"}, "FREIGHT")
+    over_copy.run(plan((cleared,), fit_gate=gate, plan_ref="generated-plan-cl"), VALIDATOR, now=NOW)
+    assert over_copy.children()[-1]["reason"] == "fit_authority_mismatch"
+    assert _pinned(path) is None
+    assert manifest(over_copy)["admitted_count"] == 1
+
+
+def test_one_ledger_file_refuses_another_engagement_and_a_copied_ledger(tmp_path: Path) -> None:
+    """G3d: a restart over another engagement's store, or a copied ledger file, is refused."""
+    first, second = _world(tmp_path, "a"), _world(tmp_path, "b")
+    ra, rb = first.reserve(1), second.reserve(1)
+    path = tmp_path / "variants.sqlite3"
+    new_ledger(path, first).run(
+        plan((PARAPHRASE,), fit_gate=FitGate(ra, DELEGATE)), VALIDATOR, now=NOW
+    )
+    assert first.mandates.engagement != second.mandates.engagement
+    assert LearningMandates.grant(second.mandates, rb, actor=DELEGATE)["reservation_id"] == rb
+    restarted = new_ledger(path, second)
+    restarted.run(
+        plan((PARAPHRASE,), root(2), fit_gate=FitGate(rb, DELEGATE), plan_ref="generated-plan-b"),
+        VALIDATOR,
+        now=NOW,
+    )
+    assert restarted.children()[-1]["reason"] == "fit_authority_mismatch"
+    copied = tmp_path / "variants-copy.sqlite3"
+    shutil.copy2(path, copied)
+    clone = new_ledger(copied, first)
+    clone.run(
+        plan((LAYOUT,), fit_gate=FitGate(ra, DELEGATE), plan_ref="generated-plan-copy"),
+        VALIDATOR,
+        now=NOW,
+    )
+    assert clone.children()[-1]["reason"] == "fit_authority_mismatch"
+    m = manifest(new_ledger(path, first))
+    assert m["admitted_count"] == 1
+    assert [e["reservation_id"] for e in m["experiments"]] == [ra]
+
+
+@pytest.mark.parametrize("tamper", ["drop_train_scope", "other_reservation"])
+def test_a_permission_outside_training_scope_or_for_another_reservation_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    """R1/R2: the worker's permission must name this reservation and allow training."""
+    real = LearningMandates.grant
+
+    def narrowed(self: LearningMandates, reservation_id: str, *, actor: str) -> dict[str, Any]:
+        doc = dict(real(self, reservation_id, actor=actor))
+        if tamper == "drop_train_scope":
+            doc["allowed_uses"] = ["inspect", "evaluate"]
+        else:
+            doc["reservation_id"] = "fit-generated-other"
+        return doc
+
+    ledger = new_ledger()
+    held = ledger.submit(plan((PARAPHRASE,)), now=NOW).child_ids[0]  # bound while permitted
+    monkeypatch.setattr(LearningMandates, "grant", narrowed)
+    ledger.run(plan((LAYOUT,), plan_ref="generated-plan-narrowed"), VALIDATOR, now=NOW)
+    last = ledger.children()[-1]
+    assert (last["reason"], last["fit_gate"]["status"]) == (
+        "fit_gate_closed",
+        "fit_reservation_outside_training_scope",
+    )
+    assert ledger.validate(held, AGREE_FREIGHT) == REJECTED
+    assert ledger.children()[0]["reason"] == "fit_gate_closed"
+    assert manifest(ledger)["admitted_count"] == 0
+
+
+@pytest.mark.parametrize("actor", [_Sneaky("generated-not-the-delegate"), 7], ids=["sub", "int"])
+def test_a_look_alike_or_non_string_fit_actor_is_refused(actor: object) -> None:
+    """R9: the gate's actor is an exact str, so a look-alike cannot pass the delegate check."""
+    ledger = new_ledger()
+    gate = FitGate(FIT["gate"].reservation_id, actor)  # type: ignore[arg-type]
+    with pytest.raises(TrainingError, match="invalid_identity_type"):
+        ledger.run(plan((PARAPHRASE,), fit_gate=gate), VALIDATOR, now=NOW)
+    assert ledger.children() == [] and ledger.experiments() == []
+
+
+def test_a_blocked_or_retracted_seed_binds_no_experiment() -> None:
+    """R10: only an eligible, live root can be bound to a fit."""
+    ledger = new_ledger()
+    blocked = (
+        root(7, family_id="generated-fam-protected", split="protected"),
+        root(2, verifier_independent=False),
+    )
+    for n, seed in enumerate(blocked):
+        ledger.run(plan((PARAPHRASE,), seed, plan_ref=f"generated-plan-b{n}"), VALIDATOR, now=NOW)
+    assert ledger.experiments() == []
+    ledger.retract_root("generated-root-1", "generated-fam-1", "revoked")
+    ledger.run(plan((PARAPHRASE,)), VALIDATOR, now=NOW)
+    assert ledger.children()[-1]["reason"] == "root_invalidated"
+    assert ledger.experiments() == []
+
+
+def test_manifest_experiments_are_scoped_to_their_roots(tmp_path: Path) -> None:
+    """R14: a manifest lists only experiments whose roots are in its scope."""
+    world = FitWorld(tmp_path)
+    r1, r2 = world.reserve(1), world.reserve(2)
+    ledger = new_ledger(world=world)
+    other = dataclasses.replace(GRANT, grant_ref="generated-grant-2")
+    ledger.run(plan((PARAPHRASE,), fit_gate=FitGate(r1, DELEGATE)), VALIDATOR, now=NOW)
+    ledger.run(
+        plan((PARAPHRASE,), root(2), grant=other, fit_gate=FitGate(r2, DELEGATE), plan_ref="g2"),
+        VALIDATOR,
+        now=NOW,
+    )
+    assert len(ledger.experiments()) == 2
+    assert [e["reservation_id"] for e in manifest(ledger)["experiments"]] == [r1]
+    g2 = ledger.manifest(
+        seal=SEAL, policy_revision=POLICY.revision, grant_ref="generated-grant-2", mode="training"
+    )
+    assert [e["reservation_id"] for e in g2["experiments"]] == [r2]
+    preview = ledger.manifest(
+        seal=SEAL, policy_revision=POLICY.revision, grant_ref=GRANT.grant_ref, mode="preview"
+    )
+    assert preview["experiments"] == []
+
+
+def test_a_never_differs_policy_revision_cannot_pass_the_revision_check() -> None:
+    """L1: with a non-exact str, `seed.policy_revision != policy.revision` would be False."""
+    sneaky = _NeverDiffers("generated-policy-r9")
+    assert not (POLICY.revision != sneaky)  # the attack the exact-type check closes
+    ledger = VariantLedger()
+    forged = dataclasses.replace(POLICY, revision=sneaky)
+    with pytest.raises(TrainingError, match="invalid_identity_type"):
+        ledger.run(
+            plan((PARAPHRASE,), mode="preview", fit_gate=None, policy=forged), VALIDATOR, now=NOW
+        )
+    assert ledger.children() == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"root": root(fields={**root().fields, "layout": _NeverDiffers("table")})},
+        {"proposals": (ProposedChild("paraphrase-v1", {"vendor_note": _NeverDiffers("x")}, "F"),)},
+        {"proposals": (dataclasses.replace(PARAPHRASE, proposed_label=_NeverDiffers("FREIGHT")),)},
+        {"proposals": (dataclasses.replace(PARAPHRASE, recipe_id=_NeverDiffers("paraphrase-v1")),)},
+        {
+            "policy": dataclasses.replace(
+                POLICY, clauses={"purchase_order": _NeverDiffers("REVIEW")}
+            )
+        },
+        {"policy": dataclasses.replace(POLICY, decision_fields=list(POLICY.decision_fields))},
+    ],
+    ids=["root_field", "edit_value", "proposed_label", "recipe_id", "clause", "fields_list"],
+)
+def test_policy_root_and_edit_values_must_be_exact_types(change: dict[str, object]) -> None:
+    """L1: every compared value is an exact str (or tuple of them)."""
+    ledger = VariantLedger()
+    with pytest.raises(TrainingError):
+        ledger.run(plan((PARAPHRASE,), mode="preview", fit_gate=None, **change), VALIDATOR, now=NOW)
+    assert ledger.children() == []

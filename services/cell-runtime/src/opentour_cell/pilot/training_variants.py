@@ -13,8 +13,11 @@ read-only, from the worker's own `LearningMandates` ledger (the standing learnin
 reservation, which already enforces recurrence class confirmation and the fit budget). The
 caller cannot declare a fit open, and this module never reserves a fit, so variants can neither
 unlock a fit nor request a second one. One root's training augmentation binds to at most one
-in-flight fit experiment. Retracting or reopening a root marks every experiment derived from it
-stale and invalidates its pending proposals; final outcomes and earlier records are kept.
+in-flight fit experiment. The reservation, the experiment state and the pinned store identity
+are re-checked at admission, so a late validation callback cannot admit into a withdrawn,
+stale or substituted fit. Retracting or reopening a root marks every experiment derived from it
+stale, invalidates its pending proposals, re-holds co-member roots' held children and excludes
+their admitted children from fit counts; final outcomes and earlier records are kept.
 
 Trust labels (see `TRUST`): `target_verified`, `verifier_independent`, the `Grant`,
 `approved_validators` and the split seal are caller-asserted; no worker record of target
@@ -29,10 +32,14 @@ under a new root_ref after reopening (needs an explicit reopen operation the spe
 define); (R4) the seal digest is not part of the root pin, so children of a later plan carry
 that plan's split_digest while manifests use the root's stored one; (R5) ledger files made by
 earlier revisions are not migrated (nothing is released); (G1) `LearningMandates` exposes no
-read-only reservation lifecycle state, so a child can still bind to a reservation whose fit was
-already claimed or settled; (G2) the reservation's residual revision is recorded but not bound
-to the root's family; (G3) the variant ledger trusts whichever mandate ledger the worker wires
-in; nothing signs that binding.
+read-only reservation lifecycle state (`grant` and `inspect` omit reserved/running/settled), so
+a child can still bind to a reservation whose fit was already claimed or settled; (G2) the
+reservation exposes only an opaque `residual_revision`, not its residual family set, so it is
+recorded but not bound to the root's family; (G3) the store identity is pinned on a ledger's
+first use, so a *fresh* variant ledger file trusts whichever mandate store it first sees, and
+two separate ledger files can bind one root to two reservations (a store-side binding needs a
+`learning_mandate` change); run one variant ledger per engagement directory. Nothing signs any
+of this.
 
 Simulated, not proven: all generators, validators and grants are caller-supplied local doubles.
 Nothing here is provider, customer-evidence or fit-qualification evidence, and a validated child
@@ -42,6 +49,7 @@ is never a real observation.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import unicodedata
@@ -92,6 +100,7 @@ _RETRYABLE = frozenset(
         "policy_revision_mismatch",
         "fit_already_bound",
         "fit_experiment_stale",
+        "fit_authority_mismatch",
     }
 )
 # A pending proposal: awaiting validation, or a rejection a replay would re-evaluate.
@@ -101,6 +110,13 @@ _PENDING_REJECTIONS = _RETRYABLE
 EXPERIMENT_IN_FLIGHT = "in_flight"
 EXPERIMENT_STALE = "stale"
 FIT_GATE_SOURCE = "learning_mandate_reservation"
+FIT_AUTHORITY_MISMATCH = "fit_authority_mismatch"
+# Class-level behaviour of the worker's mandate ledger; an instance may shadow none of it.
+_AUTHORITY_METHODS: frozenset[str] = frozenset(
+    name
+    for name, value in vars(LearningMandates).items()
+    if callable(value) or isinstance(value, staticmethod | classmethod | property)
+)
 
 # What each input's authority actually is. Reported verbatim in every manifest.
 TRUST: Mapping[str, str] = MappingProxyType(
@@ -362,6 +378,31 @@ def _int(value: object) -> int:
     return value
 
 
+def _check_policy(policy: object) -> None:
+    if type(policy) is not Policy:
+        raise TrainingError("invalid_plan_type")
+    _text_field(policy.revision)
+    for seq in (policy.decision_fields, policy.required_inputs):
+        if type(seq) is not tuple:
+            raise TrainingError("invalid_plan_type")
+        for name in seq:
+            _text_field(name)
+    for key, value in policy.clauses.items():
+        _text_field(key)
+        _text_field(value)
+
+
+def _check_seal(seal: object) -> None:
+    if type(seal) is not SplitSeal:
+        raise TrainingError("invalid_plan_type")
+    _text_field(seal.digest)
+    for table in (seal.assignments, seal.cases):
+        for key, values in table.items():
+            _text_field(key)
+            for value in values:
+                _text_field(value)
+
+
 def _check_plan(plan: GenerationPlan, now: object) -> None:
     """Reject look-alike identities and truthy non-booleans before anything is compared."""
     if type(plan) is not GenerationPlan:
@@ -400,10 +441,31 @@ def _check_plan(plan: GenerationPlan, now: object) -> None:
         _text_field(ref)
     _int(plan.max_children_per_root)
     _int(plan.max_children_per_family)
+    _text_field(plan.mode)
+    for key, value in root.fields.items():
+        _text_field(key)
+        _text_field(value)
+    _check_policy(plan.policy)
+    _check_seal(plan.seal)
+    for recipe_id, recipe in plan.recipes.items():
+        _text_field(recipe_id)
+        if type(recipe) is not Recipe or type(recipe.editable_fields) is not frozenset:
+            raise TrainingError("invalid_plan_type")
+        for value in (recipe.recipe_id, recipe.revision, recipe.kind, *recipe.editable_fields):
+            _text_field(value)
+        _int(recipe.max_edits)
+    if type(plan.proposals) is not tuple:
+        raise TrainingError("invalid_plan_type")
     for proposal in plan.proposals:
         if type(proposal) is not ProposedChild:
             raise TrainingError("invalid_plan_type")
         _int(proposal.cost)
+        _text_field(proposal.recipe_id)
+        _text_field(proposal.proposed_label)
+        for key, edit in proposal.edits.items():
+            _text_field(key)
+            if edit is not None:
+                _text_field(edit)
     if plan.fit_gate is not None:
         if type(plan.fit_gate) is not FitGate:
             raise TrainingError("invalid_fit_gate")
@@ -529,6 +591,10 @@ CREATE TABLE IF NOT EXISTS experiment_roots (
     reservation_id TEXT NOT NULL, root_ref TEXT NOT NULL,
     PRIMARY KEY (reservation_id, root_ref)
 );
+CREATE TABLE IF NOT EXISTS authority_pin (
+    slot INTEGER PRIMARY KEY CHECK (slot = 1),
+    authority_identity TEXT NOT NULL, ledger_identity TEXT NOT NULL, record TEXT NOT NULL
+);
 """
 
 
@@ -536,13 +602,19 @@ class VariantLedger:
     """Durable, replay-safe store of root state, children, spend, experiments and manifests.
 
     `fit_authority` is the worker's own learning-mandate ledger. Without it, no training-mode
-    child can ever pass the fit gate.
+    child can ever pass the fit gate. On first use the ledger pins that store's identity
+    (realpaths and device/inode of its directory and databases, organization, engagement and
+    scope) together with this ledger file's own identity; any later mismatch, on bind or on
+    admission, is `fit_authority_mismatch`. Run one variant ledger per engagement directory.
     """
 
     def __init__(
         self, path: Path | str = ":memory:", *, fit_authority: LearningMandates | None = None
     ) -> None:
-        if fit_authority is not None and type(fit_authority) is not LearningMandates:
+        if fit_authority is not None and (
+            type(fit_authority) is not LearningMandates
+            or _AUTHORITY_METHODS & set(vars(fit_authority))
+        ):
             raise TrainingError("fit_authority_must_be_worker_mandate_ledger")
         self._fit_authority = fit_authority
         self._path = str(path)
@@ -629,7 +701,7 @@ class VariantLedger:
         if plan.mode not in {"preview", "training"}:
             raise TrainingError("invalid_mode")
         # Read the worker-held reservation before taking this ledger's write lock.
-        gate_status, fit = self._resolve_fit_gate(plan)
+        gate_status, fit, authority_id = self._resolve_fit_gate(plan)
         fit_info: Json | None = None
         if plan.mode == "training":
             fit_info = {
@@ -691,10 +763,13 @@ class VariantLedger:
                 )
             fit_reason: str | None = None
             if plan.mode == "training":
-                if fit is None:
-                    fit_reason = "fit_gate_closed"
+                if fit is None or authority_id is None:
+                    mismatch = gate_status == FIT_AUTHORITY_MISMATCH
+                    fit_reason = FIT_AUTHORITY_MISMATCH if mismatch else "fit_gate_closed"
                 elif not invalid_root and seed_block is None:
-                    fit_reason = self._bind_experiment(db, plan, fit)
+                    fit_reason = self._bind_experiment(db, plan, fit, authority_id)
+                    if fit_reason == FIT_AUTHORITY_MISMATCH and fit_info is not None:
+                        fit_info = {**fit_info, "status": FIT_AUTHORITY_MISMATCH}
             for index, proposal in enumerate(plan.proposals):
                 if stopped:
                     not_attempted += 1
@@ -758,40 +833,122 @@ class VariantLedger:
                 ids.append(cid)
         return SubmitResult(tuple(ids), created, replayed, stopped, not_attempted)
 
-    def _resolve_fit_gate(self, plan: GenerationPlan) -> tuple[str | None, Json | None]:
+    def _authority_identity(self) -> str | None:
+        """Identity of the wired-in mandate store as it is on disk now; None if unusable."""
+        auth = self._fit_authority
+        if type(auth) is not LearningMandates or _AUTHORITY_METHODS & set(vars(auth)):
+            return None
+        try:
+            directory, path = Path(auth.directory), Path(auth.path)
+            if path != directory / "learning-mandates.sqlite3":
+                return None
+            parts: list[object] = [
+                "opentour.variants.fit-authority.v1",
+                auth.organization,
+                auth.engagement,
+                auth.scope,
+            ]
+            for item in (directory, path, directory / "training.sqlite3"):
+                info = os.stat(item, follow_symlinks=False)
+                parts += [os.path.realpath(item), info.st_dev, info.st_ino]
+        except (OSError, TypeError, ValueError):
+            return None
+        return digest(parts)
+
+    def _ledger_identity(self) -> str:
+        """This ledger file's own identity, so a copied or recreated ledger is detected."""
+        if self._shared is not None:
+            return "memory"
+        try:
+            info = os.stat(self._path)
+        except OSError:
+            return "missing"
+        return digest(
+            ["opentour.variants.ledger.v1", os.path.realpath(self._path), info.st_dev, info.st_ino]
+        )
+
+    def _check_pin(
+        self, db: sqlite3.Connection, authority_id: str, *, create: bool = True
+    ) -> str | None:
+        """Pin the authority on first bind; afterwards any other store is a mismatch.
+
+        A missing pin is itself a mismatch once any experiment exists (the pin was cleared),
+        and admission never creates one.
+        """
+        mine = self._ledger_identity()
+        row = db.execute(
+            "SELECT authority_identity, ledger_identity FROM authority_pin WHERE slot=1"
+        ).fetchone()
+        if row is None:
+            if not create or db.execute("SELECT 1 FROM experiments LIMIT 1").fetchone():
+                return FIT_AUTHORITY_MISMATCH
+            auth = self._fit_authority
+            record = {
+                "organization": getattr(auth, "organization", None),
+                "engagement": getattr(auth, "engagement", None),
+                "directory": os.path.realpath(getattr(auth, "directory", "")),
+            }
+            db.execute(
+                "INSERT INTO authority_pin (slot, authority_identity, ledger_identity, record)"
+                " VALUES (1,?,?,?)",
+                (authority_id, mine, json.dumps(record, sort_keys=True)),
+            )
+            return None
+        return None if (row[0], row[1]) == (authority_id, mine) else FIT_AUTHORITY_MISMATCH
+
+    def _read_reservation(
+        self, reservation_id: str, actor: str
+    ) -> tuple[str | None, Json | None, str | None]:
+        """Read one reservation read-only. Returns (why_closed, permission, authority_id)."""
+        if self._fit_authority is None:
+            return "no_worker_fit_authority", None, None
+        authority_id = self._authority_identity()
+        if authority_id is None:
+            return FIT_AUTHORITY_MISMATCH, None, None
+        try:
+            # Through the class, never an instance attribute the caller could have replaced.
+            fit = LearningMandates.grant(self._fit_authority, reservation_id, actor=actor)
+        except MandateError as exc:
+            return str(exc) or "fit_reservation_unavailable", None, None
+        if fit.get("reservation_id") != reservation_id:
+            return "fit_reservation_outside_training_scope", None, None
+        if "train" not in fit.get("allowed_uses", ()):
+            return "fit_reservation_outside_training_scope", None, None
+        return None, fit, authority_id
+
+    def _resolve_fit_gate(self, plan: GenerationPlan) -> tuple[str | None, Json | None, str | None]:
         """Read the plan's fit reservation from the worker's mandate ledger (read-only).
 
-        Returns (why_closed, None) or (None, permission). Never reserves or claims a fit.
+        Never reserves or claims a fit.
         """
         if plan.mode != "training":
-            return None, None
+            return None, None, None
         if self._fit_authority is None:
-            return "no_worker_fit_authority", None
+            return "no_worker_fit_authority", None, None
         gate = plan.fit_gate
         if gate is None:
-            return "fit_reservation_absent", None
-        try:
-            fit = self._fit_authority.grant(gate.reservation_id, actor=gate.actor)
-        except MandateError as exc:
-            return str(exc) or "fit_reservation_unavailable", None
-        if fit.get("reservation_id") != gate.reservation_id or "train" not in fit.get(
-            "allowed_uses", ()
-        ):
-            return "fit_reservation_outside_training_scope", None
-        return None, fit
+            return "fit_reservation_absent", None, None
+        return self._read_reservation(gate.reservation_id, gate.actor)
 
-    @staticmethod
-    def _bind_experiment(db: sqlite3.Connection, plan: GenerationPlan, fit: Json) -> str | None:
+    def _bind_experiment(
+        self, db: sqlite3.Connection, plan: GenerationPlan, fit: Json, authority_id: str
+    ) -> str | None:
         """Bind this root's training augmentation to one in-flight fit experiment.
 
         A stale experiment never takes new children, and a root already bound to another
-        in-flight reservation cannot be bound to a second one (no doubled fit).
+        in-flight reservation cannot be bound to a second one (no doubled fit). Stale
+        experiments do not count as a binding, so a still-permitted root can move to a fresh
+        reservation after a co-member was retracted.
         """
+        if self._check_pin(db, authority_id) is not None:
+            return FIT_AUTHORITY_MISMATCH
         rid = str(fit["reservation_id"])
         root_ref = plan.root.root_ref
         found = db.execute(
-            "SELECT state FROM experiments WHERE reservation_id=?", (rid,)
+            "SELECT state, record FROM experiments WHERE reservation_id=?", (rid,)
         ).fetchone()
+        if found is not None and json.loads(found[1]).get("authority_identity") != authority_id:
+            return FIT_AUTHORITY_MISMATCH
         if found is not None and found[0] != EXPERIMENT_IN_FLIGHT:
             return "fit_experiment_stale"
         other = db.execute(
@@ -806,6 +963,8 @@ class VariantLedger:
             record: Json = {
                 "reservation_id": rid,
                 "source": FIT_GATE_SOURCE,
+                "authority_identity": authority_id,
+                "actor": plan.fit_gate.actor if plan.fit_gate else None,
                 "mandate_id": fit.get("mandate_id"),
                 "mandate_revision": fit.get("mandate_revision"),
                 "run_id": fit.get("run_id"),
@@ -826,6 +985,33 @@ class VariantLedger:
             "INSERT OR IGNORE INTO experiment_roots (reservation_id, root_ref) VALUES (?,?)",
             (rid, root_ref),
         )
+        return None
+
+    def _admission_fit_reason(
+        self, db: sqlite3.Connection, record: Json, root_ref: str
+    ) -> str | None:
+        """Re-check the bound fit at admission: in-flight, same store, reservation still held."""
+        rid = (record.get("fit_gate") or {}).get("reservation_id")
+        found = db.execute(
+            "SELECT e.state, e.record FROM experiments e JOIN experiment_roots r"
+            " ON r.reservation_id=e.reservation_id WHERE e.reservation_id=? AND r.root_ref=?",
+            (rid, root_ref),
+        ).fetchone()
+        if found is None:
+            return "fit_gate_closed"
+        if found[0] != EXPERIMENT_IN_FLIGHT:
+            return "fit_experiment_stale"
+        experiment: Json = json.loads(found[1])
+        why, fit, authority_id = self._read_reservation(str(rid), str(experiment["actor"]))
+        if why == FIT_AUTHORITY_MISMATCH:
+            return FIT_AUTHORITY_MISMATCH
+        if fit is None or authority_id is None:
+            return "fit_gate_closed"
+        if (
+            self._check_pin(db, authority_id, create=False) is not None
+            or experiment.get("authority_identity") != authority_id
+        ):
+            return FIT_AUTHORITY_MISMATCH
         return None
 
     @staticmethod
@@ -1097,6 +1283,17 @@ class VariantLedger:
                 new, why = PREVIEW_VALID, "preview_only"
             else:
                 new, why = ADMITTED, "validated"
+            if new == ADMITTED:
+                # The fit gate is re-read at admission, not trusted from submit time.
+                blocked = self._admission_fit_reason(db, record, str(row[1]))
+                if blocked is not None:
+                    entry = {
+                        "disposition": HELD,
+                        "reason": record.get("reason"),
+                        "plan_ref": record.get("plan_ref"),
+                    }
+                    record = {**record, "history": [*record.get("history", []), entry]}
+                    new, why = REJECTED, blocked
             self._update(db, child_id, new, why, record)
             if new == ADMITTED:
                 self._reweigh(db, str(row[3]))
@@ -1123,16 +1320,22 @@ class VariantLedger:
 
     @staticmethod
     def _reweigh(db: sqlite3.Connection, family_id: str) -> None:
-        """Split a family's synthetic influence cap (one real-example unit) across its children."""
-        rows = db.execute(
-            "SELECT child_id, record FROM children WHERE family_id=? AND disposition=?"
-            " ORDER BY seq",
-            (family_id, ADMITTED),
-        ).fetchall()
-        for child_id, rec_json in rows:
-            rec: Json = json.loads(rec_json)
-            rec["weight"] = str(Fraction(1, len(rows)))
-            rec["sibling_count"] = len(rows)
+        """Split a family's synthetic influence cap (one real-example unit) across its children.
+
+        Admitted children of a stale fit experiment take no share and keep no weight.
+        """
+        rows = [
+            (str(child_id), json.loads(rec_json))
+            for child_id, rec_json in db.execute(
+                "SELECT child_id, record FROM children WHERE family_id=? AND disposition=?"
+                " ORDER BY seq",
+                (family_id, ADMITTED),
+            ).fetchall()
+        ]
+        counted = [(child_id, rec) for child_id, rec in rows if not rec.get("fit_stale")]
+        for child_id, rec in counted:
+            rec["weight"] = str(Fraction(1, len(counted)))
+            rec["sibling_count"] = len(counted)
             db.execute(
                 "UPDATE children SET record=? WHERE child_id=?",
                 (json.dumps(rec, sort_keys=True), child_id),
@@ -1187,9 +1390,15 @@ class VariantLedger:
             self._reweigh(db, family_id)
             return tuple(prior)
 
-    @staticmethod
-    def _stale_experiments(db: sqlite3.Connection, root_ref: str, why: str) -> None:
-        """Every in-flight experiment that includes this root can no longer be committed."""
+    def _stale_experiments(self, db: sqlite3.Connection, root_ref: str, why: str) -> None:
+        """Every in-flight experiment that includes this root can no longer be committed.
+
+        Co-member roots stay live, but their children bound to the stale experiment cannot feed
+        it: held children are re-held (rejected `fit_experiment_stale`, retryable under a fresh
+        reservation) and admitted children are marked `fit_stale` and excluded from fit counts,
+        with their disposition, reason and history left as they were.
+        """
+        families: set[str] = set()
         for rid, state, rec_json in db.execute(
             "SELECT e.reservation_id, e.state, e.record FROM experiments e JOIN experiment_roots r"
             " ON r.reservation_id=e.reservation_id WHERE r.root_ref=? AND e.state=?"
@@ -1199,10 +1408,49 @@ class VariantLedger:
             rec: Json = json.loads(rec_json)
             rec["history"] = [*rec.get("history", []), {"state": state, "reason": rec["reason"]}]
             rec.update(state=EXPERIMENT_STALE, reason=why, stale_root_ref=root_ref)
+            reheld: list[str] = []
+            marked: list[str] = []
+            for child_id, disposition, child_why, family, child_json in db.execute(
+                "SELECT c.child_id, c.disposition, c.reason, c.family_id, c.record"
+                " FROM children c JOIN experiment_roots r ON r.root_ref=c.root_ref"
+                " WHERE r.reservation_id=? AND c.root_ref<>? AND c.mode='training'"
+                " AND c.disposition IN (?,?) ORDER BY c.seq",
+                (rid, root_ref, HELD, ADMITTED),
+            ).fetchall():
+                child: Json = json.loads(child_json)
+                if (child.get("fit_gate") or {}).get("reservation_id") != rid:
+                    continue
+                if disposition == HELD:
+                    child["prior_disposition"] = disposition
+                    child["prior_reason"] = child_why
+                    child["history"] = [
+                        *child.get("history", []),
+                        {
+                            "disposition": disposition,
+                            "reason": child_why,
+                            "plan_ref": child.get("plan_ref"),
+                        },
+                    ]
+                    self._update(db, child_id, REJECTED, "fit_experiment_stale", child)
+                    reheld.append(str(child_id))
+                elif not child.get("fit_stale"):
+                    child["fit_stale"] = {"reservation_id": rid, "reason": why}
+                    child["prior_weight"] = child.get("weight")
+                    child["weight"] = None
+                    db.execute(
+                        "UPDATE children SET record=? WHERE child_id=?",
+                        (json.dumps(child, sort_keys=True), child_id),
+                    )
+                    marked.append(str(child_id))
+                    families.add(str(family))
+            rec["reheld_child_ids"] = reheld
+            rec["stale_admitted_child_ids"] = marked
             db.execute(
                 "UPDATE experiments SET state=?, reason=?, record=? WHERE reservation_id=?",
                 (EXPERIMENT_STALE, why, json.dumps(rec, sort_keys=True), rid),
             )
+        for family in sorted(families):
+            self._reweigh(db, family)
 
     def experiments(self) -> list[Json]:
         """Fit experiments with their member roots, in reservation order."""
@@ -1273,12 +1521,17 @@ class VariantLedger:
             (str(a), str(b)) for a, b in roots if seal.assignments.get(b) == ("training",)
         ]
         child_ids = {r["child_id"] for r in every}
+        # Admitted children of a stale fit experiment never count toward a fit.
+        stale_admitted = sorted(
+            r["child_id"] for r in rows if r["disposition"] == ADMITTED and r.get("fit_stale")
+        )
+        fit_admitted = [r for r in rows if r["disposition"] == ADMITTED and not r.get("fit_stale")]
         by_state = Counter(r["disposition"] for r in rows)
         reasons = Counter(
             r["reason"] for r in rows if r["disposition"] in {REJECTED, QUARANTINED, INVALIDATED}
         )
-        siblings = Counter(r["root_ref"] for r in rows if r["disposition"] == ADMITTED)
-        family_siblings = Counter(r["family_id"] for r in rows if r["disposition"] == ADMITTED)
+        siblings = Counter(r["root_ref"] for r in fit_admitted)
+        family_siblings = Counter(r["family_id"] for r in fit_admitted)
         families = sorted({fam for _, fam in live_roots})
         body: Json = {
             "schema_version": MANIFEST_SCHEMA,
@@ -1287,7 +1540,9 @@ class VariantLedger:
             "grant_ref": grant_ref,
             "split_digest": seal.digest,
             "generated_count": len(rows),
-            "admitted_count": by_state[ADMITTED],
+            "admitted_count": len(fit_admitted),
+            "stale_admitted_count": len(stale_admitted),
+            "stale_admitted_child_ids": stale_admitted,
             "preview_valid_count": by_state[PREVIEW_VALID],
             "held_count": by_state[HELD],
             "quarantined_count": by_state[QUARANTINED],
@@ -1302,9 +1557,7 @@ class VariantLedger:
             ),
             "root_sibling_counts": dict(sorted(siblings.items())),
             "family_sibling_counts": dict(sorted(family_siblings.items())),
-            "final_weights": {
-                r["child_id"]: r["weight"] for r in rows if r["disposition"] == ADMITTED
-            },
+            "final_weights": {r["child_id"]: r["weight"] for r in fit_admitted},
             "invalidated_child_ids": sorted(
                 r["child_id"] for r in rows if r["disposition"] == INVALIDATED
             ),
@@ -1321,6 +1574,7 @@ class VariantLedger:
                         "recipe",
                         "validator_ref",
                         "weight",
+                        "fit_stale",
                     )
                 }
                 for r in rows
