@@ -217,8 +217,11 @@ owns differencing control across released cells.
   for every example, the case (`seed_case_changed`), the inputs digest (`seed_inputs_changed`),
   the keyed label digest (`seed_label_changed`) and the keyed `prediction_digest`
   (`seed_prediction_changed`) all equal the snapshot's. A capture older than the snapshot's
-  revision is refused (`seed_source_revision_changed`), and the seed root carries the
-  snapshot's revision. A snapshot without `prediction_digest` (the `65329ee` format) is refused
+  revision is refused (`seed_source_revision_changed`); that check applies to each example's
+  decision source. A correction source below the snapshot's revision is not refused by it
+  (normally the source-revision mark has already held it as regressed): its chosen correction
+  still has to reproduce the snapshot's keyed label digest, so it seeds only with equal
+  content. The seed root carries the snapshot's revision. A snapshot without `prediction_digest` (the `65329ee` format) is refused
   as `snapshot_format_outdated`. The split seal groups by the snapshot's cases and root
   families, so the pair cannot regroup it.
 - **Superseded labels.** Current eligibility retracts an as-of eligible example whose current
@@ -237,13 +240,27 @@ owns differencing control across released cells.
 - **Reader trust.** The mark trusts the revision the reader reports. Relabelled stale content
   at a higher revision is read as newer; what keeps it from re-admitting a retracted example is
   the worker's own record (next item). Deleting the mark files resets the mark (filesystem
-  writer class). A reader that reports a changed label retracts that root for the snapshot,
+  writer class). That includes this case: if a withdrawal was only ever seen by `current()`,
+  with no committed snapshot and no stored parents manifest recording it, deleting the marks
+  lets a replay of the earlier capture through again. A reader that reports a changed label retracts that root for the snapshot,
   and the retraction sticks; that fails closed.
 - **Retractions stick.** `training_parents` unions the retractions of every parents manifest it
   stored for the snapshot (and only that snapshot: retraction reasons are relative to each
   snapshot's as-of labels). It also treats as retracted any example that a committed snapshot
   later than the as-of one shows as not eligible, absent or on another label. A stale read,
-  even one committed as a new snapshot, therefore never re-admits an example.
+  even one committed as a new snapshot, therefore never re-admits an example to that as-of
+  snapshot's training parents.
+- **The cost of sticky retractions (accepted by the owner).** One transient later snapshot is
+  enough to retract a root for an earlier as-of snapshot for good. Two examples: S2 is captured
+  while T1's row is briefly missing and S3 has T1 back with the same label; or S2 catches an
+  immature reopen and S3 has a same-value re-final. In both, S1's training parents show T1 as
+  retracted from then on. The newest snapshot is unaffected, so the practical rule is to train
+  from the latest snapshot. Any trigger whose reader the caller controls can retract roots
+  from every earlier snapshot this way; that fails closed (fewer parents, never a wrong one).
+- **One producer per directory.** The producer's lock is re-entrant per `SnapshotProducer`
+  instance, while `flock` is per open file. Two instances on the same snapshots directory
+  nested in one thread deadlock. Use one producer per directory; the recorder's
+  `recorder.producer` already does.
 - **Seal scope.** The seal covers `dataset_preparation` records only, so an evaluation or
   other record made after sealing never conflicts with it. Dataset records and sealing share
   one lock.

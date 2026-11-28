@@ -1487,3 +1487,121 @@ def test_p8_a_retraction_stored_for_another_snapshot_does_not_cross_over(
     current = w.recorder.training_parents(fx.TENANT_A, fx.WF, s2, fx.reader(later))
     assert sorted(p["example_ref"] for p in current["parents"]) == sorted([t1, t2])
     assert current["retracted"] == []
+
+
+# --------------------------------------------------------------------------- fifth review
+# These tests pin decisions already made; each kills one surviving mutant.
+
+
+def test_q_l2_a_wash_committed_after_the_withdrawal_snapshot_never_readmits(
+    tmp_path: Path,
+) -> None:
+    """Any later snapshot counts, not only the newest: an attacker-committed snapshot newer
+    than the withdrawal one must not re-admit T1 (no manifest is stored in between)."""
+    w, digest, t1, t2, _ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    assert w.producer.trigger(fx.TENANT_A, fx.WF, "t-withdraw", fx.reader(_withdrawn_at(2)))[
+        "state"
+    ] == ("committed")
+    assert w.producer.trigger(fx.TENANT_A, fx.WF, "t-wash", fx.reader(_stale(3)))["state"] == (
+        "committed"
+    )
+    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(3)))
+    assert [p["example_ref"] for p in parents["parents"]] == [t2]
+    assert parents["retracted"] == [{"example_ref": t1, "reason": "correction_withdrawn"}]
+
+
+def test_q_l3_a_relabel_then_wash_still_retracts_on_the_label(tmp_path: Path) -> None:
+    """A later snapshot that keeps T1 eligible but on another label retracts it, even when a
+    still later wash snapshot and the current read both show the original label again."""
+    w, digest, t1, t2, _ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    relabelled = fx.pair(
+        live=[fx.dec("T1", fx.at(10)), fx.dec("T2", fx.at(10, 1))],
+        outcomes=[
+            fx.cor("c-1", "T1", fx.at(10, 5)),
+            fx.cor("c-1b", "T1", fx.at(10, 30), ver=2, status="reopened", value=None),
+            fx.cor("c-1c", "T1", fx.at(10, 45), ver=3, value="DENY"),
+            fx.cor("c-2", "T2", fx.at(10, 6)),
+        ],
+        captured=fx.at(13),
+        revision=2,
+    )
+    assert w.producer.trigger(fx.TENANT_A, fx.WF, "t-relabel", fx.reader(relabelled))["state"] == (
+        "committed"
+    )
+    assert w.producer.trigger(fx.TENANT_A, fx.WF, "t-wash", fx.reader(_stale(3)))["state"] == (
+        "committed"
+    )
+    parents = w.recorder.training_parents(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(3)))
+    assert [p["example_ref"] for p in parents["parents"]] == [t2]
+    assert parents["retracted"] == [{"example_ref": t1, "reason": "label_superseded"}]
+
+
+@pytest.mark.parametrize("edit", ["content", "pin"])
+def test_q_l9_a_mark_whose_pin_or_content_disagrees_is_refused(tmp_path: Path, edit: str) -> None:
+    from opentour_cell.pilot.learning_profile import _pin
+    from opentour_cell.pilot.operating_point import canonical
+
+    w, digest, *_ = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    folder = tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "source-revisions" / fx.LIVE
+    (mark,) = folder.glob("rev-*.json")
+    if edit == "content":
+        # Pinned correctly, but the content names another revision than the file name.
+        body = canonical({"source_ref": fx.LIVE, "source_revision": 0})
+        mark.write_text(body)
+        mark.with_suffix(".pin").write_text(_pin(body))
+    else:
+        mark.with_suffix(".pin").write_text(_pin("{}"))
+    with pytest.raises(ProfileError, match="source_revision_mark_tampered"):
+        w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(1)))
+
+
+def test_q_l12_the_union_holds_the_producer_lock_while_it_recomputes(tmp_path: Path) -> None:
+    import threading
+
+    w, digest, t1, _, m1 = _prepared(tmp_path)
+    w.clock.set(fx.at(13))
+    observed: dict[str, Any] = {}
+
+    def clock() -> Any:
+        if "y" not in observed:
+            observed["y"] = threading.Thread(
+                target=lambda: observed.setdefault(
+                    "y_result",
+                    w.producer.current(fx.TENANT_A, fx.WF, digest, fx.reader(_stale(2))),
+                )
+            )
+            observed["y"].start()
+            observed["y"].join(0.5)
+            observed["y_blocked"] = observed["y"].is_alive()
+        return w.clock.now
+
+    w.producer.clock = clock
+    union = union_synthetic(
+        w.recorder,
+        fx.TENANT_A,
+        fx.WF,
+        m1,
+        [{"child_ref": "syn-1", "root_ref": t1}],
+        read_pair=fx.reader(_stale(1)),
+    )
+    observed["y"].join(10)
+    assert union["admitted"] == [{"child_ref": "syn-1", "root_ref": t1, "origin": "synthetic"}]
+    assert observed["y_blocked"] is True
+    assert observed["y_result"]["state"] == "current" and _mark(tmp_path) == 2
+
+
+def test_q_s7b_a_replayed_trigger_advances_the_mark(tmp_path: Path) -> None:
+    import shutil
+
+    w = _setup(tmp_path)
+    first, source = _two_verified(w)
+    shutil.rmtree(tmp_path / "snapshots" / fx.TENANT_A / fx.WF / "source-revisions")
+    again = w.producer.trigger(fx.TENANT_A, fx.WF, "trigger-1", fx.reader(source))
+    assert again == first  # the replay path, not a new commit
+    assert _mark(tmp_path) == 1
+    w.clock.set(fx.at(13))
+    held = w.producer.current(fx.TENANT_A, fx.WF, first["snapshot_digest"], fx.reader(_stale(0)))
+    assert (held["state"], held.get("reason")) == ("held", "source_revision_regressed")

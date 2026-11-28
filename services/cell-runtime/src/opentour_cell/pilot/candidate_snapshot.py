@@ -1075,6 +1075,9 @@ class SnapshotProducer:
         """The producer's per-(tenant, workflow) lock, re-entrant within one thread.
 
         A single-host ``flock`` like the rest of the module; another thread or process waits.
+        Re-entrancy is per instance, while ``flock`` is per open file: two producers on the
+        same directory nested in one thread deadlock. Use one producer per directory (the
+        recorder's ``recorder.producer`` does).
         """
         key = (tenant, workflow_ref)
         me = threading.get_ident()
