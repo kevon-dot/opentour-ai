@@ -363,9 +363,11 @@ class StarterBenchmarkSink:
     to one draft, and within one OPE-505 workflow a draft may only follow its own chain: the
     expected parent is the run of the nearest chain ancestor that is admitted, or whose own
     journaled receipt verifies (its own key, this workflow, a parent that itself verifies, a run
-    no draft holds, never refused for a blocking lineage reason). A successor under the same
-    grant takes the run its superseded ancestor created. A run is recorded only if OPE-505's own
-    parent run is the expected parent.
+    no draft holds, never refused for a blocking lineage reason). A successor is admitted only
+    on its own, distinct OPE-505 run: under the intent of any ancestor's submit (the same
+    grant) it is held as `OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT` before submitting, and is
+    never recorded on the ancestor's run. A run is recorded only if OPE-505's own parent run is
+    the expected parent.
 
     Reconciliation by adoption: a draft held after its submit reached OPE-505, whose intent has
     since moved on (a regrant), is adopted from its own receipt as `ope505_admitted` with
@@ -468,8 +470,6 @@ class StarterBenchmarkSink:
             receipt = _last(db, RECEIPT, ancestor)
             if receipt is None or receipt.get("workflow_identity") != workflow:
                 continue
-            if receipt.get("run_identity") == identity:
-                continue  # the same OPE-505 run: under the same intent it is this draft's own
             if cls._receipt_fault(db, ancestor, receipt, workflow, depth) is not None:
                 return UNVERIFIABLE, None
             return str(receipt["run_ref"]), {
@@ -493,6 +493,20 @@ class StarterBenchmarkSink:
         if _superseded(db, draft_key):
             raise IntakeError("DRAFT_SUPERSEDED")
         chain = _ancestors(db, draft_key)
+        for ancestor in chain:
+            free = {
+                o["attempt"]
+                for o in _journal(db, OUTCOME, ancestor)
+                if o["outcome"] == "bound_nothing"
+            }
+            receipt = _last(db, RECEIPT, ancestor)
+            if any(
+                sub.get("run_identity") == identity and sub.get("attempt") not in free
+                for sub in _journal(db, SUBMIT, ancestor)
+            ) or (receipt is not None and run_ref is not None and receipt["run_ref"] == run_ref):
+                # The same OPE-505 intent as an ancestor's submit resolves to the ancestor's
+                # run. A successor is only ever admitted on its own, distinct run.
+                raise IntakeError("OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT", link)
         others = [e for e in _admitted_rows(db) if e["draft_key"] != draft_key]
         for entry in others:
             if entry.get("run_identity") == identity or entry["run_ref"] == run_ref:

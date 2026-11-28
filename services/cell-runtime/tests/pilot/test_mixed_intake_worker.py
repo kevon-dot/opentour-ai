@@ -964,8 +964,9 @@ def test_a_draft_superseded_while_its_dispatch_is_in_flight_is_never_recorded(
     """Re-review A5 (threads): superseded after its submit, the stale draft is never adopted.
 
     The stale dispatch is held at `get_run`, after OPE-505 admitted its run and its receipt was
-    journaled. The successor under the same grant takes that run; the stale draft is held as
-    `DRAFT_SUPERSEDED`, with its refusal marker.
+    journaled. Under the same grant the successor would resolve to that same run, so it is held
+    before submitting; the stale draft is held as `DRAFT_SUPERSEDED`, with its refusal marker.
+    A fresh grant admits the successor on its own, distinct run, whose parent is the stale run.
     """
     world = World(tmp_path / "w")
     world.starter()
@@ -977,16 +978,42 @@ def test_a_draft_superseded_while_its_dispatch_is_in_flight_is_never_recorded(
     fresh = w.call(OWNER, FREEZE, {"session_id": sid})
     stale = finish()
     assert fresh["supersedes"] == stale["draft_key"]
-    assert fresh["ope505"]["state"] == "admitted" and fresh["ope505"]["reconciled"] is False
-    assert fresh["ope505"]["benchmark_version"] == 1
+    assert fresh["ope505"] == {"state": "held", "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT"}
     assert stale["ope505"] == {"state": "held", "reason": "DRAFT_SUPERSEDED"}
-    assert [p["draft_key"] for _, p in ledger_rows(world, "ope505_admitted")] == [
-        fresh["draft_key"]
-    ]
+    assert ledger_rows(world, "ope505_admitted") == []
     assert [(p["draft_key"], p["reason"]) for _, p in ledger_rows(world, RECEIPT_REFUSED)] == [
         (stale["draft_key"], "DRAFT_SUPERSEDED")
     ]
-    assert world.ope505_rows("intake_runs") == 1
+    assert world.ope505_rows("intake_runs") == 1 and world.ope505_rows("intake_keys") == 1
+    assert_successor_on_its_own_run(world, w, sid, fresh, stale)
+
+
+def assert_successor_on_its_own_run(world: World, w, sid: str, fresh: Json, stale: Json) -> None:  # type: ignore[no-untyped-def]
+    """A fresh grant admits the successor on a distinct run whose parent is the stale run."""
+    stale_run = next(
+        p["run_ref"]
+        for _, p in ledger_rows(world, "ope505_receipt")
+        if p["draft_key"] == stale["draft_key"]
+    )
+    world.regrant("generated-starter-2", setup_policy_revision="generated-setup-rev-2")
+    ope505 = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    assert ope505["state"] == "admitted" and ope505["draft_key"] == fresh["draft_key"]
+    assert ope505["run_ref"] != stale_run  # never recorded on the ancestor's run
+    assert ope505["ope505_parent_run"] == stale_run and ope505["benchmark_version"] == 2
+    assert ope505["lineage_parent"] == {
+        "draft_key": stale["draft_key"],
+        "run_ref": stale_run,
+        "basis": "own_receipt",
+        "state": "superseded_not_admitted",
+    }
+    own = [
+        p for _, p in ledger_rows(world, "ope505_receipt") if p["draft_key"] == fresh["draft_key"]
+    ]
+    assert [p["run_ref"] for p in own] == [ope505["run_ref"]]  # created by its own keyed submit
+    assert [p["draft_key"] for _, p in ledger_rows(world, "ope505_admitted")] == [
+        fresh["draft_key"]
+    ]
+    assert world.ope505_rows("intake_runs") == 2
     assert w.dispatch_pending()["held"] == [
         {"draft_key": stale["draft_key"], "reason": "DRAFT_SUPERSEDED"}
     ]
@@ -1041,12 +1068,13 @@ def test_a5_a_draft_superseded_in_another_process_is_never_adopted(tmp_path: Pat
     out, err = stale_process.communicate(timeout=120)
     assert stale_process.returncode == 0, err
     stale = json.loads(out)
-    assert fresh["ope505"]["state"] == "admitted" and fresh["supersedes"] == stale["draft_key"]
+    assert (
+        fresh["ope505"] == {"state": "held", "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT"}
+        and fresh["supersedes"] == stale["draft_key"]
+    )
     assert stale["ope505"] == {"state": "held", "reason": "DRAFT_SUPERSEDED"}
-    assert [p["draft_key"] for _, p in ledger_rows(world, "ope505_admitted")] == [
-        fresh["draft_key"]
-    ]
-    assert world.ope505_rows("intake_runs") == 1
+    assert ledger_rows(world, "ope505_admitted") == [] and world.ope505_rows("intake_runs") == 1
+    assert_successor_on_its_own_run(world, w, sid, fresh, stale)
 
 
 class _Hooked(sqlite3.Connection):
@@ -1360,7 +1388,7 @@ def test_x3_a_held_in_flight_ancestor_is_reconciled_before_its_successor(
         ope505 = successor["ope505"]
         assert ope505["state"] == "admitted" and ope505["reconciled"] is False
         assert ope505["benchmark_version"] == 2
-        assert ope505["ope505_parent_run"] == r1["run_ref"]
+        assert ope505["ope505_parent_run"] == r1["run_ref"] != ope505["run_ref"]
         assert ope505["lineage_parent_draft_key"] == stale["draft_key"]
         assert ope505["lineage_parent"] == {
             "draft_key": stale["draft_key"],
@@ -1675,33 +1703,25 @@ def test_a_superseded_ancestors_receipt_still_stands_as_its_successors_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
     """`DRAFT_SUPERSEDED` refuses adoption of the ancestor, never its receipt as a parent."""
-    from opentour_cell.pilot.intake_admission import DurableIntake
-    from opentour_cell.pilot.intake_mcp import AdmissionHold
-
     world = World(tmp_path / "w")
     world.starter()
     w, sid = scanned(world)
     finish = in_flight_at_get_run(monkeypatch, world, sid)
-    original = DurableIntake.submit_intake
-
-    def hold_main(self, actor, request):  # type: ignore[no-untyped-def]
-        if threading.current_thread() is threading.main_thread():
-            return AdmissionHold("generated")
-        return original(self, actor, request)
-
-    monkeypatch.setattr(DurableIntake, "submit_intake", hold_main)
     edit_n05(world, "generated-rev-05-2")
     w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
     successor = w.call(OWNER, FREEZE, {"session_id": sid})
-    assert successor["ope505"] == {"state": "held", "reason": "OPE505_HOLD"}
-    stale = finish()
+    assert successor["ope505"] == {
+        "state": "held",
+        "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
+    }
+    stale = finish()  # finishes after its successor exists: held, with its marker
     assert stale["ope505"] == {"state": "held", "reason": "DRAFT_SUPERSEDED"}
-    monkeypatch.setattr(DurableIntake, "submit_intake", original)
+    assert [p["reason"] for _, p in ledger_rows(world, RECEIPT_REFUSED)] == ["DRAFT_SUPERSEDED"]
     world.regrant("generated-starter-2", setup_policy_revision="generated-setup-rev-2")
     ope505 = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
     r1 = ledger_rows(world, "ope505_receipt")[0][1]
     assert ope505["state"] == "admitted" and ope505["benchmark_version"] == 2
-    assert ope505["ope505_parent_run"] == r1["run_ref"]
+    assert ope505["run_ref"] != r1["run_ref"] and ope505["ope505_parent_run"] == r1["run_ref"]
     assert ope505["lineage_parent"]["state"] == "superseded_not_admitted"
     assert [p["draft_key"] for _, p in ledger_rows(world, "ope505_admitted")] == [
         successor["draft_key"]
@@ -1815,6 +1835,80 @@ def test_a_receipt_whose_lineage_was_never_read_is_never_adopted(
     assert ledger_rows(world, "ope505_admitted") == []
 
 
+def _drop_journal(world: World, kind: str) -> None:
+    with sqlite3.connect(world.directory / entry.STORE_FILE) as db:
+        assert db.execute("DELETE FROM ledger WHERE kind=?", (kind,)).rowcount >= 1
+
+
+def test_a_successor_after_a_pre_journal_admission_is_held_with_its_link(tmp_path: Path) -> None:
+    """A store written before submits were journaled: the admitted ancestor alone holds it."""
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    first = w.call(OWNER, FREEZE, {"session_id": sid})
+    _drop_journal(world, "ope505_submit")
+    _drop_journal(world, "ope505_receipt")
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    second = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert second["ope505"] == {
+        "state": "held",
+        "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
+    }
+    (hold,) = [p for _, p in ledger_rows(world, "dispatch_held")]
+    assert hold["predecessor_draft_key"] == first["draft_key"]
+    assert hold["predecessor_run_ref"] == first["ope505"]["run_ref"]
+    assert world.ope505_rows("intake_runs") == 1
+
+
+def test_a_successor_is_never_recorded_on_its_ancestors_journaled_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Backstop when recording: even if the ancestor's submit row were lost."""
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    finish = in_flight_at_get_run(monkeypatch, world, sid)
+    _drop_journal(world, "ope505_submit")  # forge: the pre-submit check cannot see it
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    fresh = w.call(OWNER, FREEZE, {"session_id": sid})
+    stale = finish()
+    assert fresh["ope505"] == {
+        "state": "held",
+        "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
+    }
+    assert stale["ope505"] == {"state": "held", "reason": "DRAFT_SUPERSEDED"}
+    assert ledger_rows(world, "ope505_admitted") == []
+    assert world.ope505_rows("intake_runs") == 1
+
+
+def test_an_ancestor_submit_that_bound_nothing_never_blocks_its_successor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from opentour_cell.pilot.intake_admission import DurableIntake
+    from opentour_cell.pilot.intake_mcp import AdmissionHold
+
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    original = DurableIntake.submit_intake
+    monkeypatch.setattr(
+        DurableIntake, "submit_intake", lambda self, actor, request: AdmissionHold("generated")
+    )
+    first = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert first["ope505"] == {"state": "held", "reason": "OPE505_HOLD"}
+    monkeypatch.setattr(DurableIntake, "submit_intake", original)
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    second = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert second["supersedes"] == first["draft_key"]
+    ope505 = second["ope505"]
+    assert ope505["state"] == "admitted" and ope505["benchmark_version"] == 1
+    assert ope505["ope505_parent_run"] is None and ope505["lineage_parent"] is None
+    assert world.ope505_rows("intake_runs") == 1
+
+
 def test_l3_a_lock_wait_past_the_busy_timeout_then_a_regrant_reconciles(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1859,6 +1953,7 @@ def test_l3_a_lock_wait_past_the_busy_timeout_then_a_regrant_reconciles(
     assert [p["draft_key"] for p in admitted] == [successor["draft_key"]]
     assert successor["ope505"]["benchmark_version"] == 2
     assert successor["ope505"]["ope505_parent_run"] == r1["run_ref"]
+    assert successor["ope505"]["run_ref"] != r1["run_ref"]
     assert successor["ope505"]["lineage_parent"]["basis"] == "own_receipt"
     assert world.ope505_rows("intake_runs") == 2
     # the superseded ancestor is never adopted: its pending dispatch stays held
@@ -1978,7 +2073,7 @@ def test_a13_a_receipt_journaled_during_a_successors_dispatch_verifies_its_paren
     )
     assert [p["draft_key"] for p in admitted] == [successor["draft_key"]]
     # the receipt journaled after the successor's pre-submit checks is read when recording
-    assert successor["ope505_parent_run"] == r1["run_ref"]
+    assert successor["ope505_parent_run"] == r1["run_ref"] != successor["run_ref"]
     assert successor["lineage_parent"]["draft_key"] == r1["draft_key"]
     assert world.ope505_rows("intake_runs") == 2
 
@@ -2030,6 +2125,9 @@ def test_a14_two_held_ancestors_verify_as_a_receipt_chain(tmp_path: Path, monkey
     parent = third["lineage_parent"]
     assert parent["basis"] == "own_receipt" and parent["draft_key"] == second["draft_key"]
     assert third["ope505_parent_run"] == receipts[second["draft_key"]]["run_ref"]
+    assert third["run_ref"] not in {p["run_ref"] for p in receipts.values() if p is not None} - {
+        receipts[third["draft_key"]]["run_ref"]
+    }
     first_run = next(p["run_ref"] for k, p in receipts.items() if k != second["draft_key"])
     assert receipts[second["draft_key"]]["lineage"]["parent_run"] == first_run
     assert world.ope505_rows("intake_runs") == 3
