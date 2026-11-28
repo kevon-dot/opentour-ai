@@ -1827,3 +1827,66 @@ def test_grant_budget_binds_to_the_ope516_mandate_store_pin(tmp_path: Path) -> N
     grant_budget(fresh, path)
     _set_fit_pin(path, "generated-store-3")
     assert code_of(grant_budget, fresh, path, "generated-budget-2") == "ledger_identity_mismatch"
+
+
+# X21 (mutation survivors M19/M36): grant-ness cannot be dropped by deleting its membership row
+# or by a recomputed partial downgrade of the grant columns.
+def test_grant_binding_rows_are_cross_checked(tmp_path: Path) -> None:
+    path, _ = world(tmp_path, "a0")
+    db_path = tmp_path / "alloc.db"
+    grant_budget(AllocationLedger(db_path), path)
+    db = sqlite3.connect(db_path)
+    fields = list(
+        db.execute(
+            "SELECT budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_digest"
+            " FROM budget"
+        ).fetchone()
+    )
+    db.execute("DELETE FROM grant_budget")
+    db.commit()
+    assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
+        "ledger_integrity_failed"
+    )
+    partial = [*fields[:4], "", *fields[5:]]  # grant_ref blanked, digest recomputed
+    db.execute("UPDATE budget SET grant_ref='', row_digest=?", (sa._budget_digest(*partial),))
+    db.commit()
+    db.close()
+    asserted = allocate([family("p0")], policy())
+    assert code_of(AllocationLedger(db_path).reserve, "generated-budget", asserted) == (
+        "ledger_integrity_failed"
+    )
+
+
+# X22 (mutation survivor M35): OPE-516's manifest and its own roots must agree.
+def test_manifest_that_disagrees_with_ope516_roots_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, seal = world(tmp_path, "a0")
+    real_manifest = tv.VariantLedger.manifest
+
+    def widened(self: tv.VariantLedger, **kw: object) -> dict:
+        body = real_manifest(self, **kw)  # type: ignore[arg-type]
+        return {**body, "independent_families": [*body["independent_families"], "zz"]}
+
+    monkeypatch.setattr(tv.VariantLedger, "manifest", widened)
+    with pytest.raises(AllocationError) as err:
+        allocate([family("a0"), family("zz")], policy(), verified_by=scope(path, seal))
+    assert err.value.code == "verification_source_invalid"
+    assert "manifest_disagrees_with_roots" in str(err.value)
+
+
+# X23 (mutation survivor M07+M09): a family cannot claim another family's live root and case.
+def test_family_cannot_claim_another_familys_live_root(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    sc = scope(path, seal)
+    stolen = RootInput("generated-root-b0", "generated-digest-x", (R1,), 0, "generated-case-b0")
+    plan = allocate([family("a0", roots=(stolen,))], policy(), verified_by=sc)
+    assert zero_by_reason(plan)["a0"] == ("verification_uncorroborated", 0)
+    led = AllocationLedger()
+    grant_budget(led, path)
+    honest = allocate([family("b0")], policy(), verified_by=sc)
+    relabelled = replace(honest, lines=(replace(honest.lines[0], family_id="a0"),))
+    relabelled = replace(relabelled, allocation_id=sa.plan_allocation_id(relabelled))
+    with pytest.raises(AllocationError) as err:
+        led.reserve("generated-budget", relabelled, verified_by=sc, now=TV_NOW)
+    assert err.value.code == "verification_uncorroborated" and "root_not_live" in str(err.value)
