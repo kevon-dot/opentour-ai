@@ -26,6 +26,24 @@ into the run with the case field, so a resumed process always assigns identicall
 written before this checkpoint format are refused explicitly (`checkpoint_format_unsupported`)
 and left byte-for-byte untouched; they are never migrated or silently re-read.
 
+Work order (OPE-572): units are worked by source, then by bucket, and the rows of one unit in
+one canonical order that depends only on the content, never on when or how rows arrived:
+snapshot rows first, by source file rank (the same source-then-partition order files are
+read in), then by the stable hash of tenant/workflow/case (`work_partition_key`), then by
+evidence family and revision; change rows after them, in change-feed order. Each row carries
+that order as a private `order_key`, and each unit pages through it with a keyset cursor, so
+its checkpoint (position, count, digest) and the order its normalizer sees rows are identical
+across runs, insertion orders (retries, page sizes, change feed read before or after the
+snapshot, a successor's re-read) and restarts. File rank leads because files remain the unit
+of reading: a unit works the files that are sealed while later ones are still being read,
+and stops at the first file of its source still being read, so no row can ever arrive behind
+its cursor. A redelivered row keeps the earliest position it was delivered at. A source read
+through two change feeds has no single change order and is refused (`source_feed_ambiguous`),
+and a withdrawal is final for the run on the change path as on the snapshot path. A unit
+whose checkpoint stops accounting for every row before its cursor refuses publication
+(`work_unit_inconsistent`). The order key and the case hash inside it never leave the
+register: every view carries only sources, bucket numbers, counts and one-way digests.
+
 Failure isolation for files: when a partition's bytes change, vanish or are replaced by a
 link while it is being read, it is marked `failed` with that reason, every row already staged
 from it is quarantined (never cited, joined, normalized or published), and every other
@@ -36,8 +54,20 @@ declared row digest or count (`mismatch`) has its rows quarantined and is re-rea
 Disputes are evidence, kept apart from extraction state: a contradictory payload at the same
 revision is recorded in `disputes` whatever the row's state (quarantined included), quarantine
 never clears it, every successor inherits it together with the change-feed cursor that
-delivered it, and a re-read of the same revision is staged disputed. Nothing in this module
-resolves a dispute; there is no resolution path yet, so a dispute is permanent for the lineage.
+delivered it, and a re-read of the same revision is staged disputed.
+
+Disputes carry forward across manifest revisions (OPE-519 decision of 2026-11-28, built in
+OPE-572): every dispute also records its keys in the register's `dispute_keys` ledger, for
+the same tenant and source (resource): the evidence family, and each decision key either
+payload named. A fresh run of any later manifest revision, a successor, and every other run
+of the tenant then hold as disputed every row of that source with a recorded family or
+decision key, whatever revision it carries and whenever it arrived; rows already staged are
+marked when the dispute is recorded. Bumping the manifest revision, bumping the row's
+revision, re-keying the decision, re-identifying the decision object or moving the export to
+another root therefore cannot launder a dispute. The ledger holds only domain-separated
+digests (`dispute_key`), never a decision key, native ID, path or content. Nothing in this
+module resolves a dispute: there is no resolution path yet, so a dispute is permanent for the
+tenant's source. Replacing the whole register still starts fresh, as for source history.
 
 Source history: the store of record for what a manifest source has shown before, the
 first-seen file digest of every partition ID, the digest of every manifest revision and the
@@ -49,10 +79,18 @@ register that has seen a source but has lost its history refuses it (`source_his
 rather than starting fresh. Nothing here is signed: protecting the register against its own
 writer needs the signing and key-custody contract that does not exist yet (OPE-566).
 
+Scheduled run entry point: a scheduled run (OPE-439 owns the schedule) drives one tenant's
+register through this class and nothing else: `start()` (which resumes the same frozen
+manifest revision and is safe to repeat), `step()`, `consume_changes()` for each paired feed,
+then `publish()`, which brings every work unit current first and publishes only a paired,
+reconciled, authorized snapshot. Any refusal leaves the last verified snapshot in place;
+after a withdrawal or a failed partition the run continues through `successor()`.
+
 What is NOT proven: no real Parquet row reader, MCP provider, customer export, installed
 connector, provider rate limit, disk exhaustion or multi-host concurrency is exercised. The
 manifest-file route and its immutability ledger live in `bulk_manifest`; its Parquet row
-decoder is not built (no Parquet library is a locked dependency).
+decoder is not built (no Parquet library is a locked dependency), so without a decoder the
+route fails closed (`parquet_reader_unavailable`) before staging a row.
 Mixed-document format readers belong to OPE-531 and the source-pair reader to OPE-434; this
 module defines only the narrow ports it needs and must be reconciled with their adapter
 interfaces. These tests prove software behavior only and establish no provider or customer
@@ -82,8 +120,20 @@ _ZERO = "0" * 64
 # partition columns and the frozen partitioning scheme, so they are refused, never re-read.
 # v3 is deliberately never issued: the format-refusal test uses it as an unknown format.
 # v5 adds the `disputes` table; v4 stores (never on main) are refused like every older one.
-CHECKPOINT_FORMAT = "opentour.ope519.checkpoint.v5"
+# v6 (OPE-572) adds each row's canonical work order key and dispute-key digests, keyset unit
+# cursors and the register-wide `dispute_keys` ledger. A v5 store has none of them and
+# cannot be ordered or carried forward without inventing them, so it is refused, not migrated.
+# The work order scheme below is part of this format: changing it needs a new format.
+CHECKPOINT_FORMAT = "opentour.ope519.checkpoint.v6"
 WORK_PARTITION_SCHEME = "opentour.ope519.work-partition.sha256-lp.v1"
+WORK_ORDER_SCHEME = "opentour.ope572.work-order.v1"
+DISPUTE_KEY_SCHEME = "opentour.ope572.dispute-key.sha256-lp.v1"
+# Order keys put a 64-bit signed integer in 20 fixed-width digits after this offset, so that
+# text order equals numeric order for every value SQLite can store.
+_ORDINAL_OFFSET = 1 << 63
+# Ends a variable-length order-key field. It sorts below every hex digit, so a field that is a
+# prefix of another (hex of "a" against hex of "ab") always sorts first, as the text does.
+_FIELD_END = "!"
 DEFAULT_WORK_BUCKETS = 64
 MAX_WORK_BUCKETS = 65_536
 # The one field per run that names a row's case, and the kind tag it carries in the hash.
@@ -246,6 +296,60 @@ def _case_fields_ok(row: SourceRow) -> bool:
     return _text_ok(row.decision_key)
 
 
+def _ordinal(value: int) -> str:
+    """A 64-bit signed integer as 20 fixed-width digits whose text order is numeric order."""
+    if type(value) is not int or not -_ORDINAL_OFFSET <= value < _ORDINAL_OFFSET:
+        raise ExtractionError("order_key_out_of_range")
+    return f"{value + _ORDINAL_OFFSET:020d}"
+
+
+def _snapshot_order_key(partition_id: str, work_key: str | None, family: str, revision: int) -> str:
+    """A snapshot row's canonical position inside its work unit (`WORK_ORDER_SCHEME`).
+
+    Segment 0; then the source file's rank, as the hex of its partition ID so that text order
+    is the partition ID's own order; then the row's stable case hash (empty in the unkeyed
+    unit); then its evidence family and revision. Each field is fixed-width or ends with a
+    byte below its alphabet, so comparing two keys compares their fields in this order.
+    """
+    return (
+        "0"
+        + partition_id.encode("utf-8", "surrogatepass").hex()
+        + _FIELD_END
+        + (work_key or "")
+        + _FIELD_END
+        + family
+        + _FIELD_END
+        + _ordinal(revision)
+    )
+
+
+def _change_order_key(feed_revision: int, family: str, revision: int) -> str:
+    """A change row's canonical position: segment 1, after every snapshot row, in feed order."""
+    return "1" + _ordinal(feed_revision) + _FIELD_END + family + _FIELD_END + _ordinal(revision)
+
+
+def _workflow_binding(tenant: str, workflow: str | None) -> str | None:
+    """A domain-separated digest that commits a run to its registered workflow, or None."""
+    if workflow is None:
+        return None
+    encoded = _length_prefixed((WORK_PARTITION_SCHEME + "/workflow", tenant, workflow))
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def dispute_key(tenant: str, resource_id: str, kind: str, value: str) -> str:
+    """Domain-separated SHA-256 naming one disputed evidence family or decision key of a source.
+
+    `kind` is "family" (value: the native ID) or "decision" (value: the decision key). The
+    register's dispute ledger keeps only this digest, never the identifier itself.
+    """
+    if kind not in ("family", "decision") or not all(
+        _text_ok(v) for v in (tenant, resource_id, value)
+    ):
+        raise ExtractionError("dispute_key_invalid")
+    encoded = _length_prefixed((DISPUTE_KEY_SCHEME, tenant, resource_id, kind, value))
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class PartitionRef:
     partition_id: str
@@ -374,6 +478,7 @@ class SnapshotRecord:
 class FeatureCitation:
     # cited | excluded_unknown_visibility | excluded_not_yet_available | unknown_object
     # | excluded_quarantined (staged only from a failed partition) | excluded_not_sealed
+    # | excluded_disputed (every staged revision is disputed, here or carried forward)
     status: str
     revision: int | None = None
     content_digest: str | None = None
@@ -456,17 +561,26 @@ _SCHEMA = (
         occurred_at INTEGER, decision_key TEXT, authority TEXT, label TEXT,
         state TEXT NOT NULL, case_key TEXT, work_bucket INTEGER, seq INTEGER NOT NULL,
         origin TEXT NOT NULL, normalized INTEGER NOT NULL DEFAULT 0,
+        order_key TEXT NOT NULL, dispute_family TEXT NOT NULL, dispute_decision TEXT,
         PRIMARY KEY(run_id, family_id, revision))""",
     """CREATE INDEX IF NOT EXISTS admissions_work ON admissions(
         run_id, resource_id, work_bucket, family_id, revision)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS admissions_seq ON admissions(run_id, seq)""",
-    """CREATE INDEX IF NOT EXISTS admissions_unit ON admissions(
-        run_id, resource_id, work_bucket, seq)""",
+    # The canonical work order of each unit: what a unit's keyset cursor pages through.
+    """CREATE INDEX IF NOT EXISTS admissions_order ON admissions(
+        run_id, resource_id, COALESCE(work_bucket, -1), order_key)""",
+    """CREATE INDEX IF NOT EXISTS admissions_dispute_family ON admissions(dispute_family)""",
+    """CREATE INDEX IF NOT EXISTS admissions_dispute_decision ON admissions(dispute_decision)""",
+    # `after_key` is the order key of the last row the unit consumed ('' before the first).
     """CREATE TABLE IF NOT EXISTS work_units (
         run_id TEXT NOT NULL, resource_id TEXT NOT NULL, bucket INTEGER NOT NULL,
-        state TEXT NOT NULL, reason TEXT NOT NULL, cursor INTEGER NOT NULL,
+        state TEXT NOT NULL, reason TEXT NOT NULL, after_key TEXT NOT NULL,
         count INTEGER NOT NULL, digest TEXT NOT NULL, excluded INTEGER NOT NULL,
         failures INTEGER NOT NULL, PRIMARY KEY(run_id, resource_id, bucket))""",
+    # Register-wide, never per run: what every later run of this tenant's source inherits.
+    """CREATE TABLE IF NOT EXISTS dispute_keys (
+        tenant TEXT NOT NULL, resource_id TEXT NOT NULL, key TEXT NOT NULL,
+        run_id TEXT NOT NULL, PRIMARY KEY(tenant, resource_id, key))""",
     """CREATE TABLE IF NOT EXISTS source_scopes (
         tenant TEXT NOT NULL, scope TEXT NOT NULL, feed_id TEXT,
         manifests INTEGER NOT NULL, partitions INTEGER NOT NULL, PRIMARY KEY(tenant, scope))""",
@@ -838,6 +952,15 @@ class BulkExtraction:
         ids = [p.partition_id for p in manifest.partitions]
         if len(set(ids)) != len(ids):
             raise ExtractionError("manifest_invalid")
+        if not all(_text_ok(p.resource_id) and _text_ok(p.feed) for p in manifest.partitions):
+            raise ExtractionError("manifest_invalid")
+        # A source's change rows are worked in its change feed's order; a source read through
+        # two feeds has no single change order, so it is refused before anything is written.
+        feeds_of: dict[str, set[str]] = {}
+        for ref in manifest.partitions:
+            feeds_of.setdefault(ref.resource_id, set()).add(ref.feed)
+        if any(len(feeds) > 1 for feeds in feeds_of.values()):
+            raise ExtractionError("source_feed_ambiguous")
         run_id = "run-" + _sha([self._tenant, manifest.revision, manifest.mapping_revision])[:24]
         with self._txn() as db:
             existing = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -922,12 +1045,18 @@ class BulkExtraction:
             if frozen.get(ref.partition_id) != ref.file_sha256:
                 raise ExtractionError("partition_mutated")
 
-    def _bucket(self, run: sqlite3.Row, row: SourceRow) -> int | None:
-        """The row's work bucket from the run's FROZEN scheme, never the opener's settings."""
+    def _placement(self, run: sqlite3.Row, row: SourceRow) -> tuple[int | None, str | None]:
+        """The row's (work bucket, stable case hash) from the run's FROZEN scheme.
+
+        Never the opener's settings. Both are None for a row with no value in the declared
+        case field, which goes to its source's unkeyed unit. The case hash orders rows inside
+        a unit; it stays in the register and is never shown.
+        """
         case = case_of(row, run["case_field"])
         if case is None:
-            return None
-        return work_bucket(self._tenant, run["workflow"], case[0], case[1], run["work_buckets"])
+            return None, None
+        key = work_partition_key(self._tenant, run["workflow"], case[0], case[1])
+        return int(key, 16) % run["work_buckets"], key  # the formula of `work_bucket`
 
     def _run(self, run_id: str) -> sqlite3.Row:
         row = self._one("SELECT * FROM runs WHERE run_id=?", run_id)
@@ -1226,9 +1355,9 @@ class BulkExtraction:
         resource = part["resource_id"]
         valid = (
             row.kind in KINDS
-            and bool(row.native_id)
+            and _text_ok(row.native_id)
             and type(row.revision) is int
-            and row.revision >= 1
+            and 1 <= row.revision < _ORDINAL_OFFSET
             and bool(row.content_digest)
             and type(row.size_bytes) is int
             and row.size_bytes >= 0
@@ -1242,9 +1371,19 @@ class BulkExtraction:
         if row.size_bytes > limits.max_object_bytes:
             self._reject(db, run_id, family, row.revision, "object_over_limit", resource)
             return "rejected"
-        bucket = self._bucket(run, row)
+        bucket, work_key = self._placement(run, row)
+        order_key = _snapshot_order_key(part["partition_id"], work_key, family, row.revision)
         return self._admit(
-            db, run_id, part["partition_id"], resource, family, row, allow_new, bucket, "snapshot"
+            db,
+            run_id,
+            part["partition_id"],
+            resource,
+            family,
+            row,
+            allow_new,
+            bucket,
+            "snapshot",
+            order_key,
         )
 
     @staticmethod
@@ -1254,6 +1393,80 @@ class BulkExtraction:
         db.execute(
             "INSERT OR IGNORE INTO rejections VALUES (?,?,?,?,?)",
             (run_id, family, revision, reason, resource),
+        )
+
+    def _decision_dispute_key(self, resource: str, row: SourceRow) -> str | None:
+        if not row.decision_key:
+            return None  # no decision: reconciliation never counts it, so only its family can
+        return dispute_key(self._tenant, resource, "decision", row.decision_key)
+
+    def _carried(
+        self,
+        db: sqlite3.Connection,
+        resource: str,
+        dispute_family: str,
+        dispute_decision: str | None,
+    ) -> bool:
+        """Whether the ledger holds a dispute for this row's family or decision key."""
+        found = db.execute(
+            "SELECT 1 FROM dispute_keys WHERE tenant=? AND resource_id=? AND key IN (?,?)",
+            (self._tenant, resource, dispute_family, dispute_decision or dispute_family),
+        ).fetchone()
+        return found is not None
+
+    def _disputed(
+        self,
+        db: sqlite3.Connection,
+        run_id: str,
+        family: str,
+        revision: int,
+        resource: str,
+        dispute_family: str,
+        dispute_decision: str | None,
+    ) -> bool:
+        """Whether a row is held disputed: recorded in this run, or carried by the ledger."""
+        return self._recorded(db, run_id, family, revision) or self._carried(
+            db, resource, dispute_family, dispute_decision
+        )
+
+    @staticmethod
+    def _recorded(db: sqlite3.Connection, run_id: str, family: str, revision: int) -> bool:
+        """Whether this run's dispute record holds this revision (e.g. kept across quarantine)."""
+        found = db.execute(
+            "SELECT 1 FROM disputes WHERE run_id=? AND family_id=? AND revision=?",
+            (run_id, family, revision),
+        ).fetchone()
+        return found is not None
+
+    def _record_dispute_keys(
+        self, db: sqlite3.Connection, run_id: str, resource: str, keys: set[str]
+    ) -> None:
+        """Record a dispute's keys in the register-wide ledger and apply them everywhere now.
+
+        Every row of every run of this tenant's source that carries one of the keys becomes
+        disputed evidence at once (quarantined rows stay quarantined), whatever its revision
+        and whenever it was staged, so the outcome never depends on whether a row arrived
+        before or after the contradiction did. Rows staged later are matched in `_admit`.
+        """
+        ordered = sorted(keys)
+        for key in ordered:
+            db.execute(
+                "INSERT OR IGNORE INTO dispute_keys VALUES (?,?,?,?)",
+                (self._tenant, resource, key, run_id),
+            )
+        marks = ",".join("?" * len(ordered))
+        scope = (
+            f"resource_id=? AND (dispute_family IN ({marks}) OR dispute_decision IN ({marks}))"
+            " AND run_id IN (SELECT run_id FROM runs WHERE tenant=?)"
+        )
+        args = (resource, *ordered, *ordered, self._tenant)
+        db.execute(
+            "INSERT OR IGNORE INTO disputes SELECT run_id, family_id, revision, resource_id"
+            f" FROM admissions WHERE {scope}",
+            args,
+        )
+        db.execute(
+            f"UPDATE admissions SET state='disputed' WHERE state='admitted' AND {scope}", args
         )
 
     def _admit(
@@ -1267,15 +1480,53 @@ class BulkExtraction:
         allow_new: bool,
         bucket: int | None,
         origin: str,
+        order_key: str,
     ) -> str:
         digest = payload_digest(row)
         existing = db.execute(
-            "SELECT payload_digest FROM admissions WHERE run_id=? AND family_id=? AND revision=?",
+            "SELECT payload_digest, dispute_family, dispute_decision, order_key FROM admissions"
+            " WHERE run_id=? AND family_id=? AND revision=?",
             (run_id, family, row.revision),
         ).fetchone()
         if existing is not None:
+            # A redelivery keeps the earliest position it was ever delivered at, so the work
+            # order cannot depend on which delivery came first. It never moves a row a unit has
+            # consumed: a unit consumes a row only once every file ranked at or before it is
+            # sealed, and only a file still being read, or a later feed revision, redelivers.
             if existing["payload_digest"] == digest:
+                if order_key < existing["order_key"]:
+                    # Identical bytes from an earlier-ranked file: the row now belongs to that
+                    # file, exactly as if it had been read first, so a failure of the later
+                    # file that staged it no longer quarantines it.
+                    held = self._disputed(
+                        db,
+                        run_id,
+                        family,
+                        row.revision,
+                        resource,
+                        existing["dispute_family"],
+                        existing["dispute_decision"],
+                    )
+                    db.execute(
+                        "UPDATE admissions SET order_key=?, partition_id=?, origin=?,"
+                        " state=CASE WHEN state='quarantined' THEN ? ELSE state END"
+                        " WHERE run_id=? AND family_id=? AND revision=?",
+                        (
+                            order_key,
+                            partition_id,
+                            origin,
+                            "disputed" if held else "admitted",
+                            run_id,
+                            family,
+                            row.revision,
+                        ),
+                    )
                 return "duplicate"
+            db.execute(
+                "UPDATE admissions SET order_key=MIN(order_key, ?) WHERE run_id=? AND family_id=?"
+                " AND revision=?",
+                (order_key, run_id, family, row.revision),
+            )
             # Recorded as a dispute whatever the row's extraction state, even quarantined, so
             # neither quarantine nor a successor's re-read can lose it.
             db.execute(
@@ -1288,10 +1539,23 @@ class BulkExtraction:
                 " AND revision=? AND state!='quarantined'",
                 (run_id, family, row.revision),
             )
+            # Carried forward: the family, and every decision key either payload named, stay
+            # disputed for this tenant's source in every run, now and in any later manifest.
+            keys = {existing["dispute_family"]}
+            for key in (existing["dispute_decision"], self._decision_dispute_key(resource, row)):
+                if key is not None:
+                    keys.add(key)
+            self._record_dispute_keys(db, run_id, resource, keys)
             return "disputed"
         if not allow_new:
             self._reject(db, run_id, family, row.revision, "before_cut_not_in_snapshot", resource)
             return "rejected"
+        dispute_family = dispute_key(self._tenant, resource, "family", row.native_id)
+        dispute_decision = self._decision_dispute_key(resource, row)
+        # A revision already disputed in this lineage (e.g. before a quarantine) is staged
+        # disputed again, and so is any row whose family or decision key carries a dispute.
+        carried = self._carried(db, resource, dispute_family, dispute_decision)
+        held = carried or self._recorded(db, run_id, family, row.revision)
         previous = db.execute(
             "SELECT path FROM admissions WHERE run_id=? AND family_id=? AND revision<?"
             " ORDER BY revision DESC LIMIT 1",
@@ -1304,10 +1568,8 @@ class BulkExtraction:
             "INSERT INTO admissions(run_id, family_id, revision, resource_id, partition_id, kind,"
             " native_id, path, content_digest, payload_digest, size_bytes, available_at,"
             " occurred_at, decision_key, authority, label, state, case_key, work_bucket, seq,"
-            " origin, normalized) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
-            # A revision already disputed (e.g. before a quarantine) is staged disputed again.
-            " CASE WHEN EXISTS (SELECT 1 FROM disputes d WHERE d.run_id=? AND d.family_id=?"
-            " AND d.revision=?) THEN 'disputed' ELSE 'admitted' END,?,?,?,?,0)",
+            " origin, normalized, order_key, dispute_family, dispute_decision)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
             (
                 run_id,
                 family,
@@ -1325,15 +1587,21 @@ class BulkExtraction:
                 row.decision_key,
                 row.authority,
                 row.label,
-                run_id,
-                family,
-                row.revision,
+                "disputed" if held else "admitted",
                 row.case_key,
                 bucket,
                 seq,
                 origin,
+                order_key,
+                dispute_family,
+                dispute_decision,
             ),
         )
+        if carried:
+            db.execute(
+                "INSERT OR IGNORE INTO disputes VALUES (?,?,?,?)",
+                (run_id, family, row.revision, resource),
+            )
         if previous is not None and previous["path"] != row.path:
             db.execute(
                 "INSERT OR IGNORE INTO renames VALUES (?,?,?,?)",
@@ -1386,12 +1654,14 @@ class BulkExtraction:
             limits = self.limits_of(run)
             tally: Counter[str] = Counter()
             rows_seen, input_bytes = run["rows_seen"], run["input_bytes"]
-            partitions = {
-                r["resource_id"]: r
-                for r in db.execute(
-                    "SELECT * FROM partitions WHERE run_id=? AND feed=?", (run_id, page.feed)
-                ).fetchall()
-            }
+            fed = db.execute(
+                "SELECT * FROM partitions WHERE run_id=? AND feed=?", (run_id, page.feed)
+            ).fetchall()
+            partitions = {r["resource_id"]: r for r in fed}
+            # A withdrawal is final for the run, as it is on the snapshot path: a grant that
+            # later reads back unchanged does not resume a source already withdrawn. Only a
+            # successor rebinds, so a source's change rows always arrive in feed order.
+            withdrawn = {r["resource_id"] for r in fed if r["state"] == "withdrawn"}
             limit = ""
             for entry in sorted(page.entries, key=lambda e: (e.feed_revision, e.native_id)):
                 if rows_seen >= limits.max_run_rows:
@@ -1402,7 +1672,9 @@ class BulkExtraction:
                 if not replay and input_bytes + size > limits.max_run_bytes:
                     limit = "run_limit_bytes"
                     break
-                tally[self._apply_change(db, run, partitions, entry, replay, limits)] += 1
+                tally[
+                    self._apply_change(db, run, partitions, withdrawn, entry, replay, limits)
+                ] += 1
                 rows_seen += 0 if replay else 1
                 input_bytes += 0 if replay else size
             if not limit:
@@ -1438,6 +1710,7 @@ class BulkExtraction:
         db: sqlite3.Connection,
         run: sqlite3.Row,
         partitions: Mapping[str, sqlite3.Row],
+        withdrawn: set[str],
         entry: ChangeEntry,
         replay: bool,
         limits: RunLimits,
@@ -1448,7 +1721,10 @@ class BulkExtraction:
         if part is None:
             self._reject(db, run_id, family, entry.revision, "resource_out_of_scope", "")
             return "rejected"
-        if self._grants.current(entry.resource_id) != part["grant_revision"]:
+        if (
+            entry.resource_id in withdrawn
+            or self._grants.current(entry.resource_id) != part["grant_revision"]
+        ):
             db.execute(
                 "UPDATE partitions SET state='withdrawn', reason='grant_withdrawn'"
                 " WHERE run_id=? AND resource_id=? AND state IN ('pending','complete')",
@@ -1476,14 +1752,20 @@ class BulkExtraction:
         if (
             entry.op not in ("upsert", "reopen")
             or row is None
+            or not _text_ok(row.native_id)
             or row.native_id != entry.native_id
+            or type(row.revision) is not int
+            or not 1 <= row.revision < _ORDINAL_OFFSET
             or row.revision != entry.revision
             or row.size_bytes > limits.max_object_bytes
             or not _case_fields_ok(row)
         ):
             self._reject(db, run_id, family, entry.revision, "malformed_change", entry.resource_id)
             return "rejected"
-        bucket = self._bucket(run, row)
+        bucket, _ = self._placement(run, row)
+        # Change rows follow the snapshot in their feed's own order, which no read schedule
+        # can change: a source has one feed, and its non-replay entries only move forward.
+        order_key = _change_order_key(entry.feed_revision, family, row.revision)
         return self._admit(
             db,
             run_id,
@@ -1494,6 +1776,7 @@ class BulkExtraction:
             not replay,
             bucket,
             "change",
+            order_key,
         )
 
     # ---- deletion --------------------------------------------------------------------
@@ -1578,7 +1861,14 @@ class BulkExtraction:
         body = {
             "manifest_revision": run["manifest_revision"],
             "mapping_revision": run["mapping_revision"],
-            "work_partitioning": [run["work_scheme"], run["work_buckets"], run["workflow"]],
+            # The workflow is bound by digest: the snapshot still commits to the exact
+            # registration, and no view of the run ever carries the raw workflow identifier.
+            "work_partitioning": [
+                run["work_scheme"],
+                run["work_buckets"],
+                _workflow_binding(run["tenant"], run["workflow"]),
+                WORK_ORDER_SCHEME,
+            ],
             "partitions": [
                 [r["partition_id"], r["state"], r["cursor"], r["count"], r["digest"]]
                 for r in self._all(
@@ -1756,11 +2046,13 @@ class BulkExtraction:
     # ---- work units: everything after staging, keyed by (source, bucket) -------------
 
     def normalize(self, run_id: str, *, max_pages: int = 1_000_000) -> WorkStep:
-        """Advance every work unit's own cursor over its sealed staged rows, round-robin.
+        """Advance every work unit's own cursor through its canonical work order, round-robin.
 
-        Each page of one unit commits its normalized rows and its checkpoint (cursor, count,
-        digest) atomically. A unit whose rows are not sealed yet waits; a unit whose
-        normalizer fails is marked failed with that reason; neither stops any other unit.
+        Units are scheduled by source, then by bucket; each unit pages through its rows in
+        the canonical order of `order_key`. Each page of one unit commits its normalized rows
+        and its checkpoint (cursor, count, digest) atomically. A unit stops at the first file
+        of its source still being read; a unit whose normalizer fails is marked failed with
+        that reason; neither stops any other unit.
         """
         run = self._run(run_id)
         self._check_scheme(run)
@@ -1768,7 +2060,7 @@ class BulkExtraction:
         with self._txn() as db:
             db.execute(
                 "INSERT OR IGNORE INTO work_units SELECT DISTINCT run_id, resource_id,"
-                " COALESCE(work_bucket, -1), 'pending', '', 0, 0, ?, 0, 0 FROM admissions"
+                " COALESCE(work_bucket, -1), 'pending', '', '', 0, ?, 0, 0 FROM admissions"
                 " WHERE run_id=?",
                 (_ZERO, run_id),
             )
@@ -1809,33 +2101,47 @@ class BulkExtraction:
             ).fetchone()
             if unit is None or unit["state"] != "pending":
                 return 0
+            # The first file of this source (in read order) that is still being read. Files
+            # ranked before it are sealed and can add no row; it and every later file can.
+            frontier = db.execute(
+                "SELECT MIN(partition_id) FROM partitions WHERE run_id=? AND resource_id=?"
+                " AND state='pending'",
+                (run_id, resource_id),
+            ).fetchone()[0]
+            unsealed = db.execute(
+                "SELECT COUNT(*) FROM partitions WHERE run_id=? AND resource_id=?"
+                " AND state!='complete'",
+                (run_id, resource_id),
+            ).fetchone()[0]
             rows = db.execute(
-                "SELECT a.seq, a.family_id, a.revision, a.kind, a.payload_digest, a.state,"
-                " a.origin, a.partition_id, (SELECT p.state FROM partitions p WHERE"
-                " p.run_id=a.run_id AND p.partition_id=a.partition_id) AS part_state,"
-                " (SELECT COUNT(*) FROM partitions p WHERE p.run_id=a.run_id AND"
-                " p.resource_id=a.resource_id AND p.state='pending') AS open_parts,"
-                " (SELECT COUNT(*) FROM partitions p WHERE p.run_id=a.run_id AND"
-                " p.resource_id=a.resource_id AND p.state!='complete') AS unsealed"
+                "SELECT a.seq, a.order_key, a.family_id, a.revision, a.kind, a.payload_digest,"
+                " a.state, a.origin, a.partition_id, (SELECT p.state FROM partitions p WHERE"
+                " p.run_id=a.run_id AND p.partition_id=a.partition_id) AS part_state"
                 " FROM admissions a WHERE a.run_id=? AND a.resource_id=?"
-                " AND COALESCE(a.work_bucket, -1)=? AND a.seq>? ORDER BY a.seq LIMIT ?",
-                (run_id, resource_id, bucket, unit["cursor"], limits.page_size),
+                " AND COALESCE(a.work_bucket, -1)=? AND a.order_key>?"
+                " ORDER BY a.order_key LIMIT ?",
+                (run_id, resource_id, bucket, unit["after_key"], limits.page_size),
             ).fetchall()
-            cursor, count, digest = unit["cursor"], unit["count"], unit["digest"]
+            after, count, digest = unit["after_key"], unit["count"], unit["digest"]
             excluded, failures = unit["excluded"], unit["failures"]
             state, reason = "pending", ""
             done: list[int] = []
             moved = 0
             for r in rows:
                 if r["origin"] == "change":
-                    waiting, usable = r["open_parts"] > 0, r["unsealed"] == 0
+                    # Change rows come after every snapshot file of their source.
+                    waiting, usable = frontier is not None, unsealed == 0
                 else:
-                    waiting, usable = r["part_state"] == "pending", r["part_state"] == "complete"
-                if waiting and r["state"] != "quarantined":
-                    break  # its file is still being read: this unit waits, others go on
+                    # A row staged from a file at or after the frontier may still be preceded
+                    # by rows that file has yet to deliver: the unit stops here, quarantined
+                    # or not, so nothing can ever land behind its cursor. Others go on.
+                    waiting = frontier is not None and r["partition_id"] >= frontier
+                    usable = r["part_state"] == "complete"
+                if waiting:
+                    break
                 if not usable or r["state"] == "quarantined":
                     excluded += 1
-                    cursor = r["seq"]
+                    after = r["order_key"]
                     moved += 1
                     continue
                 event = StagedEvent(
@@ -1862,7 +2168,7 @@ class BulkExtraction:
                     _canon([digest, r["family_id"], r["revision"], value]).encode()
                 ).hexdigest()
                 count += 1
-                cursor = r["seq"]
+                after = r["order_key"]
                 done.append(r["seq"])
                 moved += 1
             if not moved and (state, failures) == ("pending", unit["failures"]):
@@ -1872,12 +2178,12 @@ class BulkExtraction:
                     "UPDATE admissions SET normalized=1 WHERE run_id=? AND seq=?", (run_id, seq)
                 )
             db.execute(
-                "UPDATE work_units SET state=?, reason=?, cursor=?, count=?, digest=?,"
+                "UPDATE work_units SET state=?, reason=?, after_key=?, count=?, digest=?,"
                 " excluded=?, failures=? WHERE run_id=? AND resource_id=? AND bucket=?",
                 (
                     state,
                     reason,
-                    cursor,
+                    after,
                     count,
                     digest,
                     excluded,
@@ -1891,12 +2197,17 @@ class BulkExtraction:
         return moved
 
     def work_units(self, run_id: str) -> list[dict[str, Any]]:
-        """Each work unit's own checkpoint and failure boundary. Counts and digests only."""
+        """Each work unit's own checkpoint and failure boundary. Counts and digests only.
+
+        `cursor` is the unit's position in its canonical work order: how many of its rows it
+        has consumed (normalized or excluded). Being a count, it is the same in every run over
+        the same content, and it reveals no key; the keyset cursor itself stays private.
+        """
         out = []
         for u in self._all(
             "SELECT u.*, (SELECT COUNT(*) FROM admissions a WHERE a.run_id=u.run_id AND"
             " a.resource_id=u.resource_id AND COALESCE(a.work_bucket, -1)=u.bucket AND"
-            " a.seq>u.cursor) AS behind FROM work_units u WHERE u.run_id=?"
+            " a.order_key>u.after_key) AS behind FROM work_units u WHERE u.run_id=?"
             " ORDER BY u.resource_id, u.bucket",
             run_id,
         ):
@@ -1906,7 +2217,7 @@ class BulkExtraction:
                     "bucket": None if u["bucket"] == UNKEYED else u["bucket"],
                     "state": u["state"],
                     "reason": u["reason"],
-                    "cursor": u["cursor"],
+                    "cursor": u["count"] + u["excluded"],
                     "count": u["count"],
                     "digest": u["digest"],
                     "excluded": u["excluded"],
@@ -1932,6 +2243,18 @@ class BulkExtraction:
                 reasons.append(f"work_unit_failed:{unit['resource_id']}:{unit['bucket']}")
             elif unit["behind"]:
                 reasons.append(f"work_unit_behind:{unit['resource_id']}:{unit['bucket']}")
+        # A unit's checkpoint must account for every row up to its cursor. A row that turned
+        # up behind a cursor was never worked, so its unit refuses publication; the canonical
+        # order is built so that this cannot happen, and this check does not take it on trust.
+        for u in self._all(
+            "SELECT u.resource_id, u.bucket FROM work_units u WHERE u.run_id=? AND"
+            " u.count + u.excluded != (SELECT COUNT(*) FROM admissions a WHERE"
+            " a.run_id=u.run_id AND a.resource_id=u.resource_id AND"
+            " COALESCE(a.work_bucket, -1)=u.bucket AND a.order_key<=u.after_key)",
+            run_id,
+        ):
+            bucket = None if u["bucket"] == UNKEYED else u["bucket"]
+            reasons.append(f"work_unit_inconsistent:{u['resource_id']}:{bucket}")
         feeds = {p["feed"] for p in parts}
         if not set(PAIRED_FEEDS) <= feeds:
             reasons.append("pair_incomplete")
@@ -2113,6 +2436,10 @@ class BulkExtraction:
                 return FeatureCitation("excluded_quarantined")
             if any(r["state"] == "admitted" for r in staged):
                 return FeatureCitation("excluded_not_sealed")
+            if any(r["state"] == "disputed" for r in staged):
+                # Known but contradicted (here or in an earlier manifest): an exclusion with
+                # its reason, never mistaken for an object the source does not have.
+                return FeatureCitation("excluded_disputed")
             return FeatureCitation("unknown_object")
         known = [r for r in rows if r["available_at"] is not None]
         if not known:
