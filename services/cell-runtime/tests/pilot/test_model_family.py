@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import toy_families as toy
+from opentour_cell.pilot import custom_trainer_connector as ctc
 from opentour_cell.pilot import model_family as fam
 from opentour_cell.pilot.connector_ext import EvidenceTier
 
@@ -100,7 +101,10 @@ def test_a_record_cannot_claim_a_tier_its_evidence_does_not_support(tmp_path: Pa
     # A witnessed tier additionally needs a witness reference; a lower tier is not enough.
     with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
         claim(EvidenceTier.CUSTOMER_WITNESSED, **real)
-    assert claim(EvidenceTier.CUSTOMER_WITNESSED, witness_ref="generated-witness", **real)
+    # OPE-566 owner ruling: a witness string is never a customer witness. Until the OPE-566
+    # PilotVerifier exists, CUSTOMER_WITNESSED is refused whatever string is supplied.
+    with pytest.raises(fam.FamilyError, match="^CUSTOMER_WITNESS_UNSTRUCTURED$"):
+        claim(EvidenceTier.CUSTOMER_WITNESSED, witness_ref="generated-witness", **real)
     assert claim(EvidenceTier.SOFTWARE_QUALIFIED, **real).tier is EvidenceTier.SOFTWARE_QUALIFIED
 
 
@@ -256,7 +260,9 @@ def test_a_qualified_tier_with_no_recorded_checks_is_refused(
 def test_a_qualified_tier_covering_only_some_required_checks_is_refused(
     tmp_path: Path, tier: EvidenceTier
 ) -> None:
-    full = _claim(tmp_path, tier).results
+    # The full result set is taken from the highest constructible tier: CUSTOMER_WITNESSED itself
+    # is refused (OPE-566 ruling), and the results do not depend on the tier.
+    full = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED).results
     partial = full[:-1]
     assert partial and len(partial) == len(full) - 1
     for results in (
@@ -328,12 +334,23 @@ def test_profile_is_fixture_and_build_record_agree_for_every_spelling(
     "family_id",
     ["generatedx", "degenerated-x", "regenerated-x", "my-generated-x", "structural-pinned-profile"],
 )
-def test_a_legitimately_distinct_family_id_is_not_collapsed_into_generated(
+def test_a_legitimately_distinct_family_id_is_not_collapsed_into_generated(family_id: str) -> None:
+    # The narrow ``generated`` prefix rule still keeps these ids distinct from a generated family.
+    assert not fam.is_generated_family_id(family_id)
+
+
+@pytest.mark.parametrize(
+    "family_id", ["generatedx", "degenerated-x", "regenerated-x", "my-generated-x"]
+)
+def test_an_id_merely_containing_generated_is_a_fixture_family(
     tmp_path: Path, family_id: str
 ) -> None:
+    # OPE-566 owner ruling (fixture-name downgrade, as in #218): a name CONTAINING a fixture token
+    # is FIXTURE. These ids qualified before; the rule can only lower a tier.
     family = toy.Family(tmp_path, "generated-toy-linear")
-    assert not replace(family.profile, family_id=family_id).is_fixture
-    assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, family_id=family_id).qualified
+    assert replace(family.profile, family_id=family_id).is_fixture
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, family_id=family_id)
 
 
 @pytest.mark.parametrize("tier", _WITNESSED_TIERS)
@@ -345,12 +362,12 @@ def test_a_malformed_witness_ref_is_refused_at_both_witnessed_tiers(
         _claim(tmp_path, tier, witness_ref=bad)
 
 
-@pytest.mark.parametrize("tier", _WITNESSED_TIERS)
 @pytest.mark.parametrize("good", ["generated-witness", "witness:generated-0001", "ref/2026#7"])
-def test_a_well_formed_witness_ref_is_accepted(
-    tmp_path: Path, tier: EvidenceTier, good: str
+def test_a_well_formed_witness_ref_is_accepted_at_the_provider_tier(
+    tmp_path: Path, good: str
 ) -> None:
-    record = _claim(tmp_path, tier, witness_ref=good)
+    # PROVIDER_WITNESSED is outside the OPE-566 customer-witness ruling and is unchanged here.
+    record = _claim(tmp_path, EvidenceTier.PROVIDER_WITNESSED, witness_ref=good)
     assert record.qualified and record.witness_ref == good
 
 
@@ -366,3 +383,195 @@ def test_a_non_40_hex_revision_is_refused_on_the_record(
 def test_a_valid_40_hex_revision_is_accepted_on_the_record(tmp_path: Path) -> None:
     revision = "0123456789abcdef" * 2 + "01234567"
     assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, revision=revision).qualified
+
+
+# ---------------------------------------------------------------------------------------------
+# OPE-507 witness follow-up (OPE-566 owner ruling, mirroring OPE-509 #218): CUSTOMER_WITNESSED
+# needs an ``opentour.pilot.customer-witness.v1`` record checked only by the OPE-566
+# ``PilotVerifier``. It does not exist, so a model-family record reaches SOFTWARE_QUALIFIED at
+# most, a witness string is refused, identities must be exact ``str`` and fixture names downgrade.
+# Fixture kind: generated.
+# ---------------------------------------------------------------------------------------------
+
+
+class _PlainStrSubclass(str):
+    pass
+
+
+class _CasefoldLiarStr(str):
+    def casefold(self) -> str:
+        return "structural-pinned-profile"
+
+
+WELL_FORMED_WITNESS_STRINGS = [
+    "generated-witness",
+    "witness:generated-0001",
+    "ref/2026#7",
+    "witness:acme-0001",
+    "opentour.pilot.customer-witness.v1",
+    "customer_owner",
+    "a",
+]
+
+
+@pytest.mark.parametrize("witness", WELL_FORMED_WITNESS_STRINGS)
+@pytest.mark.parametrize("role", [fam.Role.REFERENCE.value, fam.Role.CANDIDATE.value])
+def test_a_witness_string_never_reaches_customer_witnessed(
+    tmp_path: Path, witness: str, role: str
+) -> None:
+    with pytest.raises(fam.FamilyError, match="^CUSTOMER_WITNESS_UNSTRUCTURED$"):
+        _claim(tmp_path, EvidenceTier.CUSTOMER_WITNESSED, role=role, witness_ref=witness)
+    # The same record one tier lower is accepted: the cap is SOFTWARE_QUALIFIED, not FIXTURE.
+    capped = _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, role=role, witness_ref=witness)
+    assert capped.tier is EvidenceTier.SOFTWARE_QUALIFIED and capped.qualified
+
+
+def test_a_structured_customer_witness_record_is_still_refused_without_the_verifier(
+    tmp_path: Path,
+) -> None:
+    # Even the #218 structured record cannot be smuggled in: no verifier exists for model families.
+    record = ctc.CustomerWitness(
+        engagement="generated-engagement",
+        trainer_id="structural-pinned-profile",
+        job_id="generated-job-1",
+        artifact_revision="a" * 40,
+        observed_outcome="completed",
+        witness_role=ctc.WITNESS_ROLE_CUSTOMER_OWNER,
+        purpose=ctc.CUSTOMER_WITNESS_PURPOSE,
+        attestation="generated-attestation",
+    )
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, EvidenceTier.CUSTOMER_WITNESSED, witness_ref=record)
+
+
+def test_build_record_never_exceeds_software_qualified(tmp_path: Path) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    results = {check: True for check in fam.required_checks(family.profile)}
+    pinned = replace(family.profile, family_id="structural-pinned-profile")
+    record = fam.build_record(pinned, fam.FixtureKind.INSTALLED_MODEL, results)
+    assert record.tier is EvidenceTier.SOFTWARE_QUALIFIED
+    assert "customer_witness_not_recorded" in record.external_gates
+    with pytest.raises(fam.FamilyError, match="^CUSTOMER_WITNESS_UNSTRUCTURED$"):
+        replace(record, tier=EvidenceTier.CUSTOMER_WITNESSED, witness_ref="witness:acme-1")
+
+
+@pytest.mark.parametrize(
+    "family_id",
+    [
+        _PlainStrSubclass("structural-pinned-profile"),
+        _CasefoldLiarStr("generated-x"),
+        _CasefoldLiarStr("structural-pinned-profile"),
+    ],
+    ids=["plain-subclass", "casefold-liar-generated", "casefold-liar-real"],
+)
+@pytest.mark.parametrize("tier", _QUALIFIED_TIERS)
+def test_a_str_subclass_family_id_is_refused(
+    tmp_path: Path, family_id: str, tier: EvidenceTier
+) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    assert replace(family.profile, family_id=family_id).is_fixture
+    assert fam.is_fixture_family_id(family_id)
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, tier, family_id=family_id)
+
+
+@pytest.mark.parametrize("tier", _QUALIFIED_TIERS)
+def test_a_str_subclass_revision_is_refused(tmp_path: Path, tier: EvidenceTier) -> None:
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, tier, revision=_PlainStrSubclass("a" * 40))
+
+
+def test_a_str_subclass_witness_ref_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, EvidenceTier.PROVIDER_WITNESSED, witness_ref=_PlainStrSubclass("ref-1"))
+    # Even an empty subclass instance is not an exact empty ``str`` at the unwitnessed tier.
+    with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+        _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, witness_ref=_PlainStrSubclass(""))
+
+
+FIXTURE_NAME_VARIANTS = [
+    "GeneratedFamily",
+    "regenerated-x",
+    "simulated-family",
+    "Simulated:family",
+    "acme-reference-linear",
+    "ReferenceFamily",
+    "fixture-family",
+    "fixtures-family",
+    "sentinel-family",
+    "acmesentinelml",
+    "family.invalid",
+    "family.INVALID.",
+    "family.invalid:443",
+    "https://family.invalid/x",
+    "a.invalid.example",
+    "ｓｅｎｔｉｎｅｌ-family",  # fullwidth "sentinel"
+    "ﬁxture-family",  # fi ligature folds to "fixture"
+    "gеnerated-x",  # Cyrillic homoglyph
+    "génerated-x",  # precomposed accent: non-ASCII identity
+    "﻿structural-pinned-profile",  # byte-order mark on an otherwise real id
+    "structural​-pinned-profile",  # zero-width space on an otherwise real id
+    "structural-pinned-profile\x00",  # control character
+    "  ",
+    "",
+]
+
+
+@pytest.mark.parametrize("family_id", FIXTURE_NAME_VARIANTS)
+def test_a_fixture_name_is_downgraded_to_fixture(tmp_path: Path, family_id: str) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    profile = replace(family.profile, family_id=family_id)
+    assert profile.is_fixture and fam.is_fixture_family_id(family_id)
+    results = {check: True for check in fam.required_checks(profile)}
+    record = fam.build_record(profile, fam.FixtureKind.INSTALLED_MODEL, results)
+    assert record.tier is EvidenceTier.FIXTURE and not record.qualified
+    assert "generated_family_is_never_a_qualified_model" in record.external_gates
+    for tier in _QUALIFIED_TIERS:
+        with pytest.raises(fam.FamilyError, match="EVIDENCE_TIER_UNSUPPORTED"):
+            _claim(tmp_path, tier, family_id=family_id)
+
+
+@pytest.mark.parametrize(
+    "family_id",
+    [
+        "structural-pinned-profile",
+        "smollm2_135m_lora_v1",
+        "pythia_160m_neox_candidate",
+        "acme-linear-v2",
+        "degen-x",
+        "family.invalidation.example",
+        "invalid-runs-family",
+    ],
+)
+def test_a_name_without_a_fixture_marker_keeps_software_qualified(
+    tmp_path: Path, family_id: str
+) -> None:
+    family = toy.Family(tmp_path, "generated-toy-linear")
+    assert not replace(family.profile, family_id=family_id).is_fixture
+    assert not fam.is_fixture_family_id(family_id)
+    assert _claim(tmp_path, EvidenceTier.SOFTWARE_QUALIFIED, family_id=family_id).qualified
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        *FIXTURE_NAME_VARIANTS,
+        *GENERATED_VARIANTS,
+        "structural-pinned-profile",
+        "smollm2_135m_lora_v1",
+        "acme-linear-v2",
+        "family.invalidation.example",
+        None,
+        5,
+        b"structural-pinned-profile",
+        _PlainStrSubclass("structural-pinned-profile"),
+    ],
+)
+def test_the_family_downgrade_matches_the_ope_509_trainer_downgrade(name: object) -> None:
+    # One rule across lanes: the model-family downgrade agrees with #218's trainer downgrade.
+    assert fam.is_fixture_family_id(name) is ctc.is_fixture_trainer(name)
+
+
+def test_the_real_profiles_are_not_downgraded_by_the_name_rule() -> None:
+    for name in ("smollm2_135m_lora_v1.family.json", "pythia_160m_neox_candidate.family.json"):
+        assert not fam.load_profile(PROFILES / name).is_fixture

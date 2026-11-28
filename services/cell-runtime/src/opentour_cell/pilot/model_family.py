@@ -13,10 +13,14 @@ Trust boundary of ``QualificationRecord``: qualification here is caller-asserted
 self-consistent only, and there is no signing contract. Nothing in this module authenticates the
 party that built a record, signs it, holds a key for it or checks it against an authority. What is
 enforced is internal consistency: a tier above ``FIXTURE`` is refused unless the record is an
-installed-model record of a pinned (40-hex) revision, names a family that is not a generated
-fixture, carries exactly one boolean outcome for every check its role requires, lists no
-missing-pin gate, and (for the witnessed tiers) carries a ``witness_ref`` of a defined shape.
-``witness_ref`` is an unverified opaque string: its shape is checked, its meaning never is. A
+installed-model record of a pinned (40-hex) revision, names a family whose id is an exact ``str``
+and not a fixture name (see ``is_fixture_family_id``), carries exactly one boolean outcome for
+every check its role requires, lists no missing-pin gate, and (for PROVIDER_WITNESSED) carries a
+``witness_ref`` of a defined shape. ``witness_ref`` is an unverified opaque string: its shape is
+checked, its meaning never is. CUSTOMER_WITNESSED is unreachable (OPE-566 owner ruling): it needs
+an ``opentour.pilot.customer-witness.v1`` record that only the OPE-566 ``PilotVerifier`` may
+check, which has not landed, so a record is SOFTWARE_QUALIFIED at most and a CUSTOMER_WITNESSED
+claim is refused with ``CUSTOMER_WITNESS_UNSTRUCTURED`` whatever ``witness_ref`` says. A
 record is a frozen dataclass and Python cannot make that tamper-proof (``object.__setattr__``
 bypasses it), so a consumer that needs authority must obtain it from a signed or journaled source
 outside this module, not from a record's own fields.
@@ -67,14 +71,72 @@ def is_generated_family_id(family_id: object) -> bool:
 
     ``generated`` followed by a non-alphanumeric separator (``-``, ``_``, a space, ...) or standing
     alone is a generated family. ``generatedx`` or ``regenerated-x`` is a different id and is not.
+
+    This is the narrow ``generated`` prefix rule only. It is not the qualification gate: profiles
+    and records use ``is_fixture_family_id``, which is wider and refuses anything but an exact
+    ``str``.
     """
-    if not isinstance(family_id, str):
+    if type(family_id) is not str:
         return False
     key = _identity_key(family_id)
     if not key.startswith(_GENERATED):
         return False
     rest = key[len(_GENERATED) :]
     return not rest or not rest[0].isalnum()
+
+
+# ---- Fixture-name downgrade and the customer-witness cap (OPE-566 owner ruling) ----
+#
+# These mirror the OPE-509 rules in ``custom_trainer_connector`` (#218) so that a model family and
+# a customer trainer are downgraded by one rule:
+#
+# * A family id must be an exact ``str``: a subclass could override ``casefold``, ``strip`` or
+#   ``__eq__`` and so choose its own key. It is NFKC-normalised and casefolded, and an id carrying
+#   invisible, control or non-ASCII characters is refused outright (FIXTURE), so case, fullwidth,
+#   zero-width and homoglyph variants of a fixture marker cannot pass.
+# * A family id CONTAINING a generated, simulated, reference, fixture or sentinel token, or naming
+#   a ``.invalid`` host (with or without a trailing dot, port or path), is FIXTURE. This rule can
+#   only lower a tier, never raise one; a real customer family whose id contains a token must be
+#   renamed.
+# * CUSTOMER_WITNESSED needs an ``opentour.pilot.customer-witness.v1`` record checked only by the
+#   OPE-566 ``PilotVerifier``; nothing in this module may implement that check. ``PilotVerifier``
+#   has not landed, and no model-family witness subject (which fields a witness of a family
+#   qualification binds) is decided, so a ``QualificationRecord`` can reach SOFTWARE_QUALIFIED at
+#   most. A ``witness_ref`` string is never a witness record: a CUSTOMER_WITNESSED claim that is
+#   otherwise consistent is refused with ``CUSTOMER_WITNESS_UNSTRUCTURED`` (the #218
+#   ``customer_witness_unstructured`` reason), and CUSTOMER_WITNESSED is unreachable.
+
+# Any one of these tokens anywhere in a normalised family id marks a fixture family.
+_FIXTURE_TOKENS = frozenset({"generated", "simulated", "reference", "fixture", "sentinel"})
+# ``.invalid`` as a whole host label: followed by the end, a dot, a port, a path or anything that
+# cannot continue a label.
+_INVALID_HOST = re.compile(r"\.invalid(?![a-z0-9-])")
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Co", "Cs", "Cn", "Zl", "Zp"})
+
+
+def _invisible(text: str) -> bool:
+    return any(unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in text)
+
+
+def _family_key(family_id: object) -> str | None:
+    """NFKC, casefold and strip a family id; ``None`` when it is not a clean identity.
+
+    Only an exact ``str`` is accepted: a subclass's overridden methods would otherwise run here.
+    """
+    if type(family_id) is not str or _invisible(family_id):
+        return None
+    key = unicodedata.normalize("NFKC", family_id).casefold().strip()
+    if not key or _invisible(key) or not all(" " <= ch <= "~" for ch in key):
+        return None
+    return key
+
+
+def is_fixture_family_id(family_id: object) -> bool:
+    """True for an id containing a fixture token, a ``.invalid`` host, or an unclean identity."""
+    key = _family_key(family_id)
+    if key is None:
+        return True
+    return any(token in key for token in _FIXTURE_TOKENS) or _INVALID_HOST.search(key) is not None
 
 
 class FamilyError(ValueError):
@@ -155,8 +217,8 @@ class ModelFamilyProfile:
 
     @property
     def is_fixture(self) -> bool:
-        """Generated families are software fixtures and never production families."""
-        return is_generated_family_id(self.family_id)
+        """Fixture-named families are software fixtures and never production families."""
+        return is_fixture_family_id(self.family_id)
 
     @property
     def identity(self) -> str:
@@ -356,15 +418,20 @@ class QualificationRecord:
         witnessed = self.tier in (EvidenceTier.PROVIDER_WITNESSED, EvidenceTier.CUSTOMER_WITNESSED)
         if (
             self.fixture_kind is not FixtureKind.INSTALLED_MODEL
-            or not isinstance(self.family_id, str)
-            or is_generated_family_id(self.family_id)
-            or not isinstance(self.revision, str)
+            or type(self.family_id) is not str
+            or is_fixture_family_id(self.family_id)
+            or type(self.revision) is not str
             or not _REVISION.fullmatch(self.revision)
             or any(gate.startswith("profile_pin_missing:") for gate in self.external_gates)
             or not self.covers_required_checks
             or not _witness_ref_ok(self.witness_ref, required=witnessed)
         ):
             raise FamilyError("EVIDENCE_TIER_UNSUPPORTED")
+        if self.tier is EvidenceTier.CUSTOMER_WITNESSED:
+            # A witness string is never an ``opentour.pilot.customer-witness.v1`` record, and only
+            # the OPE-566 ``PilotVerifier`` (not landed) may accept one. The cap is
+            # SOFTWARE_QUALIFIED.
+            raise FamilyError("CUSTOMER_WITNESS_UNSTRUCTURED")
 
     @property
     def covers_required_checks(self) -> bool:
@@ -392,8 +459,11 @@ class QualificationRecord:
 
 
 def _witness_ref_ok(value: object, *, required: bool) -> bool:
-    """A witness reference must be a well-formed opaque string; the witnessed tiers need one."""
-    if not isinstance(value, str):
+    """A witness reference must be a well-formed opaque exact ``str``; the witnessed tiers need one.
+
+    Shape only. At CUSTOMER_WITNESSED a well-formed string is still refused (see ``__post_init__``).
+    """
+    if type(value) is not str:
         return False
     if not value:
         return not required
