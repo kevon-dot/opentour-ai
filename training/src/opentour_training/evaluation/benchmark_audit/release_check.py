@@ -15,13 +15,20 @@ event list, no "current" bindings, and no verdict, flag or boolean about the rec
    ``receipt_digest`` and ``receipt_id`` recompute from the body.
 3. **Status.** Replayed from the verified log: it is ``current``, has no recorded successor and
    does not name one itself.
-4. **Verdict.** Exactly ``evaluation_allowed``; every other verdict is refused.
+4. **Verdict.** Exactly ``evaluation_allowed``; every other verdict is refused. A verdict that
+   is not a string (a list, a dict, a number, null) is refused as ``audit_verdict_malformed``.
 5. **Bindings.** Each of the six bindings is taken from the worker's benchmark state for the
    benchmark the receipt was issued against, with its basis reported per binding:
    split and label manifests are recomputed from the stored family records; the four opaque
    bindings are recomputed from stored material where the worker holds it, and otherwise are a
    stored, caller-asserted digest that is labelled as such (``audit_binding_caller_asserted``)
    and never reported as recomputed. Frozen, receipt-current and worker values must all agree.
+   If the worker cannot compute its bindings at all (for example stored family ids of mixed
+   types, which cannot be ordered, or a ``BindingDigests`` field the worker store does not
+   know), every binding is reported absent and the receipt is refused as
+   ``audit_binding_unavailable_to_worker``.
+
+Malformed stored state never raises out of this check: each case above is a refusal.
 
 What it does NOT establish. The caller chooses ``store_directory``; the store id is a key-free
 digest of realpath, device and inode; and the store vouches for itself. So a self-consistent
@@ -56,17 +63,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
 from opentour_training.evaluation.benchmark_audit.ledger import AuditLedger
-from opentour_training.evaluation.benchmark_audit.model import Verdict
+from opentour_training.evaluation.benchmark_audit.model import BindingDigests, Verdict
 from opentour_training.evaluation.benchmark_audit.worker_store import (
     BASIS_ABSENT,
     BASIS_ASSERTED,
     RECOMPUTED_BASES,
     STORE_FAILURES,
+    BenchmarkState,
     StoreError,
     read_worker_state,
     receipt_body_digest,
@@ -100,6 +108,7 @@ REFUSAL_CODES: frozenset[str] = frozenset(
         "audit_benchmark_unknown_to_worker",
         "audit_binding_unavailable_to_worker",
         "audit_verdict_unrecognized",
+        "audit_verdict_malformed",
         *_VERDICT_REFUSAL.values(),
     }
 )
@@ -183,6 +192,17 @@ def _stale(receipt: Mapping[str, Any], worker: Mapping[str, str | None]) -> bool
     return not (bindings.get("frozen") == bindings.get("current") == dict(worker))
 
 
+def _worker_bindings(
+    benchmark: BenchmarkState,
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    """The worker's bindings, or every binding absent when stored state cannot be digested."""
+    try:
+        return benchmark.bindings()
+    except (TypeError, ValueError, KeyError):
+        names = [f.name for f in fields(BindingDigests)]
+        return dict.fromkeys(names), dict.fromkeys(names, BASIS_ABSENT)
+
+
 def check_receipt_for_release(receipt_id: str, *, store_directory: Path | str) -> ReleaseCheck:
     """Decide from the worker store the check opens itself; see the module docstring."""
     try:
@@ -207,13 +227,15 @@ def check_receipt_for_release(receipt_id: str, *, store_directory: Path | str) -
     if benchmark is None:
         refusals.add("audit_benchmark_unknown_to_worker")
     else:
-        worker, basis = benchmark.bindings()
+        worker, basis = _worker_bindings(benchmark)
         if any(v is None for v in worker.values()):
             refusals.add("audit_binding_unavailable_to_worker")
         elif _stale(receipt, worker):
             refusals.add("audit_receipt_stale")
     verdict = receipt.get("verdict")
-    if verdict not in {v.value for v in Verdict}:
+    if not isinstance(verdict, str):
+        refusals.add("audit_verdict_malformed")
+    elif verdict not in {v.value for v in Verdict}:
         refusals.add("audit_verdict_unrecognized")
     elif verdict != Verdict.EVALUATION_ALLOWED.value:
         refusals.add(_VERDICT_REFUSAL[verdict])
