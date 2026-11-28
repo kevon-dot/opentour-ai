@@ -1919,7 +1919,12 @@ def starter_charter(context: str, preview: StarterPreview, map_entry: str = "") 
 
 
 def workflow_settings(
-    context: str, workflow: str, nomination: str = "", nominee: str = ""
+    context: str,
+    workflow: str,
+    nomination: str = "",
+    nominee: str = "",
+    *,
+    setup: Mapping[str, Any] | None = None,
 ) -> Block:
     blocks = [
         _section(f"Workflow {_ref(workflow)}"),
@@ -1929,6 +1934,18 @@ def workflow_settings(
         blocks.append(_section(f"Verifier nominated for custodian review · {_ref(nominee)}"))
     if nomination:
         blocks.append(_actions(_button("Nominate verifier", "ot_nominate_verifier", nomination)))
+    if setup is not None:
+        blocks.append(_section("Training policy · " + setup["state"].replace("_", " ")))
+        if setup["revision"]:
+            blocks.append(_section(f"Settings revision {_ref(setup['revision'])}"))
+        if budget := setup["budget"]:
+            lines = [
+                f"{name.capitalize()} · {budget[name]['used']} used of {budget[name]['limit']}"
+                for name in ("runs", "rows", "fits", "seconds")
+            ]
+            lines.append(f"Spending limit · {budget['monetary_limit_cents']} USD cents")
+            lines.append("Recorded spending · unavailable")
+            blocks.append(_section("\n".join(lines)))
     return _modal("Workflow settings", "ot_workflow_settings", context, blocks)
 
 
