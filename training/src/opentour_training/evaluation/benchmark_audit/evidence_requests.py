@@ -39,6 +39,9 @@ NEXT_EVIDENCE: dict[str, str] = {
     "exposure_log_scope_mismatch": (
         "Supply the exposure guard's release history for every protected family in this audit."
     ),
+    "exposure_history_tampered": (
+        "Supply the exposure guard's release history unchanged since it was sealed."
+    ),
     "caller_assertion_malformed": (
         "Resubmit caller-asserted exposure as a frozenset of family ids and the unlogged "
         "disclosure count as a non-negative integer."

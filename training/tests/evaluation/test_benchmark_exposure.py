@@ -407,12 +407,12 @@ def test_caller_asserting_no_exposure_cannot_override_the_release_history() -> N
     assert derived["verdict"] == Verdict.CLAIM_LIMITED.value
     assert derived["coverage"]["critical"]["label"] == "3/4"
     assert derived["excluded_reasons"] == ["exposed_answer_key_retired"]
-    assert derived["provenance"]["exposed_families"] == "worker_derived_from_guard_instance"
+    assert derived["provenance"]["exposed_families"] == "replayed_from_supplied_unsigned_history"
 
 
 def test_caller_asserting_zero_unlogged_disclosures_cannot_override_the_release_history() -> None:
     # The history the pre-fix guard produced: a selector-only release of a single-family cell.
-    failopen = ExposureRecord(
+    failopen = ExposureRecord.sealed(
         BASELINE_PROTECTED, (ReleaseEntry(frozenset({"generated-r02"}), True, None),)
     )
     assert replay_exposure(failopen) == (frozenset({"generated-r02"}), 1)
@@ -428,7 +428,9 @@ def test_caller_asserting_zero_unlogged_disclosures_cannot_override_the_release_
     assert clean.evaluate(request("ok", {"generated-r01", "generated-r02"}, roles=SELECTOR)).allowed
     allowed = audit(inputs_for(baseline_records(), exposure_record=clean.record()))
     assert allowed["verdict"] == Verdict.EVALUATION_ALLOWED.value
-    assert allowed["provenance"]["unlogged_disclosures"] == "worker_derived_from_guard_instance"
+    assert (
+        allowed["provenance"]["unlogged_disclosures"] == "replayed_from_supplied_unsigned_history"
+    )
 
 
 def test_exposure_log_that_does_not_cover_every_protected_family_holds() -> None:
@@ -626,6 +628,24 @@ def test_cell_family_ids_must_be_exact_str() -> None:
     decision = g.evaluate(query)
     assert not decision.allowed and decision.reason == "suppressed_malformed_cell"
     assert g.record().releases == ()
+
+
+class _FrozenSub(frozenset):  # type: ignore[type-arg]
+    """A frozenset subclass; a cell must be an exact frozenset."""
+
+
+def test_cell_must_be_an_exact_frozenset() -> None:
+    g = guard()
+    cell = _FrozenSub({P0, P1})
+    assert cell <= UNIVERSE and isinstance(cell, frozenset)
+    query = QueryRequest("q", Surface.CHART, Channel.WORKER_UI, cell, READER)
+    decision = g.evaluate(query)
+    assert not decision.allowed and decision.reason == "suppressed_malformed_cell"
+    assert g.record().releases == ()
+    assert replay_exposure(ExposureRecord(UNIVERSE, (ReleaseEntry(cell, False, None),))) == (
+        UNIVERSE,
+        1,
+    )
 
 
 def test_caller_values_still_add_when_a_guard_history_is_supplied() -> None:

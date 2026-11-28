@@ -17,7 +17,6 @@ Per-viewer knowledge and bounds on 0/1 answers are not modelled.
 
 from __future__ import annotations
 
-import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -61,6 +60,7 @@ def is_protected(roles: object) -> bool:
 
 
 def well_formed_cell(cell: object, universe: frozenset[str]) -> bool:
+    """An exact, non-empty frozenset of exact-str family ids inside the universe."""
     return (
         type(cell) is frozenset
         and bool(cell)
@@ -72,15 +72,6 @@ def well_formed_cell(cell: object, universe: frozenset[str]) -> bool:
 def valid_identity(value: object) -> bool:
     """An identity field must be an exact, non-blank ``str`` (no subclass can lie about it)."""
     return type(value) is str and bool(value.strip())
-
-
-# Records issued by a guard instance in this process. Identity, not equality, decides: an equal
-# record that a caller constructs is not one the worker issued.
-_ISSUED: weakref.WeakValueDictionary[int, ExposureRecord] = weakref.WeakValueDictionary()
-
-
-def issued_by_guard(record: ExposureRecord) -> bool:
-    return _ISSUED.get(id(record)) is record
 
 
 class Surface(StrEnum):
@@ -236,10 +227,11 @@ class ExposureGuard:
         return self._unauthorized
 
     def record(self) -> ExposureRecord:
-        """The release history the audit replays; registered as issued by this process."""
-        issued = ExposureRecord(self._universe, tuple(self._history))
-        _ISSUED[id(issued)] = issued
-        return issued
+        """The release history, sealed with a content digest so later tampering is detected.
+
+        Unsigned and not bound to the protected manifest: the audit treats it as supplied.
+        """
+        return ExposureRecord.sealed(self._universe, tuple(self._history))
 
     def _record(self, request: QueryRequest, decision: str, reason: str, by: str | None) -> int:
         index = len(self._log)

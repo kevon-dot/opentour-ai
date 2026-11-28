@@ -18,7 +18,6 @@ from opentour_training.evaluation.benchmark_audit.evidence_requests import (
     NEXT_EVIDENCE,
 )
 from opentour_training.evaluation.benchmark_audit.exposure import (
-    issued_by_guard,
     replay_exposure,
     valid_identity,
 )
@@ -33,6 +32,7 @@ from opentour_training.evaluation.benchmark_audit.model import (
     AuditInputs,
     BindingDigests,
     CandidateSnapshotBinding,
+    ExposureRecord,
     FamilyRecord,
     PopulationKind,
     Reason,
@@ -99,22 +99,29 @@ def _verifier(r: FamilyRecord) -> tuple[str | None, str | None]:
 
 
 def _classify(
-    inputs: AuditInputs, exposed: frozenset[str], *, honor_caller_exclusions: bool = True
+    inputs: AuditInputs, exposed: frozenset[str], *, for_label_gates: bool = False
 ) -> list[_Row]:
+    """Row status for the denominator, or, ``for_label_gates``, for the label-quality gates.
+
+    The gates ignore every caller-asserted way out: exposure, ``excluded_reason`` and the
+    caller-supplied timing (``decided_day`` against the cutoff and the maturity window).
+    """
     prereg = inputs.prereg
     rows: list[_Row] = []
     for r in inputs.records:
         if r.split != "protected":
             continue
-        excluded = (
-            (honor_caller_exclusions and r.excluded_reason is not None)
+        excluded = not for_label_gates and (
+            r.excluded_reason is not None
             or r.decided_day > prereg.temporal_cutoff_day
             or r.family_id in exposed
         )
         kind, label = _verifier(r)
         if excluded:
             status = "excluded"
-        elif r.decided_day + prereg.maturity_window_days > inputs.as_of_day:
+        elif not for_label_gates and (
+            r.decided_day + prereg.maturity_window_days > inputs.as_of_day
+        ):
             status = "immature"
         elif label is not None:
             status = "verified"
@@ -158,7 +165,6 @@ def _overlaps(records: Sequence[FamilyRecord]) -> tuple[dict[str, int], int]:
     return found, unknown
 
 
-_GUARD_DERIVED = "worker_derived_from_guard_instance"
 _SUPPLIED_HISTORY = "replayed_from_supplied_unsigned_history"
 _CALLER = "caller_asserted"
 
@@ -175,6 +181,19 @@ def _upstream_receipt_verified_by_worker(snapshot: CandidateSnapshotBinding | No
     return False
 
 
+def _exposure_history_verified_by_worker(record: ExposureRecord | None) -> bool:
+    """Whether the worker verified that a release history is the one its guard really kept.
+
+    Held gap: a worker-held history requires a signed guard record bound to the protected
+    manifest (OPE-566). Object identity, a process-local registry or a content digest cannot
+    show that: a caller can run a fresh guard over the same universe and hand over its harmless
+    history, or split releases across guards. Until OPE-566 lands this is always false, every
+    history is supplied and unsigned, and exposure stays a caller-asserted dependency.
+    """
+    del record
+    return False
+
+
 @dataclass(frozen=True)
 class _Exposure:
     families: frozenset[str]
@@ -183,20 +202,22 @@ class _Exposure:
     scope_ok: bool
     history_nonempty: bool
     malformed: tuple[str, ...]
+    verified: bool = False
+    tampered: bool = False
 
     @property
     def worker_held(self) -> bool:
-        """Derived by a guard instance in this process, covering every family, not empty."""
-        return self.basis == _GUARD_DERIVED and self.scope_ok and self.history_nonempty
+        """Verified by the worker, covering every protected family and not empty."""
+        return self.verified and self.scope_ok and self.history_nonempty
 
 
 def _exposure(inputs: AuditInputs) -> _Exposure:
     """Exposure replayed from the release history, plus caller additions.
 
     A caller's list or count can only add to what the replayed history implies. Without a
-    history, exposure is caller-asserted. A history counts as worker-derived only when a guard
-    instance in this process issued that exact record; any other history is replayed but stays
-    a supplied, unsigned history. Malformed caller values are reported and fail closed.
+    history, exposure is caller-asserted; with one, it is replayed from a supplied, unsigned
+    history (see ``_exposure_history_verified_by_worker``). A record whose content no longer
+    matches the digest sealed at issue is tampered. Malformed caller values fail closed.
     """
     malformed: list[str] = []
     caller_unlogged = inputs.unlogged_disclosures
@@ -215,10 +236,12 @@ def _exposure(inputs: AuditInputs) -> _Exposure:
     return _Exposure(
         caller_exposed | derived,
         max(caller_unlogged, unlogged),
-        _GUARD_DERIVED if issued_by_guard(record) else _SUPPLIED_HISTORY,
+        _SUPPLIED_HISTORY,
         protected <= record.universe,
         bool(record.releases),
         tuple(malformed),
+        verified=_exposure_history_verified_by_worker(record),
+        tampered=not record.intact(),
     )
 
 
@@ -273,7 +296,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     # Label-quality gates read every protected family, exposure-retired or not: retiring a
     # family must not launder its disputed label or its unresolved ambiguity.
     # Caller-set exclusions are honoured for the denominator but not for these gates either.
-    gate_rows = _classify(inputs, frozenset(), honor_caller_exclusions=False)
+    gate_rows = _classify(inputs, frozenset(), for_label_gates=True)
     gate_verified = [r for r in gate_rows if r.status == "verified"]
     gate_unresolved = sum(1 for r in gate_rows if r.status == "unresolved")
     verified = by_status["verified"]
@@ -313,6 +336,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         invalid.append(Reason("preprocessing_fit_on_protected", pre.revision))
     elif pre is not None and pre.applied_to_protected_revision != pre.revision:
         invalid.append(Reason("preprocessing_not_verified", pre.revision))
+    if exposure.tampered:
+        invalid.append(Reason("exposure_history_tampered", "content differs from sealed digest"))
     if exposure.malformed:
         invalid.append(Reason("caller_assertion_malformed", ",".join(exposure.malformed)))
     if exposure.unlogged > 0:
@@ -461,6 +486,10 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
             dependencies.add("adjudicator_blinding_flags")
         if any(r.record.excluded_reason is not None for r in rows):
             dependencies.add("excluded_reason")
+        if any(
+            r.status == "immature" or r.record.decided_day > p.temporal_cutoff_day for r in rows
+        ):
+            dependencies.add("decided_day")
     # The alert needs worker-held evidence, never a caller boolean: an upstream receipt the
     # worker verified itself and exposure replayed from a covering, non-empty guard history.
     alert_blockers: list[str] = []
@@ -602,6 +631,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
             "exposure_history_nonempty": exposure.history_nonempty,
             "exposure_history_signed": False,
             "excluded_reason": "caller_asserted",
+            "decided_day": "caller_asserted",
             "upstream_snapshot_verified": "caller_asserted",
             "evidence_origin": "caller_asserted",
             "adjudicator_blinding_flags": "caller_asserted",

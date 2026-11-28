@@ -170,17 +170,53 @@ class ReleaseEntry:
     authorized_by: str | None = None
 
 
+def _digest_part(value: object) -> object:
+    if type(value) is str:
+        return value
+    if type(value) in (frozenset, tuple, list, set):
+        return sorted(str(_digest_part(v)) for v in value)  # type: ignore[attr-defined]
+    return f"<{type(value).__name__}:{value!r}>"
+
+
+def exposure_record_digest(universe: object, releases: object) -> str:
+    """Content digest of a release history; any later change to it changes the digest."""
+    entries = [
+        [_digest_part(e.cell), repr(e.protected_role), _digest_part(e.authorized_by)]
+        for e in (releases if type(releases) is tuple else ())
+    ]
+    return canonical_digest(
+        {
+            "universe": _digest_part(universe),
+            "releases_type": type(releases).__name__,
+            "releases": entries,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ExposureRecord:
-    """The exposure guard's own release history, from which the audit re-derives exposure.
+    """An exposure guard's release history, from which the audit re-derives exposure.
 
     The audit replays this history instead of trusting a caller's list of exposed families or a
-    caller's count of unlogged disclosures. It is unsigned: it proves only that the replayed
-    history implies the exposure the receipt reports.
+    caller's count of unlogged disclosures. Every history is treated as supplied and unsigned:
+    nothing binds it to the guard that actually served the traffic or to the protected manifest,
+    so a caller can hand over a fresh guard's harmless history. A worker-held history requires a
+    signed, manifest-bound guard record (OPE-566); it must never be inferred from object
+    identity. ``content_digest`` only detects a record changed after it was sealed.
     """
 
     universe: frozenset[str]
     releases: tuple[ReleaseEntry, ...]
+    content_digest: str | None = None
+
+    @classmethod
+    def sealed(cls, universe: frozenset[str], releases: tuple[ReleaseEntry, ...]) -> ExposureRecord:
+        return cls(universe, releases, exposure_record_digest(universe, releases))
+
+    def intact(self) -> bool:
+        return self.content_digest is not None and self.content_digest == exposure_record_digest(
+            self.universe, self.releases
+        )
 
 
 @dataclass(frozen=True)
