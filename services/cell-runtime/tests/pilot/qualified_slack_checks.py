@@ -87,7 +87,7 @@ def test_signed_settings_readback_through_offline_slack_sdk(tmp_path, monkeypatc
             if method == "views.publish":
                 published.append(params["user_id"])
             response = getattr(h.slack, methods[method])(**params)
-            return {"status": 200, "headers": {}, "body": json.dumps(response)}
+            return {"status": 200, "headers": {}, "body": json.dumps({"ok": True, **response})}
 
         monkeypatch.setattr(web, "_perform_urllib_http_request", transport)
         h.app.web = web

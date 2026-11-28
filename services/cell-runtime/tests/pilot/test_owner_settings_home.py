@@ -1,8 +1,12 @@
 """Private App Home readback of custodian-signed generated owner settings."""
 
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from unittest.mock import Mock
 
+from opentour_cell.pilot.intake_admission import AuthorizedSource, DurableIntake
+from opentour_cell.pilot.intake_mcp import IntakePrincipal
+from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
 from test_app_home import click, publish
 from test_autonomous_cycle import read, save
 from test_intake_mcp import _write_private
@@ -13,6 +17,7 @@ from test_owner_settings import Setup
 from test_reviewer_workflow import restart, screen, text
 from test_slack_adapter import ACTOR, OTHER, Harness
 from test_status_questions import counts
+from test_workflow_benchmarks import HISTORY
 
 
 def test_private_settings_rechecks_role_workflow_and_authority(tmp_path, monkeypatch):
@@ -28,6 +33,20 @@ def exercise_private_settings(tmp_path, monkeypatch, *, connect=None):
     setup.policy["mandate"]["delegate"] = OTHER
     receipt = setup.apply()
     workflow = setup.policy["mandate"]["workflow"]
+    other_workflow = "different-workflow"
+    principal = IntakePrincipal(customer.org, customer.delegate, "intake")
+    source_authority = Mock()
+    source_authority.guard.side_effect = lambda actor: setup.service.store.engagement_guard(
+        read_only=True
+    )
+    intake = BenchmarkIntake(DurableIntake(customer.owner, source_authority))
+    for selected in (workflow, other_workflow):
+        source_authority.historical.return_value = AuthorizedSource(
+            selected, customer.eng, "evaluation", selected, "grant-v1"
+        )
+        intake.submit_intake(
+            principal, replace(HISTORY, pair_ref=selected, idempotency_key=selected)
+        )
     h = Harness(tmp_path / "slack", organization=customer.org, seed_generated_dataset=False)
     h.path = customer.owner / "slack-config.json"
     h.store = setup.service.store
@@ -74,7 +93,6 @@ def exercise_private_settings(tmp_path, monkeypatch, *, connect=None):
     assert receipt["revision"] in operator and "Spending limit · 0 USD cents" in operator
     assert "Recorded spending · unavailable" in operator
 
-    other_workflow = "different-workflow"
     h.config["live_workflow_ref"] = other_workflow
     h.save()
     sign(h, {**live, "workflow_ref": other_workflow})
