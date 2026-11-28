@@ -2,11 +2,46 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 Control = Literal["pause", "resume", "stop"]
 Operation = Literal["benchmark_only", "evaluate_and_improve"]
+
+
+class ScanService(Protocol):
+    def status(self, actor: str) -> dict[str, Any]: ...
+
+    def act(self, actor: str, action: str, revision: str, key: str) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class ScanStatus:
+    state: str
+    revision: str
+    source_unavailable: bool = False
+
+    @classmethod
+    def from_status(cls, result: dict[str, Any]) -> ScanStatus:
+        state, revision = result["state"], result["revision"]
+        if (
+            result["can_control"] is not True
+            or state not in {"ready", "watching", "scanning", "parked", "held"}
+            or not isinstance(revision, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", revision)
+        ):
+            raise ValueError("Scan access unavailable.")
+        return cls(
+            state, revision, state == "watching" and result.get("reason") == "source_unavailable"
+        )
+
+    def controls(self) -> tuple[str, ...]:
+        if self.state in {"ready", "parked"}:
+            return ("start_scan",)
+        if self.state in {"watching", "scanning"}:
+            return ("another_scan", "done_for_now")
+        return ()
 
 
 @dataclass(frozen=True)

@@ -63,12 +63,15 @@ class Grant:
 
 def parse_grant(payload: dict[str, object], now: float, *, read_only: bool = False) -> Grant:
     spec = payload.get("reservation")
+    required = REF_FIELDS | HASH_FIELDS | INT_FIELDS | {"model_revision", "image_id"}
     if (
         set(payload)
         != {"profile_version", "tenant", "engagement_id", "issued_at", "not_after", "reservation"}
         or payload["profile_version"] != "1.0"
         or not isinstance(spec, dict)
-        or set(spec) != REF_FIELDS | HASH_FIELDS | INT_FIELDS | {"model_revision", "image_id"}
+        or (
+            set(spec) != required and set(spec) != required | {"scan_generation", "source_snapshot"}
+        )
     ):
         raise ValueError("invalid_eve_spend_mandate")
     if (
@@ -82,6 +85,15 @@ def parse_grant(payload: dict[str, object], now: float, *, read_only: bool = Fal
             for k in HASH_FIELDS
         )
         or any(type(spec[k]) is not int for k in INT_FIELDS)
+        or (
+            "scan_generation" in spec
+            and (
+                type(spec["scan_generation"]) is not int
+                or spec["scan_generation"] < 1
+                or not isinstance(spec["source_snapshot"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", spec["source_snapshot"])
+            )
+        )
         or spec["model_revision"] != EVE
         or not isinstance(spec["image_id"], str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", spec["image_id"])
@@ -162,6 +174,7 @@ class EveAuthority:
             entry.execution_id != grant.reservation_ref
             or record["intent_digest"] != spec["fit_intent_digest"]
             or record["development_digest"] != spec["development_sha256"]
+            or ("source_snapshot" in spec and record.get("snapshot_ref") != spec["source_snapshot"])
             or record["tenant"] != spec["tenant"]
             or record["engagement"] != spec["engagement_id"]
             or record["mandate_id"] != spec["mandate_id"]
@@ -193,9 +206,19 @@ class EveAuthority:
             raise ValueError("eve_fit_reservation_changed")
         return ledger, entry
 
+    def _check_scan(self, grant: Grant, *, claim: bool) -> None:
+        from opentour_cell.pilot import eve_scan
+
+        if "scan_generation" in grant.spec or eve_scan.installed(self.directory):
+            scanner = eve_scan.EveScanService(
+                self.directory, self.organization, self.workspace, self.channel
+            )
+            scanner.check_proposal(grant.spec, claim=claim)
+
     def claim(self, grant: Grant) -> None:
         """Claim one already charged execution after the Slack HMAC has been verified."""
         ledger, entry = self._reservation(grant)
+        self._check_scan(grant, claim=True)
         if entry.execution.stage == fd.Stage.RESERVED:
             job = run_ref(grant.reservation_ref, grant.spec)
             ledger.transition(
@@ -284,11 +307,14 @@ class EveAuthority:
                 or plan.mandate_id != mandate.mandate_id
                 or plan.mandate_revision != mandate.mandate_revision
                 or plan.plan_ref != grant.plan_ref
+                or ("source_snapshot" in spec and plan.source_revision != spec["source_snapshot"])
                 or plan.benchmark_ref != grant.benchmark_ref
                 or plan.model_route_ref != "eve-24b-qlora"
             ):
                 raise ValueError("eve_proposal_changed")
             _, entry = self._reservation(grant, read_only=not write)
+            if entry.execution.stage == fd.Stage.RESERVED:
+                self._check_scan(grant, claim=False)
             yield replace(
                 grant,
                 can_control={"start", "cancel"} <= enrolled.permissions

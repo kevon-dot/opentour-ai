@@ -44,6 +44,7 @@ MODULES = (
     "opentour_cell/pilot/cycle_worker.py",
     "opentour_cell/pilot/eve_authority.py",
     "opentour_cell/pilot/eve_exchange.py",
+    "opentour_cell/pilot/eve_scan.py",
     "opentour_cell/pilot/eve_learning_service.py",
     "opentour_cell/pilot/approval_inbox.py",
     "opentour_cell/pilot/learning_mandate.py",

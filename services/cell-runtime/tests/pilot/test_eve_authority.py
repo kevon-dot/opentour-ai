@@ -24,10 +24,11 @@ def private(path: Path, value: bytes):
 
 
 @pytest.fixture
-def approved(tmp_path, kit: Kit):  # noqa: F811
+def approved(tmp_path, kit: Kit, request):  # noqa: F811
     site = Site(tmp_path)
     site.authorize(ea.SELECTION_FILE.removesuffix(".json"))
-    plan = replace(site.plan(), model_route_ref="eve-24b-qlora")
+    plan_source, reserved_source = getattr(request, "param", ("source-v1", "source-v1"))
+    plan = replace(site.plan(plan_source), model_route_ref="eve-24b-qlora")
     site.publish(plan)
     now = int(time.time())
     spec = {
@@ -66,6 +67,7 @@ def approved(tmp_path, kit: Kit):  # noqa: F811
         "engagement": site.engagement,
         "actor": "worker",
         "owner_id": OWNER,
+        "snapshot_ref": reserved_source,
         "run_id": "generated-run",
         "payer": spec["payer_ref"],
         "mandate_id": plan.mandate_id,
