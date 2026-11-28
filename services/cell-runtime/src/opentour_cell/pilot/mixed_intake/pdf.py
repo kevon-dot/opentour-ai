@@ -1434,21 +1434,30 @@ def _cmyk_to_rgb(cyan: float, magenta: float, yellow: float, black: float) -> tu
     return tuple(min(max(v, 0.0), 255.0) / 255.0 for v in (red, green, blue))
 
 
-def _invisible_on_white(components: list[float]) -> bool | None:
-    """True when a fill colour is near-invisible on white paper; None when not understood.
+_RGB = tuple[float, float, float]
+_BLACK: _RGB = (0.0, 0.0, 0.0)
+# Components of each device colour space. No other space is judged: Separation, DeviceN, Lab,
+# CalGray, CalRGB, Indexed and Pattern map their operands through data this reader does not
+# evaluate, and so does ICCBased, whose embedded profile may map any value to any colour (a
+# profile is not evaluated, so no ICCBased space is known, whatever its /N).
+_DEVICE_COMPONENTS = {b"DeviceGray": 1, b"DeviceRGB": 3, b"DeviceCMYK": 4}
 
-    The colour space is inferred from the operand count (1 grey, 3 RGB, 4 CMYK), which is exact
-    for the device spaces and a conservative guess for the rest.
-    """
+
+def _device_rgb(components: list[float]) -> _RGB | None:
+    """The sRGB colour of a DeviceGray (1), DeviceRGB (3) or DeviceCMYK (4) value, else None."""
     if len(components) == 1:
-        red = green = blue = components[0]
-    elif len(components) == 3:
-        red, green, blue = components
-    elif len(components) == 4:
+        return (components[0], components[0], components[0])
+    if len(components) == 3:
+        return (components[0], components[1], components[2])
+    if len(components) == 4:
         red, green, blue = _cmyk_to_rgb(*components)
-    else:
-        return None
-    contrast = 1.05 / (_relative_luminance(red, green, blue) + 0.05)
+        return (red, green, blue)
+    return None
+
+
+def _invisible_on_white(rgb: _RGB) -> bool:
+    """Whether a colour is near-invisible on white paper (contrast below the threshold)."""
+    contrast = 1.05 / (_relative_luminance(*rgb) + 0.05)
     return contrast < MIN_TEXT_CONTRAST_AGAINST_WHITE
 
 
@@ -1463,10 +1472,11 @@ class _Graphics:
     leading: float = 0.0
     h_scale: float = 1.0
     rise: float = 0.0
-    fill_invisible: bool = False
-    # Whether the fill colour space is a device space (or an ICCBased space with 1, 3 or 4
-    # components, read as one): only then do sc/scn operands mean grey, RGB or CMYK.
-    fill_space_known: bool = True
+    # The fill colour as sRGB, or None when it cannot be judged (a colour space other than a
+    # device space, or sc/scn operands that do not match the space's component count), and the
+    # number of components of the current fill colour space (None when it is not a device one).
+    fill: _RGB | None = _BLACK
+    fill_components: int | None = 1
     char_spacing: float = 0.0
     word_spacing: float = 0.0
     # Device-space clip rectangle (intersection of every rectangular clip so far), or None.
@@ -1475,7 +1485,6 @@ class _Graphics:
 
 
 _PAINT = frozenset({b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"})
-_DEVICE_SPACES = frozenset({b"DeviceGray", b"DeviceRGB", b"DeviceCMYK"})
 _PATH_BUILD = frozenset({b"m", b"l", b"c", b"v", b"y"})
 
 
@@ -1506,7 +1515,7 @@ def _fragments(
     images: frozenset[bytes] = frozenset(),
     page_box: tuple[float, float, float, float] | None = None,
     font_metrics: dict[bytes, _Metrics] | None = None,
-    colour_spaces: dict[bytes, bool] | None = None,
+    colour_spaces: dict[bytes, int | None] | None = None,
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
@@ -1589,12 +1598,12 @@ def _fragments(
             or abs(gs.rise) > MAX_TEXT_RISE_EM * size
         ):
             marks.add("text_size_invisible")
-        if gs.fill_invisible:
-            marks.add("text_color_invisible")
-        if not gs.fill_space_known:
-            # Separation, DeviceN, Lab, Cal*, Indexed, Pattern or an ICCBased space of unknown
-            # size: a tint or component value says nothing this reader can judge.
+        if gs.fill is None:
+            # Separation, DeviceN, Lab, Cal*, Indexed, Pattern, ICCBased or an unknown name, or
+            # operands that do not fit the space: nothing this reader can judge.
             marks.add("text_color_space_unverified")
+        elif _invisible_on_white(gs.fill):
+            marks.add("text_color_invisible")
         rx, ry = m[4] + gs.rise * m[2], m[5] + gs.rise * m[3]
         glyph = size * scale_y
         # The baseline origin and the glyph box must lie inside the page: an origin at the top
@@ -1716,17 +1725,17 @@ def _fragments(
         elif op in (b"g", b"rg", b"k") and nums:
             wanted = {b"g": 1, b"rg": 3, b"k": 4}[op]
             if len(nums) >= wanted:
-                invisible = bool(_invisible_on_white(nums[-wanted:]))
-                gs = replace(gs, fill_invisible=invisible, fill_space_known=True)
-        elif op in (b"sc", b"scn") and nums:
-            verdict = _invisible_on_white(nums)
-            if verdict is not None:
-                gs = replace(gs, fill_invisible=verdict)
+                gs = replace(gs, fill=_device_rgb(nums[-wanted:]), fill_components=wanted)
+        elif op in (b"sc", b"scn"):
+            # Operands are read only in a device space and only when they match its size.
+            size = gs.fill_components
+            fits = size is not None and len(stack) == len(nums) == size
+            gs = replace(gs, fill=_device_rgb(nums) if fits else None)
         elif op == b"cs":
-            space = stack[-1] if stack and isinstance(stack[-1], bytes) else None
-            known = space in _DEVICE_SPACES or bool((colour_spaces or {}).get(space or b""))
+            space = stack[-1] if stack and isinstance(stack[-1], bytes) else b""
+            components = _DEVICE_COMPONENTS.get(space) or (colour_spaces or {}).get(space)
             # Every device space's initial colour is black.
-            gs = replace(gs, fill_invisible=False, fill_space_known=known)
+            gs = replace(gs, fill=_BLACK if components else None, fill_components=components)
         elif op in (b"BDC", b"BMC") and stack and stack[0] == b"OC":
             # Optional content: a viewer may hide or show it by layer state, which is not read.
             marks.add("optional_content_present")
@@ -2090,21 +2099,14 @@ def _decode_names(raw: bytes) -> bytes:
     )
 
 
-def _colour_spaces(resources: dict[str, object], doc: _Doc) -> dict[bytes, bool]:
-    """Each named /ColorSpace resource, and whether it reads as a device space.
-
-    Only a device space under another name, or an ICCBased space with /N of 1, 3 or 4 (read as
-    grey, RGB or CMYK), is. Separation, DeviceN, Lab, CalGray, CalRGB, Indexed, Pattern and an
-    ICCBased space of unknown size are not: text filled in one goes to review.
-    """
-    out: dict[bytes, bool] = {}
+def _colour_spaces(resources: dict[str, object], doc: _Doc) -> dict[bytes, int | None]:
+    """Each named /ColorSpace resource: its component count when it is a device space by
+    another name, else None (see _DEVICE_COMPONENTS; text filled in it goes to review)."""
+    out: dict[bytes, int | None] = {}
     for name, value in (doc.dict(resources.get("ColorSpace")) or {}).items():
         space = doc.resolve(value)
-        known = isinstance(space, _Name) and space.encode("latin-1") in _DEVICE_SPACES
-        if isinstance(space, list) and len(space) == 2 and doc.resolve(space[0]) == "ICCBased":
-            profile = doc.dict(space[1])
-            known = profile is not None and doc.resolve(profile.get("N")) in (1, 3, 4)
-        out[name.encode("latin-1")] = known
+        named = space.encode("latin-1") if isinstance(space, _Name) else b""
+        out[name.encode("latin-1")] = _DEVICE_COMPONENTS.get(named)
     return out
 
 

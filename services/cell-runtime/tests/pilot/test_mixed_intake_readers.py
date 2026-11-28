@@ -497,8 +497,8 @@ def test_pdf_ordinary_black_text_and_headings_in_real_colours_stay_eligible() ->
         b"0 0 0.5 rg",  # navy heading
         b"0.5 g",  # mid grey
         b"0 0 0 1 k",  # CMYK black
-        b"0.2 0.4 0.6 sc",
-        b"0.2 0.4 0.6 scn",
+        b"/DeviceRGB cs 0.2 0.4 0.6 sc",  # sc/scn operands are read in their device space
+        b"/DeviceRGB cs 0.2 0.4 0.6 scn",
         b"0.6 0.2 0.1 0 k",
     ):
         _eligible(colour + b" " + _VISIBLE)
@@ -570,11 +570,11 @@ def test_pdf_text_with_no_visible_effective_size_goes_to_review(content: bytes) 
         b"0.97 0.97 0.97 rg",
         b"0 0 0 0 k",
         b"0.02 0.02 0.02 0.02 k",
-        b"1 1 1 sc",
-        b"1 1 1 scn",
-        b"1 sc",
+        b"/DeviceRGB cs 1 1 1 sc",
+        b"/DeviceRGB cs 1 1 1 scn",
+        b"1 sc",  # the initial fill space is DeviceGray
         b"1 scn",
-        b"0 0 0 0 sc",
+        b"/DeviceCMYK cs 0 0 0 0 sc",
         b"1 1 0 rg",  # yellow on white has a contrast ratio of about 1.07
     ],
 )
@@ -1895,11 +1895,22 @@ def test_pdf_text_in_a_colour_space_this_reader_cannot_judge_goes_to_review() ->
                  resources=resources, extra=profile)  # fmt: skip
     # Device spaces, and ICCBased spaces of 1, 3 or 4 components, are read as before.
     known = {8: b"<< /N 3 /Length 4 >>\nstream\nicc.\nendstream"}
+    # Device spaces, by name or as a named resource, are read as before.
     for paint in (b"/DeviceRGB cs 0 0 0 sc", b"/CS0 cs 0 0 0 scn", b"/CS0 cs 0.8 0 0 scn"):
-        _eligible(_VISIBLE + b" " + paint + hidden, resources=_spaces(b"/CS0 [/ICCBased 8 0 R]"),
-                  extra=known)  # fmt: skip
+        _eligible(_VISIBLE + b" " + paint + hidden, resources=_spaces(b"/CS0 /DeviceRGB"))
     _flagged(_VISIBLE + b" /CS0 cs 1 1 1 scn" + hidden, "text_color_invisible",
-             resources=_spaces(b"/CS0 [/ICCBased 8 0 R]"), extra=known)  # fmt: skip
+             resources=_spaces(b"/CS0 /DeviceRGB"))  # fmt: skip
+    # An ICCBased profile is not evaluated and may map any value to any colour, so even one
+    # declaring three components is not judged (the hidden-text follow-up's decision).
+    for paint in (b"/CS0 cs 0 0 0 scn", b"/CS0 cs 0.8 0 0 scn"):
+        _flagged(_VISIBLE + b" " + paint + hidden, "text_color_space_unverified",
+                 resources=_spaces(b"/CS0 [/ICCBased 8 0 R]"), extra=known)  # fmt: skip
+    # Operands that do not match the space's component count are malformed: poppler ignores
+    # `1 1 1 sc` in DeviceGray and draws black, another viewer may read the first operand.
+    for paint in (b"0.2 0.4 0.6 sc", b"1 1 1 sc", b"1 1 1 scn", b"0 0 0 0 sc",
+                  b"/DeviceRGB cs 1 sc", b"/DeviceCMYK cs 0 0 0 sc", b"/CS0 cs 1 scn"):
+        _flagged(paint + hidden, "text_color_space_unverified",
+                 resources=_spaces(b"/CS0 /DeviceRGB"))  # fmt: skip
     # Colour set back to a device space by g, rg or k is judged again.
     _eligible(b"/Pattern cs /P1 scn 0 g" + hidden, resources=_spaces())
 
