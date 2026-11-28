@@ -2523,18 +2523,21 @@ def test_caller_skew_boundary(tmp_path: Path) -> None:
 
 
 # V3 (mutants N07, N09): a step back within tolerance is allowed; the mark never decreases;
-# a regression heals by itself while release and status keep working.
+# a regression heals by itself while release, status, live_lines and retract_family keep working.
 def test_step_back_tolerance_and_mark_never_decreases(tmp_path: Path) -> None:
     path, seal = world(tmp_path, "a0", "b0", "c0")
     db_path = tmp_path / "alloc.db"
     led = AllocationLedger(db_path)
     WORKER_NOW["t"] = 500
     grant_budget(led, path, now=500)
+    grant_budget(led, path, "generated-budget-2", now=500)  # same grant, second budget
     assert clock_mark(db_path)[0][1] == 500
     sc = scope(path, seal)
     WORKER_NOW["t"] = 200  # exactly 300 s back: allowed
     a0 = allocate([family("a0")], policy(), verified_by=sc)
     assert led.reserve("generated-budget", a0, verified_by=sc, now=200)["used_units"] == 1
+    c0 = allocate([family("c0")], policy(), verified_by=sc)
+    assert led.reserve("generated-budget-2", c0, verified_by=sc, now=200)["used_units"] == 1
     assert clock_mark(db_path)[0][1] == 500  # never decreases
     WORKER_NOW["t"] = 199  # 301 s back: refused
     b0 = allocate([family("b0")], policy(), verified_by=sc)
@@ -2542,7 +2545,18 @@ def test_step_back_tolerance_and_mark_never_decreases(tmp_path: Path) -> None:
         "clock_regressed"
     )
     assert code_of(led.commit, "generated-budget", a0.allocation_id, now=199) == "clock_regressed"
+    assert code_of(led.commit, "generated-budget-2", c0.allocation_id, now=199) == (
+        "clock_regressed"
+    )
     assert led.status("generated-budget")["used_units"] == 1  # status keeps working
+    # live_lines keeps working on the regressed grant.
+    assert [x.family_id for x in led.live_lines("generated-budget")] == ["a0"]
+    assert [x.family_id for x in led.live_lines("generated-budget-2")] == ["c0"]
+    # retract_family keeps working on the regressed grant and frees the unspent line.
+    retracted = led.retract_family("generated-budget-2", "c0", "generated-retraction")
+    assert retracted["used_units"] == 0
+    assert led.live_lines("generated-budget-2") == []
+    assert led.status("generated-budget")["used_units"] == 1  # the other family is untouched
     assert led.release("generated-budget", a0.allocation_id)["used_units"] == 0
     WORKER_NOW["t"] = 600  # the worker clock catches up: it heals by itself
     assert led.reserve("generated-budget", b0, verified_by=sc, now=600)["used_units"] == 1

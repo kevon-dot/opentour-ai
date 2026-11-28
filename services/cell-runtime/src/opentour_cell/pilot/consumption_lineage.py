@@ -153,12 +153,15 @@ def validate_manifest(raw: Mapping[str, Any]) -> dict[str, Any]:
     unknown_dependencies[], descendants[], later_relationships[].
 
     Every key and string field is exactly ``str`` and every integer field exactly ``int``. A
-    ``TypeError``, ``ValueError`` or ``RecursionError`` raised while reading ``raw`` becomes
-    ``LineageError("manifest_malformed")``; nothing raw escapes.
+    ``TypeError``, ``ValueError``, ``RecursionError``, ``KeyError`` or ``AttributeError``
+    raised while reading ``raw`` becomes ``LineageError("manifest_malformed")``. That covers a
+    ``Mapping`` whose ``__iter__`` yields a key its ``__getitem__`` lacks, or whose
+    ``__iter__`` raises ``AttributeError``. Any other exception that a caller-supplied object
+    raises from its own methods is not mapped.
     """
     try:
         return _validate(raw)
-    except (TypeError, ValueError, RecursionError) as exc:
+    except (TypeError, ValueError, RecursionError, KeyError, AttributeError) as exc:
         raise LineageError("manifest_malformed") from exc
 
 

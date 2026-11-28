@@ -717,6 +717,83 @@ def test_errors_raised_while_validating_are_typed_lineage_errors(
     assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
 
 
+class _PhantomKey(Mapping[str, Any]):
+    """A manifest-shaped mapping whose ``__iter__`` yields a key ``__getitem__`` lacks."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    def __getitem__(self, key: str) -> Any:
+        return self.data[key]  # raises a raw KeyError for the phantom key
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([*self.data, "generated-phantom-key"])
+
+    def __len__(self) -> int:
+        return len(self.data) + 1
+
+
+class _IterRaises(Mapping[str, Any]):
+    """A manifest-shaped mapping whose ``__iter__`` raises ``AttributeError``."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    def __getitem__(self, key: str) -> Any:
+        return self.data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        raise AttributeError("generated-iter-failure")
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+def _lying_mapping(kind: str, where: str, tenant: str = TENANT) -> Mapping[str, Any]:
+    m = manifest("b", claim_refs=["claim-b"], tenant=tenant)
+    wrap = {"phantom_key": _PhantomKey, "iter_raises": _IterRaises}[kind]
+    if where == "top":
+        return wrap(m)
+    if where == "consumed_entry":
+        m["consumed"][0] = wrap(m["consumed"][0])
+    elif where == "descendant":
+        m["descendants"][0] = wrap(m["descendants"][0])
+    elif where == "later_relationship":
+        m["later_relationships"][0] = wrap(m["later_relationships"][0])
+    else:  # pragma: no cover - parametrize typo guard
+        raise AssertionError(where)
+    return m
+
+
+@pytest.mark.parametrize("where", ["top", "consumed_entry", "descendant", "later_relationship"])
+@pytest.mark.parametrize("kind", ["phantom_key", "iter_raises"])
+def test_lying_mappings_are_typed_lineage_errors_and_wedge_nothing(
+    tmp_path: Path, kind: str, where: str
+) -> None:
+    """NIT-4: a Mapping whose iteration lies raises no raw KeyError or AttributeError."""
+    store, grants = ManifestStore(tmp_path / "root" / "m"), Grants()
+    reader = ConsumptionReader(store, grants)
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    with pytest.raises(LineageError, match="^manifest_malformed$"):
+        lineage.validate_manifest(_lying_mapping(kind, where))
+    for tenant in (TENANT, OTHER):  # an existing tenant folder, and one not yet created
+        with pytest.raises(LineageError, match="^manifest_malformed$"):
+            store.put(_lying_mapping(kind, where, tenant))
+    assert _tree(tmp_path) == before  # no manifest, pin, temp file or folder
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+    store.put(manifest("b", claim_refs=["claim-b"]))
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
+def test_validation_docstring_names_every_mapped_error() -> None:
+    """NIT-4: the docstring's mapped set matches the errors actually mapped."""
+    doc = lineage.validate_manifest.__doc__ or ""
+    for name in ("TypeError", "ValueError", "RecursionError", "KeyError", "AttributeError"):
+        assert name in doc, name
+
+
 def test_deeply_nested_pinned_file_is_unreadable_not_a_recursion_error(tmp_path: Path) -> None:
     store = ManifestStore(tmp_path)
     store.put(manifest("a"))

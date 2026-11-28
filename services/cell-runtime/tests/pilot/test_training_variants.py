@@ -16,12 +16,13 @@ import os
 import shutil
 import sqlite3
 import time
+import types
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from opentour_cell.pilot import open_weight
+from opentour_cell.pilot import learning_mandate, open_weight
 from opentour_cell.pilot.learning_mandate import LearningMandates, MandateError
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.text_classifier import TrainingError
@@ -2120,6 +2121,66 @@ def test_a_real_withdrawal_still_stales_while_an_outage_does_not(tmp_path: Path)
     assert (exp["state"], exp["gate_status"]) == ("stale", "standing_mandate_withdrawn")
     reheld = [c for c in ledger.children() if c["child_id"] == held]
     assert (reheld[0]["disposition"], reheld[0]["reason"]) == (REJECTED, "fit_experiment_stale")
+
+
+def _assert_manifest_stales(ledger: VariantLedger, rid: str, held: str, status: str) -> None:
+    """The manifest persists a definitive closure: stale experiment, nothing counted."""
+    before = ledger.children()
+    m = manifest(ledger)
+    counts = (m["admitted_count"], m["stale_admitted_count"], m["unverified_admitted_count"])
+    assert counts == (0, 1, 0)
+    assert m["unverified_experiments"] == []
+    assert m["experiments"] == [
+        {
+            "reservation_id": rid,
+            "state": "stale",
+            "reason": "fit_gate_closed",
+            "root_refs": ["generated-root-1"],
+        }
+    ]
+    (exp,) = ledger.experiments()
+    assert (exp["state"], exp["reason"], exp["gate_status"]) == ("stale", "fit_gate_closed", status)
+    admitted = [c["child_id"] for c in before if c["disposition"] == ADMITTED]
+    assert exp["stale_admitted_child_ids"] == admitted
+    reheld = [c for c in ledger.children() if c["child_id"] == held]
+    assert (reheld[0]["disposition"], reheld[0]["reason"]) == (REJECTED, "fit_experiment_stale")
+    assert manifest(ledger)["manifest_digest"] == m["manifest_digest"]  # recorded once
+
+
+def test_an_expired_mandate_stales_the_experiment_in_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4f: `standing_mandate_expired` from the pinned store is a definitive closure."""
+    world = FitWorld(tmp_path)
+    ledger, _, rid, held = _admitted_and_held(world)
+    assert manifest(ledger)["admitted_count"] == 1
+    later = int(time.time()) + 7200  # past the generated mandate's one-hour expiry
+    monkeypatch.setattr(learning_mandate, "time", types.SimpleNamespace(time=lambda: later))
+    with pytest.raises(MandateError, match="^standing_mandate_expired$"):
+        LearningMandates.grant(world.mandates, rid, actor=DELEGATE)
+    _assert_manifest_stales(ledger, rid, held, "standing_mandate_expired")
+
+
+def test_a_delegate_mismatch_stales_the_experiment_in_the_manifest(tmp_path: Path) -> None:
+    """F4g: `standing_delegate_mismatch` from the pinned store is a definitive closure.
+
+    The generated mandate row is rewritten in place to name another delegate, so the
+    store's own grant path refuses the experiment's recorded actor.
+    """
+    world = FitWorld(tmp_path)
+    ledger, _, rid, held = _admitted_and_held(world)
+    assert manifest(ledger)["admitted_count"] == 1
+    db = sqlite3.connect(world.mandates.path, isolation_level=None)
+    try:
+        (spec_json,) = db.execute("SELECT spec FROM mandates WHERE id=?", (MANDATE,)).fetchone()
+        spec = json.loads(spec_json)
+        spec["delegate"] = "generated-other-delegate"
+        db.execute("UPDATE mandates SET spec=? WHERE id=?", (json.dumps(spec), MANDATE))
+    finally:
+        db.close()
+    with pytest.raises(MandateError, match="^standing_delegate_mismatch$"):
+        LearningMandates.grant(world.mandates, rid, actor=DELEGATE)
+    _assert_manifest_stales(ledger, rid, held, "standing_delegate_mismatch")
 
 
 def test_a_ledger_holding_only_seed_rejected_children_is_never_pinned(tmp_path: Path) -> None:
