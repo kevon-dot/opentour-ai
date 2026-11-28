@@ -25,7 +25,16 @@ from opentour_cell.pilot import eve_aggregate as ag
 from opentour_cell.pilot import eve_replay as rp
 from opentour_cell.pilot import eve_scorer as sc
 from opentour_cell.pilot import eve_task as task
-from test_eve_replay import BASE, BASELINE, SIMPLE, Env, ScriptedInference, full_result, output
+from test_eve_replay import (
+    BASE,
+    BASELINE,
+    SIMPLE,
+    Env,
+    ScriptedInference,
+    full_result,
+    output,
+    stage,
+)
 
 COMMITMENT = re.compile(r"hmac-sha256:[0-9a-f]{64}")
 
@@ -229,10 +238,15 @@ def test_a2_every_reader_rejects_an_unattributed_row(env: Env) -> None:
         env.result(arms, journal=worker.journal)
     with refuses("verdict_unattributed"):
         ag.rederive(worker.journal.path, env.manifest)
-    decision = rp.stage_decision(
-        {"body": {}, "result_digest": "x"}, recomputed_digest="x", **env.staging(worker.journal)
+    decision = stage(
+        env, {"body": {}, "result_digest": "x"}, recomputed_digest="x", journal=worker.journal
     )
-    assert not decision.stageable and decision.reasons == ("rebuild_refused_verdict_unattributed",)
+    # each check refuses on its own: the worker rebuild, the aggregator, and so no verdict binds
+    assert not decision.stageable and decision.reasons == (
+        "rebuild_refused_verdict_unattributed",
+        "aggregate_refused_verdict_unattributed",
+        "independent_verdict_unbindable",
+    )
 
 
 @pytest.mark.parametrize(
@@ -298,10 +312,14 @@ def test_a4_a_row_attributed_to_another_scorer_or_rubric_is_rejected_not_accepte
             e.replay(e.arm("baseline"), ScriptedInference(BASE, BASELINE), worker=worker)
         with refuses("verdict_attribution_mismatch"):
             ag.rederive(worker.journal.path, e.manifest)
-        decision = rp.stage_decision(
-            result, recomputed_digest=result["result_digest"], **e.staging(worker.journal)
+        decision = stage(
+            e, result, recomputed_digest=result["result_digest"], journal=worker.journal
         )
-        assert decision.reasons == ("rebuild_refused_verdict_attribution_mismatch",)
+        assert decision.reasons == (
+            "rebuild_refused_verdict_attribution_mismatch",
+            "aggregate_refused_verdict_attribution_mismatch",
+            "independent_verdict_unbindable",
+        )
 
 
 # ---------------------------------------------------------------- G separate aggregator
@@ -369,9 +387,7 @@ def test_g3_aggregator_catches_journal_tampering_after_the_result(env: Env) -> N
     assert not check.consistent
     assert "arms.candidate.correct" in check.mismatches
     assert "case_outcomes_redacted.candidate" in check.mismatches
-    decision = rp.stage_decision(
-        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal)
-    )
+    decision = stage(env, result, recomputed_digest=result["result_digest"], journal=worker.journal)
     assert not decision.stageable and "recompute_mismatch" in decision.reasons
 
 
@@ -434,7 +450,7 @@ def test_s1_a_redigested_forged_claim_is_not_stageable_whatever_digest_the_calle
     body = {**result["body"], "improvement_claim": "observed_net_fixes"}
     forged = {"body": body, "result_digest": task.digest(body)}
     # Before OPE-573 this was stageable: the caller's digest stood in for a recompute.
-    decision = rp.stage_decision(forged, recomputed_digest=forged["result_digest"], **env.staging())
+    decision = stage(env, forged, recomputed_digest=forged["result_digest"])
     assert not decision.stageable
     assert "recompute_mismatch" in decision.reasons
     assert "improvement_no_net_fixes" in decision.reasons
@@ -452,10 +468,12 @@ def test_s2_the_body_selfcheck_flag_is_not_trusted(env: Env) -> None:
     result = full_result(env, worker)
     body = {**result["body"], "scorer": {**result["body"]["scorer"], "selfcheck_passed": True}}
     claimed = {"body": body, "result_digest": task.digest(body)}
-    decision = rp.stage_decision(
+    decision = stage(
+        env,
         claimed,
         recomputed_digest=claimed["result_digest"],
-        **env.staging(worker.journal, AlwaysCorrect()),
+        journal=worker.journal,
+        scorer_=AlwaysCorrect(),
     )
     assert not decision.stageable and "scorer_selfcheck_failed" in decision.reasons
 
@@ -469,10 +487,16 @@ def test_s3_a_result_that_omits_a_journaled_arm_is_not_stageable(env: Env) -> No
         journal=worker.journal,
     )
     assert picked["body"]["improvement_claim"] == "observed_net_fixes"
-    decision = rp.stage_decision(
-        picked, recomputed_digest=picked["result_digest"], **env.staging(worker.journal)
+    decision = stage(env, picked, recomputed_digest=picked["result_digest"], journal=worker.journal)
+    assert not decision.stageable and decision.reasons == (
+        "recompute_mismatch",
+        "aggregate_inconsistent",
+        "independent_recount_mismatch",
+        "independent_verdict_for_another_claim",
+        "independent_verdict_incomplete",
+        "independent_verdict_integrity_failure",
     )
-    assert not decision.stageable and decision.reasons == ("recompute_mismatch",)
+    assert decision.aggregate_mismatches == ("arms.simple_repair.absent",)
 
 
 def test_s4_two_journaled_runs_of_one_arm_are_ambiguous_and_not_stageable(env: Env) -> None:
@@ -484,21 +508,29 @@ def test_s4_two_journaled_runs_of_one_arm_are_ambiguous_and_not_stageable(env: E
         infer,
         worker=worker,
     )
-    decision = rp.stage_decision(
-        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal)
+    decision = stage(env, result, recomputed_digest=result["result_digest"], journal=worker.journal)
+    assert not decision.stageable and decision.reasons == (
+        "rebuild_refused_arm_ambiguous",
+        "aggregate_inconsistent",
+        "independent_verdict_unbindable",
     )
-    assert not decision.stageable and decision.reasons == ("rebuild_refused_arm_ambiguous",)
+    assert decision.aggregate_mismatches == ("arms.candidate.ambiguous",)
 
 
 def test_s5_a_journal_holding_no_arm_for_the_manifest_cannot_stage_a_result(env: Env) -> None:
     result = full_result(env)
-    decision = rp.stage_decision(
+    decision = stage(
+        env,
         result,
         recomputed_digest=result["result_digest"],
-        **env.staging(rp.ReplayJournal(env.root / "empty.jsonl")),
+        journal=rp.ReplayJournal(env.root / "empty.jsonl"),
     )
     assert not decision.stageable
-    assert decision.reasons == ("rebuild_refused_arm_not_journaled",)
+    assert decision.reasons == (
+        "rebuild_refused_arm_not_journaled",
+        "aggregate_inconsistent",
+        "independent_verdict_unbindable",
+    )
 
 
 # ---------------------------------------------------------------- review round 2 (PR #210)
@@ -572,10 +604,13 @@ def test_f1c_a_passing_staging_scorer_cannot_stand_in_for_a_failing_replay(env: 
         ag.rederive(worker.journal.path, env.manifest)
     with refuses("arm_selfcheck_failed"):
         env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), worker=worker)
-    decision = rp.stage_decision(  # the honest DeterministicScorer is handed in at staging
-        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal)
+    # the honest DeterministicScorer is handed in at staging
+    decision = stage(env, result, recomputed_digest=result["result_digest"], journal=worker.journal)
+    assert decision.reasons == (
+        "rebuild_refused_arm_selfcheck_failed",
+        "aggregate_refused_arm_selfcheck_failed",
+        "independent_verdict_unbindable",
     )
-    assert decision.reasons == ("rebuild_refused_arm_selfcheck_failed",)
 
 
 @pytest.mark.parametrize(
@@ -793,10 +828,18 @@ def test_r2_a_staging_scorer_with_another_identity_cannot_stage(env: Env) -> Non
     records = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
     with refuses("scorer_identity_drift"):
         env.result(records, journal=worker.journal, scorer_=someone)
-    decision = rp.stage_decision(
-        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal, someone)
+    decision = stage(
+        env,
+        result,
+        recomputed_digest=result["result_digest"],
+        journal=worker.journal,
+        scorer_=someone,
     )
-    assert decision.reasons == ("rebuild_refused_scorer_identity_drift",)
+    # the journal is genuine, so the aggregator agrees; only the staging scorer is refused
+    assert decision.reasons == (
+        "rebuild_refused_scorer_identity_drift",
+        "independent_verdict_unbindable",
+    )
 
 
 def test_r2_an_unattributed_staging_scorer_cannot_stage(env: Env) -> None:
@@ -810,8 +853,12 @@ def test_r2_an_unattributed_staging_scorer_cannot_stage(env: Env) -> None:
         scorer_=anonymous,
     )
     assert rebuilt["body"]["scorer"]["staging_selfcheck_passed"] is False
-    decision = rp.stage_decision(
-        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal, anonymous)
+    decision = stage(
+        env,
+        result,
+        recomputed_digest=result["result_digest"],
+        journal=worker.journal,
+        scorer_=anonymous,
     )
     assert not decision.stageable
     assert "staging_scorer_unattributed" in decision.reasons
@@ -874,11 +921,15 @@ def test_x1_an_arm_whose_rows_are_not_exactly_the_eligible_cases_cannot_build_or
     with refuses("journal_rows_incomplete"):
         ag.rederive(worker.journal.path, env.manifest)
     for supplied in (genuine, {"body": {}, "result_digest": "x"}):
-        decision = rp.stage_decision(
-            supplied, recomputed_digest=supplied["result_digest"], **env.staging(worker.journal)
+        decision = stage(
+            env, supplied, recomputed_digest=supplied["result_digest"], journal=worker.journal
         )
         assert not decision.stageable
-        assert decision.reasons == ("rebuild_refused_journal_rows_incomplete",)
+        assert decision.reasons == (
+            "rebuild_refused_journal_rows_incomplete",
+            "aggregate_refused_journal_rows_incomplete",
+            "independent_verdict_unbindable",
+        )
 
 
 def test_x1b_the_untampered_journal_still_builds_and_stages(env: Env) -> None:
@@ -888,8 +939,8 @@ def test_x1b_the_untampered_journal_still_builds_and_stages(env: Env) -> None:
     want = [rp._ref(env.manifest, c) for c in env.manifest.eligible_case_ids]
     outcomes = genuine["body"]["case_outcomes_redacted"]
     assert all([ref for ref, _ in rows] == want for rows in outcomes.values())
-    decision = rp.stage_decision(
-        genuine, recomputed_digest=genuine["result_digest"], **env.staging(worker.journal)
+    decision = stage(
+        env, genuine, recomputed_digest=genuine["result_digest"], journal=worker.journal
     )
     assert decision.stageable and decision.reasons == ()
 
@@ -984,8 +1035,12 @@ def test_x3_an_unattributed_staging_scorer_is_a_reason_never_a_raw_exception(
     records = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
     rebuilt = env.result(records, journal=worker.journal, scorer_=scorer)
     assert rebuilt["body"]["scorer"]["staging_selfcheck_passed"] is False
-    decision = rp.stage_decision(
-        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal, scorer)
+    decision = stage(
+        env,
+        result,
+        recomputed_digest=result["result_digest"],
+        journal=worker.journal,
+        scorer_=scorer,
     )
     assert not decision.stageable
     assert "staging_scorer_unattributed" in decision.reasons

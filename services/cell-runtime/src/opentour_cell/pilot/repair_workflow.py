@@ -683,7 +683,14 @@ def _current_model_permission(
 
 
 def managed_review_evidence(
-    directory: Path, organization: str, run_id: str, audience: str, team: str, channel: str
+    directory: Path,
+    organization: str,
+    run_id: str,
+    audience: str,
+    team: str,
+    channel: str,
+    *,
+    include_review_window: bool = False,
 ) -> Json:
     run_id = run_id.removeprefix("managed:")
     _require(re.fullmatch(r"run-[0-9a-f]{32}", run_id), "managed_review_unavailable")
@@ -727,6 +734,12 @@ def managed_review_evidence(
             directory, organization, review["engagement"], review["dataset_revision"]
         )
     result = {k: review[k] for k in ("dataset_id", "dataset_revision", "readout", "audit")}
+    if include_review_window:
+        result["review_window"] = {
+            "plan_revision": receipt["plan_revision"],
+            "expires_at": grant["expires_at"],
+            "grant_revision": digest(grant),
+        }
     if "release_review" in receipt:
         result["release_review"] = receipt["release_review"]
     return result

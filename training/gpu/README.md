@@ -10,6 +10,50 @@ control workspace installs.
 | `uv.lock` | The GPU training lock. Linux x86_64 only. Every artifact carries a SHA-256. |
 | `trainer.Dockerfile` | Trainer image built only from `uv.lock`, with hashes, as a non-root user. |
 | `.dockerignore` | Admits only `pyproject.toml` and `uv.lock` into the image build context. |
+| `eve-bake.hcl`, `infrastructure/images/eve-trainer.Dockerfile` | Build the runnable Linux/amd64 EVE trainer, its supervisor and the private worker exchange on the locked runtime. |
+
+## Package the runnable trainer on CPU
+
+From the repository root, run `docker buildx bake -f training/gpu/eve-bake.hcl --load eve`.
+The resulting `opentour/eve-trainer:local` image runs the installed trainer module in isolated
+Python mode as UID 10001. `docker run --rm --network none opentour/eve-trainer:local --help`
+lists `serve`, `fit`, `status`, `pause`, `resume`, `stop` and `replay`. Supply the pinned
+weights and authorized input files as read-only mounts at runtime.
+
+The **Package EVE trainer on CPU** workflow runs two generated CPU proofs in the same Linux
+image. One compares uninterrupted training with a checkpoint and fresh replay. The other drives
+the installed exchange through pause, supervisor restart, resume, completion and cancellation.
+The workflow publishes the tested trainer to GHCR and attaches the small checksummed receipts.
+Pull the immutable manifest in `registry-ref.txt` and verify the local Docker image ID against
+`image-id.txt`. The manifest digest and the image configuration digest identify different objects.
+
+## Connect the installed worker
+
+On a qualified host, the installed Slack adapter consumes `eve-learning-selection.json` in its
+private worker directory. This is the normal sealed owner learning-run selection for Slack. The
+signed `eve-spend-mandate.json` and `pilot-issuer-registry.json` bind the reviewer, current
+plan, benchmark, paid execution, host, model and image. The execution must already be reserved
+in the existing dispatch ledger. A missing signer, unqualified route or missing reservation
+holds the proposal. The installed cycle worker refreshes a live permit every five seconds.
+The authority and Slack credentials stay in the worker process.
+
+Mount only the worker's owner-private `eve-exchange` directory read-write at `/exchange`,
+the pinned base at `/model` and the development rows and protected membership fingerprints at
+`/inputs` read-only. Name each input `<sha256>.json`. Give UID 10001 a separate private
+read-write `/work`. Mounts must be separately addressable and the exchange must have the
+same effective owner in each process. Run this entry in the GPU container with networking
+disabled and the verified configuration digest supplied by the host:
+
+```sh
+serve --exchange /exchange --model-dir /model --inputs /inputs --work /work --image-id "$IMAGE_ID"
+```
+
+Enable the existing Slack `channel_aggregates` setting for the authorized private channel.
+The optional `learning_thread_ts` selects its existing progress thread. Current Slack approval
+admits the fit. Pause becomes confirmed when the trainer writes a checkpoint. The worker
+keeps showing the same run across restart. Paused hardware continues to consume the host
+allocation. The GPU rental needs an independent provider-side deletion at its cutoff.
+A model release requires the separate benchmark and release decision.
 
 ## Isolation rules
 
@@ -152,6 +196,6 @@ a recorded commit. Each run records:
   None of them is GPU qualification, an EVE fit or replay, or customer evidence.
 - `tools/toolchain.json` `gpu_qualification.status` stays `NOT_RUN` until the OPE-565 host
   records the items above.
-- This image does not yet contain the OPE-558 trainer. The trainer commit `a62e4e5` was never
-  pushed. It must be reimplemented and reviewed at an exact commit (OPE-579 item 4) before it is
-  added here.
+- The runnable image packages the OPE-558 trainer recovered and independently reviewed at
+  `d9943f31074c50b1f4aa3733f5f17cdd837e39ce`. Its EVE 24B qualification requires the approved
+  GPU, a fresh Slack training approval and the measured evidence above.

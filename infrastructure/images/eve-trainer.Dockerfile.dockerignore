@@ -1,0 +1,7 @@
+**
+!training/src/opentour_training/__init__.py
+!training/src/opentour_training/training/__init__.py
+!training/src/opentour_training/training/eve_run.py
+!training/src/opentour_training/training/eve_sft.py
+!training/src/opentour_training/training/eve_host.py
+!services/cell-runtime/src/opentour_cell/pilot/eve_exchange.py

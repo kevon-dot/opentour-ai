@@ -104,6 +104,12 @@ user ID. A user with live inspection can see current bindings and request
 custodian action. Only a user with current live custodian authority can save.
 The starter owner mapping grants no live role.
 
+To display the signed training policy in **Workflow settings**, the operator
+can set `owner_settings_authority_file` to the basename of the already-provisioned
+administrator-controlled owner settings authority in the private worker directory.
+The current Slack actor needs both live workflow access and settings read access.
+If the binding or authority is absent, the modal omits the training policy.
+
 The intake worker needs its own intake grant to discover the resulting
 `feed_binding_ref` and submit a typed live request. Source ingestion depends
 on an installed authorized reader. The Slack settings action reads no feed

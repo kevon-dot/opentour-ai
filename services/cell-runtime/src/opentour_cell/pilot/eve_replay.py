@@ -16,12 +16,17 @@ Worker journal (OPE-574, owner ruling A + C, following OPE-528): the replay jour
 redacted and holds no candidate output. Each journaled verdict row instead carries the scorer and
 rubric that produced it and a keyed commitment over the exact output that was scored (HMAC-SHA256
 under a per-run key, never a bare digest, because short answers are guessable by enumeration).
-Given an output presented later and the run key, ``verify_output`` detects substitution. Nothing in
-this module or in ``eve_aggregate`` re-scores a verdict; what they offer is "aggregation re-derived
-from journaled verdicts". Re-scoring belongs to the separate evaluator that OPE-528 defines, which
-replays under its own identity and keeps per-case predictions privately under its own custody; it
-is not built here. The scorer implementation lives in ``eve_scorer`` and the aggregator in
-``eve_aggregate``; this module imports neither.
+Given an output presented later and the run key, ``verify_output`` detects substitution; its
+production caller is the separate evaluator. Nothing in this module or in ``eve_aggregate``
+re-scores a verdict; what they offer is "aggregation re-derived from journaled verdicts".
+Re-scoring belongs to the separate evaluator (``eve_evaluator``, the fixture-tier form of the
+OPE-528 evaluator), which replays under its own identity, keeps per-case predictions privately
+under its own custody and checks each of them against this journal's commitments. The scorer
+implementation lives in ``eve_scorer``, the aggregator in ``eve_aggregate``, the evaluator in
+``eve_evaluator`` and the staging gate in ``eve_staging``; this module imports none of them. It
+deliberately has no staging decision of its own: offering a result for review needs the worker
+rebuild, the aggregator and the independent verdict together, which only ``eve_staging`` can
+combine without this module importing the others.
 
 The run key lives in a ``CommitmentKeyStore`` file, never in the journal row it protects, and the
 worker refuses a key store under, or linked to, the journal. This is the ``locally_keyed`` evidence
@@ -433,6 +438,80 @@ class ReplayManifest:
                 [list(e) for e in self.excluded],
             ]
         )
+
+    def document(self) -> dict[str, Any]:
+        """The frozen manifest as a JSON document, for the separate evaluator process."""
+        return {
+            "schema_version": MANIFEST_VERSION,
+            "benchmark_id": self.benchmark_id,
+            "benchmark_revision": self.benchmark_revision,
+            "registration_identity": self.registration_identity,
+            "scorer_id": self.scorer_id,
+            "scorer_version": self.scorer_version,
+            "rubric_revision": self.rubric_revision,
+            "membership_digest": self.membership_digest,
+            "content_digest": self.content_digest,
+            "answer_key_digest": self.answer_key_digest,
+            "eligible_case_ids": list(self.eligible_case_ids),
+            "excluded": [list(e) for e in self.excluded],
+            "manifest_digest": self.digest,
+        }
+
+    @staticmethod
+    def parse(raw: Any) -> ReplayManifest:
+        """Read a manifest document strictly; its digest must match its own fields.
+
+        The digest check only catches an inconsistent document. Whether the manifest names the
+        reader's own sealed cases and answer key is the reader's check, never this one's.
+        """
+        fields = _MANIFEST_TEXT_FIELDS
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != _MANIFEST_KEYS
+            or raw["schema_version"] != MANIFEST_VERSION
+            or not all(type(raw[f]) is str and raw[f] for f in fields)
+            or not isinstance(raw["eligible_case_ids"], list)
+            or not all(type(c) is str and c for c in raw["eligible_case_ids"])
+            or not isinstance(raw["excluded"], list)
+            or not all(
+                isinstance(e, list) and len(e) == 2 and all(type(v) is str and v for v in e)
+                for e in raw["excluded"]
+            )
+        ):
+            raise EveRefusal("manifest_malformed")
+        manifest = ReplayManifest(
+            benchmark_id=raw["benchmark_id"],
+            benchmark_revision=raw["benchmark_revision"],
+            registration_identity=raw["registration_identity"],
+            scorer_id=raw["scorer_id"],
+            scorer_version=raw["scorer_version"],
+            rubric_revision=raw["rubric_revision"],
+            membership_digest=raw["membership_digest"],
+            content_digest=raw["content_digest"],
+            answer_key_digest=raw["answer_key_digest"],
+            eligible_case_ids=tuple(raw["eligible_case_ids"]),
+            excluded=tuple((e[0], e[1]) for e in raw["excluded"]),
+        )
+        if manifest.digest != raw["manifest_digest"]:
+            raise EveRefusal("manifest_malformed")
+        return manifest
+
+
+MANIFEST_VERSION = "opentour.pilot.eve-replay-manifest.v1"
+_MANIFEST_TEXT_FIELDS = (
+    "benchmark_id",
+    "benchmark_revision",
+    "registration_identity",
+    "scorer_id",
+    "scorer_version",
+    "rubric_revision",
+    "membership_digest",
+    "content_digest",
+    "answer_key_digest",
+)
+_MANIFEST_KEYS = frozenset(
+    {"schema_version", "eligible_case_ids", "excluded", "manifest_digest", *_MANIFEST_TEXT_FIELDS}
+)
 
 
 def replay_membership(cases: tuple[EveCase, ...]) -> str:
@@ -1346,99 +1425,6 @@ def build_result(
     }
     check_egress(key, "result", body)
     return {"body": body, "result_digest": digest(body)}
-
-
-@dataclass(frozen=True)
-class StageDecision:
-    stageable: bool
-    reasons: tuple[str, ...]
-
-
-def _rebuild(
-    manifest: ReplayManifest, journal: ReplayJournal, scorer: Scorer, key: AnswerKey
-) -> dict[str, Any]:
-    """Rebuild the result from every arm the journal holds for ``manifest``, one per arm id."""
-    arms: dict[str, ArmRecord] = {}
-    for record in journal.arms_for(manifest.digest):
-        if record.spec.arm_id in arms:
-            raise EveRefusal("arm_ambiguous")
-        arms[record.spec.arm_id] = record
-    if not arms:
-        raise EveRefusal("arm_not_journaled")
-    return build_result(manifest, arms, scorer=scorer, journal=journal, key=key)
-
-
-def stage_decision(
-    result: Mapping[str, Any],
-    *,
-    recomputed_digest: str,
-    manifest: ReplayManifest,
-    journal: ReplayJournal,
-    scorer: Scorer,
-    key: AnswerKey,
-) -> StageDecision:
-    """Whether a result may be offered for Slack review. It is never a release authorization.
-
-    The result is derived here, never taken from the caller: it is rebuilt from every arm the
-    journal holds for ``manifest`` (re-running the scorer self-check and the attribution checks),
-    and the supplied result must equal that rebuild exactly. ``recomputed_digest`` is the digest
-    the caller expects, for example the one a reviewer was shown; it is compared with the derived
-    digest and refused on mismatch, and never stands in for the derivation. The self-check and
-    improvement claim are read from the rebuilt body, so a flag edited into a re-digested body
-    cannot make a result stageable.
-
-    Limits: the rebuild reads verdicts back from the journal, so it re-derives aggregation and
-    checks body and journal consistency, and cannot check any verdict. It shares ``build_result``'s
-    aggregation code, so an aggregation bug is caught only by the separate ``eve_aggregate``. Every
-    contributing arm must record a passing replay-time self-check under the manifest's scorer
-    identity; the ``scorer`` passed here must carry that same identity (another declared identity
-    is refused, an undeclared one is not stageable) and is self-checked as well, but a passing
-    scorer handed in at staging cannot stand in for a failing one at replay. Scorer identity is
-    declared and checked against the manifest, not authenticated. Two journaled runs of one arm id
-    are ambiguous and not stageable.
-    """
-    try:
-        rebuilt = _rebuild(manifest, journal, scorer, key)
-    except EveRefusal as refusal:
-        return StageDecision(False, (f"rebuild_refused_{refusal}",))
-    try:
-        scorer_attribution(scorer)
-        unattributed: tuple[str, ...] = ()
-    except EveRefusal:
-        unattributed = ("staging_scorer_unattributed",)
-    body, derived = rebuilt["body"], rebuilt["result_digest"]
-    try:
-        supplied_body, supplied_digest = result["body"], result["result_digest"]
-        reasons = []
-        selfchecks = (
-            body["scorer"]["selfcheck_passed"],
-            supplied_body["scorer"]["selfcheck_passed"],
-        )
-        if not all(selfchecks):
-            reasons.append("scorer_selfcheck_failed")
-        if (
-            supplied_digest != derived
-            or recomputed_digest != derived
-            or digest(supplied_body) != derived
-        ):
-            reasons.append("recompute_mismatch")
-        if (
-            supplied_body["schema_version"] != VERSION
-            or supplied_body["evidence_tier"] != TIER
-            or supplied_body["claim_scope"] != "implementation_only"
-        ):
-            reasons.append("result_not_generated_implementation_only")
-        if (
-            supplied_body["fit_authorized"] is not False
-            or supplied_body["release_authorized"] is not False
-        ):
-            reasons.append("authorization_flag_set")
-    except (KeyError, TypeError):
-        return StageDecision(False, ("result_malformed",))
-    if body["improvement_claim"] != "observed_net_fixes":
-        reasons.append(f"improvement_{body['improvement_claim']}")
-    reasons.extend(unattributed)
-    return StageDecision(not reasons, tuple(reasons))
 
 
 def guard_fit_payload(key: AnswerKey, plan: FitPlan) -> None:

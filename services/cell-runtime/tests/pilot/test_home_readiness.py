@@ -410,6 +410,9 @@ def test_current_workflow_question_reaches_persisted_answer_and_back(ready, surf
 
     empty = choose()
     assert "Current training readiness is unavailable" in empty and "0 verified" not in empty
+    assert "Learning runs · Controls unavailable in this installation" in empty
+    assert "authenticated learning-run service" in empty
+    assert set(buttons(screen(h, view))) == {"ot_training_scopes"}
     assert not ready.worker.readiness.path.exists()
     ready.ingest(decision())
     receipt = ready.worker.refresh()
@@ -654,3 +657,107 @@ def test_changed_weekly_receipt_before_render_suppresses_scope(ready, monkeypatc
     denied = json.dumps(screen(h, view))
     assert initial["readiness_ref"] not in denied and "Current totals" not in denied
     assert effects(h) == (0,) * 7
+
+
+def test_learning_plan_from_home_start_reopen_refresh_and_cancel(ready, monkeypatch):
+    from opentour_cell.pilot.slack_learning import LearningPlan, LearningStatus
+
+    class GeneratedWorker:
+        def __init__(self):
+            self.receipt = None
+            self.starts = []
+            self.cancels = 0
+
+        def plan(self, scope):
+            if scope.actor != ACTOR or scope.workflow != ready.workflow:
+                return None
+            return LearningPlan(
+                scope,
+                "plan-v1",
+                "model-v2",
+                "bench-v3",
+                "mandate-v4",
+                1,
+                1200,
+                "paused",
+                True,
+                True,
+                self.receipt.run_ref if self.receipt else None,
+            )
+
+        def start(self, scope, plan_ref, operation, key):
+            assert self.plan(scope).plan_ref == plan_ref
+            self.starts.append((operation, key))
+            self.receipt = LearningStatus("run-1", "queued", True)
+            return self.receipt
+
+        def status(self, scope, run_ref):
+            assert self.plan(scope).current_run == run_ref
+            return self.receipt
+
+        def cancel(self, scope, run_ref):
+            assert self.status(scope, run_ref).can_cancel
+            self.cancels += 1
+            self.receipt = LearningStatus(run_ref, "cancellation_pending", False)
+            return self.receipt
+
+    h = ready.h
+    worker = GeneratedWorker()
+
+    def press(view, action):
+        h.action(view, action, buttons(screen(h, view))[action])
+
+    def open_plan():
+        h.app.learning_service = worker
+        click(h, ready.home(), "ot_app_prompt")
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": "Why didn't it train?"}}})
+        press(view, "ot_current_training")
+        press(view, "ot_learning_preview")
+        assert screen(h, view)["callback_id"] == "ot_learning_plan"
+        return view
+
+    view = open_plan()
+    assert "bench-v3" in json.dumps(screen(h, view))
+    press(view, "ot_learning_improve")
+    assert screen(h, view)["callback_id"] == "ot_learning_run"
+    assert "run-1" in json.dumps(screen(h, view))
+    restart(h)
+    view = open_plan()
+    press(view, "ot_learning_status")
+    press(view, "ot_learning_status")
+    stale_view = view
+    stale_action = buttons(screen(h, stale_view))["ot_learning_cancel"]
+    with monkeypatch.context() as patch:
+        current = h.app._current_question(ACTOR, StatusTopic.TRAINING)
+        patch.setattr(h.app, "_current_question", lambda *_: ("another-workflow", *current[1:]))
+        original_plan, pin = h.app._learning_plan(ACTOR, ready.workflow)
+        foreign = replace(
+            original_plan, scope=replace(original_plan.scope, workflow="another-workflow")
+        )
+        patch.setattr(h.app, "_learning_plan", lambda *_: (foreign, pin))
+        h.action(stale_view, "ot_learning_cancel", stale_action)
+        assert worker.cancels == 0 and "run-1" not in json.dumps(screen(h, stale_view))
+    view = open_plan()
+    press(view, "ot_learning_status")
+    press(view, "ot_learning_cancel")
+    assert "Cancellation pending" in json.dumps(screen(h, view))
+    assert "ot_learning_cancel" not in buttons(screen(h, view))
+    assert worker.cancels == 1 and len(worker.starts) == 1
+    assert worker.starts[0][0] == "evaluate_and_improve" and effects(h) == (0,) * 7
+
+    view = open_plan()
+    plan_action = buttons(screen(h, view))["ot_learning_status"]
+    original_status = worker.status
+
+    def revoke_before_disclosure(scope, run_ref):
+        result = original_status(scope, run_ref)
+        h.config["users"][ACTOR]["aggregate"] = False
+        h.save()
+        return result
+
+    monkeypatch.setattr(worker, "status", revoke_before_disclosure)
+    h.action(view, "ot_learning_status", plan_action)
+    assert screen(h, view).get("callback_id") != "ot_learning_run"
+    assert "run-1" not in json.dumps(screen(h, view))
+    assert len(worker.starts) == worker.cancels == 1

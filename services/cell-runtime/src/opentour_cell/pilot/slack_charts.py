@@ -116,11 +116,14 @@ def decision_charts(report: Mapping[str, Any], audit: Mapping[str, Any], revisio
             + ", ".join(different)
             + "."
         )
-    if winner:
-        pair = options[winner]["paired"]
-        prefix = f"Current vs. {NAMES[winner].lower()}"
+    for key, option in options.items():
+        pair = option["paired"]
+        changes = option["changes"]
+        prefix = f"Current vs. {NAMES[key].lower()}"
         sentences.append(
-            f"{prefix}: {pair['comparable']} comparable cases, {pair['excluded']} excluded."
+            f"{prefix}: {pair['comparable']} comparable cases, {pair['excluded']} excluded. "
+            f"Only current automated: {changes['current_only_automatic']}. "
+            f"Only {NAMES[key].lower()} automated: {changes['repair_only_automatic']}."
         )
         if pair["comparable"]:
             counts = [pair[v] for v in PAIRED.values()]
@@ -128,13 +131,12 @@ def decision_charts(report: Mapping[str, Any], audit: Mapping[str, Any], revisio
                 ", ".join(f"{c} {label.lower()}" for label, c in zip(PAIRED, counts, strict=True))
                 + "."
             )
-            charts.append(_bars(prefix + ": paired outcomes", list(PAIRED), {"Cases": counts}))
+            if key == winner:
+                charts.append(_bars(prefix + ": paired outcomes", list(PAIRED), {"Cases": counts}))
         else:
             sentences.append("No comparable paired cases.")
-    else:
+    if not winner:
         sentences.append("No repair was selected for handoff.")
-        if not selected["paired"]["comparable"]:
-            sentences.append("No comparable paired cases.")
     text = "\n".join(sentences)
     return {
         "text": text,

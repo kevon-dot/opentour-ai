@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import http.client
@@ -22,12 +23,21 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
-from opentour_cell.pilot.scoped_query_plan import ReadoutQuestion, plan_query
+from opentour_cell.pilot.scoped_query_plan import (
+    ArmChart,
+    ComparisonArm,
+    QueryHold,
+    ReadoutQuestion,
+    WorkflowDiscovery,
+    plan_query,
+)
+from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
@@ -40,13 +50,30 @@ from opentour_cell.pilot.status_questions import (
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
     from opentour_cell.pilot.map_review import MapReviewService
+    from opentour_cell.pilot.recipient_lifecycle import LifecycleAuthority
+    from opentour_cell.pilot.slack_learning import (
+        Control,
+        LearningPlan,
+        LearningService,
+        LearningStatus,
+        Operation,
+    )
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
+    from opentour_cell.pilot.workflow_index import (
+        Action,
+        IndexPage,
+        IndexRow,
+        IndexScope,
+        ProposalAccess,
+        WorkflowIndex,
+    )
 
 Json = dict[str, Any]
 SESSION_SECONDS = 900
 RESULT_PAGE_SIZE = 12
+WORKFLOW_PAGE_SIZE = 6
 SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,31}\Z")
 LOCAL_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 # Only a complete, read-only question may select a frozen comparison.
@@ -54,7 +81,11 @@ REGRESSION_QUESTION = re.compile(
     r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
     r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
 )
-WORKPLACE_QUESTIONS = {ReadoutQuestion.WORKPLACE_SUPPORT, ReadoutQuestion.SYNTHETIC_BENEFIT}
+WORKPLACE_QUESTIONS = {
+    ReadoutQuestion.WORKPLACE_SUPPORT,
+    ReadoutQuestion.SYNTHETIC_BENEFIT,
+    ReadoutQuestion.LABEL_SAVINGS,
+}
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {
     "ot_dataset_search",
@@ -70,7 +101,13 @@ CALLBACKS = {
     "ot_map_assertions_save",
     "ot_map_precedence_save",
 }
+LEARNING_CONTROLS: dict[str, Control] = {
+    "ot_learning_pause": "pause",
+    "ot_learning_resume": "resume",
+    "ot_learning_stop": "stop",
+}
 ACTIONS = {
+    *LEARNING_CONTROLS,
     "ot_workflow_starter",
     "ot_map_open",
     "ot_case_review",
@@ -128,11 +165,19 @@ ACTIONS = {
     "ot_current_training",
     "ot_readiness_proof",
     "ot_training_scopes",
+    "ot_learning_preview",
+    "ot_learning_benchmark",
+    "ot_learning_improve",
+    "ot_learning_status",
+    "ot_learning_cancel",
     "ot_result_prev",
     "ot_result_next",
     "ot_repair_confirm",
     "ot_repair_refresh",
     "ot_release_approve",
+    "ot_bench_proof",
+    "ot_bench_calc",
+    "ot_bench_audit",
     "ot_release_receipt",
     "ot_delivery_status",
     "ot_release_changes",
@@ -163,6 +208,51 @@ def _json(value: object) -> str:
 
 
 @dataclass(frozen=True)
+class MonthlyReportPin:
+    workflow_ref: str
+    publication_file: str
+    custodian_key_id: str
+
+
+@dataclass(frozen=True)
+class MonthlyReportSettings:
+    timezone: str
+    workflows: tuple[MonthlyReportPin, ...]
+
+    @classmethod
+    def parse(cls, doc: Json) -> MonthlyReportSettings:
+        from opentour_cell.pilot.repair_workflow import _name
+
+        _check(isinstance(doc, dict) and doc.keys() == {"timezone", "workflows"})
+        timezone = doc["timezone"]
+        _check(isinstance(timezone, str) and 0 < len(timezone) <= 128)
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            raise Refused() from None
+        rows = doc["workflows"]
+        _check(isinstance(rows, list) and 1 <= len(rows) <= 20)
+        pins = []
+        for row in rows:
+            _check(
+                isinstance(row, dict)
+                and row.keys() == {"workflow_ref", "publication_file", "custodian_key_id"}
+            )
+            pin = MonthlyReportPin(**row)
+            _check(
+                isinstance(pin.workflow_ref, str) and re.fullmatch(REF_PATTERN, pin.workflow_ref)
+            )
+            _check(_name(pin.publication_file).endswith(".json"))
+            _check(
+                isinstance(pin.custodian_key_id, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,126}[a-z0-9]", pin.custodian_key_id)
+            )
+            pins.append(pin)
+        _check(len({pin.workflow_ref for pin in pins}) == len(pins))
+        return cls(timezone, tuple(pins))
+
+
+@dataclass(frozen=True)
 class Settings:
     organization: str
     team: str
@@ -184,6 +274,10 @@ class Settings:
     explicit_recipient: bool = True
     live_workflow_ref: str = ""
     starter_setup: StarterBinding | None = None
+    workflow_index_publication_file: str = ""
+    owner_settings_authority_file: str = ""
+    monthly_invoice_reports: MonthlyReportSettings | None = None
+    learning_thread_ts: str = ""
 
     @property
     def binding(self) -> str:
@@ -230,7 +324,11 @@ class Settings:
             "workspace_title",
             "workflow_label",
             "starter_setup",
+            "workflow_index_publication_file",
+            "owner_settings_authority_file",
             "live_workflow_ref",
+            "monthly_invoice_reports",
+            "learning_thread_ts",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -270,6 +368,21 @@ class Settings:
                     and label.isprintable()
                     and not any(c in label for c in "<>@#&")
                 )
+        learning_thread = doc.get("learning_thread_ts", "")
+        _check(
+            isinstance(learning_thread, str)
+            and (not learning_thread or re.fullmatch(r"[0-9]{1,15}\.[0-9]{1,12}", learning_thread))
+        )
+        publication_file = ""
+        if "workflow_index_publication_file" in doc:
+            from opentour_cell.pilot.repair_workflow import _name
+
+            publication_file = _name(doc["workflow_index_publication_file"])
+        authority_file = ""
+        if "owner_settings_authority_file" in doc:
+            from opentour_cell.pilot.repair_workflow import _name
+
+            authority_file = _name(doc["owner_settings_authority_file"])
         live_workflow = doc.get("live_workflow_ref", "")
         if "live_workflow_ref" in doc:
             _check(isinstance(live_workflow, str) and re.fullmatch(REF_PATTERN, live_workflow))
@@ -298,6 +411,12 @@ class Settings:
             path,
             explicit_recipient=explicit_recipient,
             live_workflow_ref=live_workflow,
+            learning_thread_ts=learning_thread,
+            workflow_index_publication_file=publication_file,
+            owner_settings_authority_file=authority_file,
+            monthly_invoice_reports=MonthlyReportSettings.parse(doc["monthly_invoice_reports"])
+            if "monthly_invoice_reports" in doc
+            else None,
             starter_setup=StarterBinding.parse(doc["starter_setup"])
             if "starter_setup" in doc
             else None,
@@ -339,6 +458,8 @@ class Journal:
                     kind TEXT, job TEXT, revision TEXT, expires INTEGER);
                 CREATE TABLE IF NOT EXISTS jobs (
                     job TEXT PRIMARY KEY, dataset TEXT, requester TEXT);
+                CREATE TABLE IF NOT EXISTS learning_cards (
+                    id TEXT PRIMARY KEY, thread TEXT NOT NULL, ts TEXT, rendered TEXT);
                 CREATE TABLE IF NOT EXISTS launcher (channel TEXT PRIMARY KEY, ts TEXT);
                 CREATE TABLE IF NOT EXISTS inspections (
                     actor TEXT, revision TEXT, policy TEXT, expires INTEGER,
@@ -1079,6 +1200,7 @@ def withdraw_for_custody(directory: Path, organization: str) -> dict[str, int]:
                     "launcher",
                     "inspections",
                     "approval_posts",
+                    "learning_cards",
                     "exposures",
                 )
             ),
@@ -1105,8 +1227,19 @@ class Workbench:
         training: Any,
         views: Any,
         submit: Callable[[Callable[[], None]], Any] | None = None,
+        *,
+        learning_service: LearningService | None = None,
+        workflow_index_scope: Callable[
+            [Settings, IntakePrincipal, tuple[ProposalAccess, ...]], IndexScope | None
+        ]
+        | None = None,
+        lifecycle_authority: LifecycleAuthority | None = None,
     ):
+        self.learning_service = learning_service
+        self.learning_changed = threading.Event()
+        self.workflow_index_scope = workflow_index_scope
         self.config = config
+        self.lifecycle_authority = lifecycle_authority
         first = config()
         self.binding = (
             first.organization,
@@ -1636,6 +1769,200 @@ class Workbench:
         except Exception:
             return None
 
+    def _monthly_discovery(
+        self, cfg: Settings, actor: str
+    ) -> tuple[tuple[str, MonthlyInvoiceReport, str], ...]:
+        from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+        from opentour_cell.pilot.scoped_query_report import open_signed_monthly_invoice_report
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope
+
+        setup = cfg.monthly_invoice_reports
+        if setup is None:
+            return ()
+        now = datetime.now(UTC)
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+        visible = []
+        for pin in setup.workflows:
+            admitted = False
+            try:
+                authority = PrivateLiveAuthority(cfg.directory, cfg.organization, pin.workflow_ref)
+                with authority.guard(principal, pin.workflow_ref) as scope:
+                    _check(
+                        scope.can_inspect
+                        and scope.tenant == cfg.organization
+                        and scope.workflow_ref == pin.workflow_ref
+                        and scope.engagement_epoch == self.store.engagement_id
+                    )
+                    _check(cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"])
+                    admitted = True
+                    verified = open_signed_monthly_invoice_report(
+                        cfg.directory,
+                        pin.publication_file,
+                        BenchmarkScope(scope.tenant, scope.engagement_epoch, scope.workflow_ref),
+                        timezone=setup.timezone,
+                        at=now,
+                        custodian_key_id=pin.custodian_key_id,
+                    )
+                    if verified is None:
+                        return ()
+                    report, revision = verified
+                    protected = self.journal.opaque(
+                        "month",
+                        [
+                            scope.authority_revision,
+                            scope.dataset_revision,
+                            self._policy(cfg, actor),
+                            pin.publication_file,
+                            pin.custodian_key_id,
+                            revision,
+                        ],
+                    )
+                visible.append((pin.workflow_ref, report, protected))
+            except (ImportError, ValueError, OSError, KeyError, sqlite3.Error):
+                if admitted:
+                    return ()
+        return tuple(visible)
+
+    def _monthly_question(
+        self, cfg: Settings, actor: str, view: str, plan: WorkflowDiscovery
+    ) -> None:
+        rows = self._monthly_discovery(cfg, actor) if cfg.monthly_invoice_reports else ()
+        token = self.journal.context(actor, cfg.channel, view, "monthly_question")
+        if not rows:
+            self._show(view, self.views.query_hold_modal(token, plan))
+            return
+        self._show(
+            view,
+            self.views.monthly_invoice_answer(
+                token, [(workflow, report) for workflow, report, _ in rows]
+            ),
+            authorize=lambda: _check(
+                self._monthly_discovery(self.settings(check_engagement=False), actor) == rows
+            ),
+        )
+
+    def _chart_match(
+        self, cfg: Settings, actor: str, source: str, version: int
+    ) -> tuple[str, str, Target] | None:
+        from opentour_cell.pilot.source_intake import check_current_intake
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope, WorkflowBenchmarks
+
+        try:
+            if actor != cfg.reviewer or not cfg.permission(actor, "review")["aggregate"]:
+                return None
+            target = self._managed(cfg, actor, source)
+            audit = target.audit
+            cfg.permission(actor, "review", target.dataset)
+            if audit.get("comparison_cohorts", {}).get("rule") != audit["cohort_revision"]:
+                return None
+            intake = check_current_intake(
+                cfg.directory, cfg.organization, self.store.engagement_id, target.dataset_revision
+            )
+            if intake["dataset_id"] != target.dataset:
+                return None
+            workflow = intake["workflow"]
+            scope = BenchmarkScope(cfg.organization, self.store.engagement_id, workflow)
+            receipt = WorkflowBenchmarks(cfg.directory).match_scored_comparison(
+                scope, version, audit["run_revision"]
+            )
+            if receipt is None:
+                return None
+            pin = self.journal.opaque(
+                "chart",
+                [self._policy(cfg, actor), workflow, source, target.revision, version, receipt],
+            )
+            return workflow, pin, target
+        except (ValueError, KeyError, OSError, sqlite3.Error):
+            return None
+
+    def _chart_picker(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        plan: ArmChart,
+        old_hash: str = "",
+        page: int = 0,
+    ) -> None:
+        rows = []
+        for _, source in self._result_sources(cfg, actor):
+            if source.startswith("managed:"):
+                match = self._chart_match(cfg, actor, source, plan.version)
+                if match is not None:
+                    rows.append((match[0], source, match[1]))
+        ctx = self.journal.context
+        if not rows:
+            token = ctx(actor, cfg.channel, view, "query_hold")
+            self._show(view, self.views.query_hold_modal(token, plan), old_hash)
+            return
+        page = max(0, min(page, (len(rows) - 1) // RESULT_PAGE_SIZE))
+        start = page * RESULT_PAGE_SIZE
+        visible = rows[start : start + RESULT_PAGE_SIZE]
+        listing = {
+            "version": plan.version,
+            "page": page,
+            "items": {pin: src for _, src, pin in visible},
+        }
+        token = ctx(actor, cfg.channel, view, "chart_picker", revision=_json(listing))
+
+        def authorize() -> None:
+            current = self.settings(check_engagement=False)
+            for workflow, source, pin in visible:
+                match = self._chart_match(current, actor, source, plan.version)
+                _check(match is not None and match[:2] == (workflow, pin))
+
+        self._show(
+            view,
+            self.views.regression_picker(
+                token,
+                visible,
+                previous=bool(page),
+                more=start + len(visible) < len(rows),
+                topic="arm_chart",
+            ),
+            old_hash,
+            authorize=authorize,
+        )
+
+    def _selected_chart(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        source: str,
+        version: int,
+        pin: str,
+        old_hash: str,
+        proof: bool = False,
+    ) -> None:
+        match = self._chart_match(cfg, actor, source, version)
+        if match is None or match[1] != pin:
+            raise Refused()
+        workflow, _, target = match
+        token = self.journal.context(
+            actor,
+            cfg.channel,
+            view,
+            "chart_proof" if proof else "arm_chart",
+            revision=_json({"source": source, "version": version, "pin": pin}),
+        )
+
+        def authorize() -> None:
+            current = self._chart_match(
+                self.settings(check_engagement=False), actor, source, version
+            )
+            _check(current is not None and current[:2] == (workflow, pin))
+
+        self._show(
+            view,
+            self.views.frozen_rule_chart(token, workflow, version, target.audit, pin, proof),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+            authorize=authorize,
+        )
+
     def _regression_picker(
         self,
         cfg: Settings,
@@ -1762,6 +2089,8 @@ class Workbench:
             proposal_ref=target.audit["job_id"],
             proposal_revision=target.audit["run_revision"],
             artifact_sha256=target.audit["model_revision"],
+            cohort_revision=target.audit["cohort_revision"],
+            lifecycle_authority=self.lifecycle_authority,
         )
 
     def _receipt_pin(self, actor: str, revision: str, receipt: HandoffReadback) -> str:
@@ -1809,9 +2138,25 @@ class Workbench:
                 "No receipt links them to independently verified workplace families.",
                 "The data custodian can provide verified case lineage for this frozen result.",
             )
+        if topic == ReadoutQuestion.LABEL_SAVINGS:
+            return StatusAnswer(
+                "Label savings not measured.",
+                f"{scope}{basis} The frozen evaluation has {target.report['known_references']} "
+                f"known references across {target.report['cohort_size']} cases. "
+                "Training-label budgets, independent training families and expert minutes "
+                "are unavailable for this comparison.",
+                "The evaluation operator can supply a matched label-budget comparison at the "
+                "same quality target, coverage and regression limits, with measured expert time.",
+            )
+        pair = target.report["paired"]
+        measured = (
+            f"The recorded comparison has {pair['comparable']} comparable cases, "
+            f"{pair['fixes']} fixed, {pair['regressions']} newly wrong "
+            f"and {pair['excluded']} excluded."
+        )
         return StatusAnswer(
             "Augmentation benefit is unproven for this result.",
-            f"{scope}{basis} The result has no matched real-only and augmented arms "
+            f"{scope}{basis} {measured} The result has no matched real-only and augmented arms "
             "scored on the same untouched real cases. Incremental cost is unavailable.",
             "The evaluation operator can provide a matched comparison and its cost receipt.",
         )
@@ -1977,7 +2322,12 @@ class Workbench:
         self._show(
             view,
             self.views.status_question_modal(
-                token, revision, target.dataset, answer, receipt_pin=pin
+                token,
+                revision,
+                target.dataset,
+                answer,
+                receipt_pin=pin,
+                workflow_ref=current.live_workflow_ref if delivery_scoped else None,
             )
             if answer
             else self.views.question_modal(token, revision, target.report, target.audit, topic),
@@ -2043,7 +2393,16 @@ class Workbench:
             )
         return exposure
 
-    def _home(self, cfg: Settings, actor: str, view_id: str, job: str, old_hash: str = "") -> None:
+    def _home(
+        self,
+        cfg: Settings,
+        actor: str,
+        view_id: str,
+        job: str,
+        old_hash: str = "",
+        *,
+        authorize: Callable[[], None] | None = None,
+    ) -> None:
         entry = cfg.permission(actor, "inspect")
         target = self._readout(cfg, actor, job) if entry["aggregate"] else None
         revision = target.revision if target else ""
@@ -2085,7 +2444,9 @@ class Workbench:
                 for row in self._catalog(cfg, actor)
             ),
             audit=target.audit if target else None,
-            decision_allowed=actor == cfg.reviewer and "review" in entry["roles"],
+            decision_allowed=authorize is None
+            and actor == cfg.reviewer
+            and "review" in entry["roles"],
             reviewer_navigation=True,
             workspace_title=cfg.workspace_title,
             workflow_label=cfg.workflow_label,
@@ -2097,6 +2458,7 @@ class Workbench:
             dataset=target.dataset if target else None,
             dataset_revision=target.dataset_revision if target else None,
             audit=target.audit if target else None,
+            authorize=authorize,
         )
 
     def _browse(
@@ -2207,7 +2569,18 @@ class Workbench:
             dataset_revision=info["dataset_revision"],
         )
 
-    def _evidence(self, cfg: Settings, actor: str, view: str, ctx: Json, old_hash: str) -> None:
+    def _evidence(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        old_hash: str,
+        *,
+        authorize: Callable[[], None] | None = None,
+        queue_handle: str = "",
+        proof_workflow: str | None = None,
+    ) -> None:
         target = self._readout(cfg, actor, ctx["job"])
         _check(target and target.revision == ctx["revision"])
         assert target is not None
@@ -2219,7 +2592,12 @@ class Workbench:
         entry = current.permission(actor, "inspect", target.dataset)
         _check(entry["aggregate"] and self.views.evidence_available(target.report))
         token = self.journal.context(
-            actor, cfg.channel, view, "evidence", ctx["job"], target.revision
+            actor,
+            cfg.channel,
+            view,
+            "queued_evidence" if queue_handle else "evidence",
+            ctx["job"],
+            queue_handle or target.revision,
         )
         named_reviewer = current.reviewer == actor and "review" in entry["roles"]
         charts = bool(target.audit.get("comparison_cohorts") and named_reviewer)
@@ -2269,9 +2647,9 @@ class Workbench:
             release_allowed=current.explicit_recipient
             and named_reviewer
             and actor == target.audit.get("release_reviewer"),
-            charts_allowed=charts,
+            charts_allowed=charts and not queue_handle,
             benchmark_allowed=named_reviewer,
-            workflow=cfg.workflow_label,
+            workflow=cfg.workflow_label if proof_workflow is None else proof_workflow,
         )
         proof = self._show(
             view,
@@ -2280,6 +2658,7 @@ class Workbench:
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
+            authorize=authorize,
         )
         with _evidence_guard(
             self.store,
@@ -2318,7 +2697,8 @@ class Workbench:
             )
 
         if (
-            not recipe
+            authorize is None
+            and not recipe
             and current.explicit_recipient
             and actor == target.audit.get("release_reviewer")
             and "review" in entry["roles"]
@@ -2418,6 +2798,74 @@ class Workbench:
             audit=target.audit,
         )
 
+    def _benchmark_proof(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        _check(
+            ctx["kind"] == ("evidence" if action == "ot_bench_proof" else "bench_proof")
+            and value == ctx["revision"]
+        )
+        target = self._readout(cfg, actor, ctx["job"])
+        _check(
+            target
+            and target.revision == value
+            and target.audit.get("mode") in {"managed_rule", "managed_model"}
+        )
+        assert target is not None
+        rows = [(target.dataset, ctx["job"], value)]
+
+        def authorized_proof() -> tuple[Json, str]:
+            from opentour_cell.pilot.source_intake import check_current_intake
+
+            current = self._authorize_question_rows(cfg, actor, rows)
+            entry = current.permission(actor, "inspect", target.dataset)
+            intake = check_current_intake(
+                current.directory,
+                current.organization,
+                target.audit["engagement"],
+                target.dataset_revision,
+            )
+            _check(intake["dataset_id"] == target.dataset)
+            workflow = intake.get("workflow", "")
+            _check(not current.live_workflow_ref or current.live_workflow_ref == workflow)
+            if current.reviewer == actor and "review" in entry["roles"]:
+                return target.audit, workflow
+            return {}, workflow
+
+        audit, workflow = authorized_proof()
+
+        def authorize_current() -> None:
+            _check(authorized_proof() == (audit, workflow))
+
+        if action == "ot_evidence":
+            self._evidence(
+                cfg,
+                actor,
+                view,
+                ctx,
+                old_hash,
+                authorize=authorize_current,
+                proof_workflow=workflow or "Workflow unavailable",
+            )
+            return
+        token = self.journal.context(actor, cfg.channel, view, "bench_proof", ctx["job"], value)
+        self._show(
+            view,
+            self.views.benchmark_proof_modal(token, value, audit, workflow, action),
+            old_hash,
+            dataset=target.dataset,
+            dataset_revision=target.dataset_revision,
+            audit=target.audit,
+            authorize=authorize_current,
+        )
+
     def _open_handoff(
         self,
         cfg: Settings,
@@ -2462,7 +2910,15 @@ class Workbench:
         )
 
     def _release(
-        self, cfg: Settings, actor: str, view: str, ctx: Json, action: str, old_hash: str
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        old_hash: str,
+        *,
+        authorize_vote: Callable[[], None] | None = None,
     ) -> None:
         from opentour_cell.pilot.release_gate import record_release
 
@@ -2494,6 +2950,7 @@ class Workbench:
             decision="approved" if action == "ot_release_approve" else "changes_requested",
             inspection_ref=target.revision,
             provider="slack",
+            before_native_publish=authorize_vote,
         )
         receipt = (
             self._handoff_receipt(current, actor, target)
@@ -2745,13 +3202,36 @@ class Workbench:
                     prior = nominee
                 return token, prior
 
+    def _owner_setup_readback(self, cfg: Settings, actor: str, workflow: str) -> Json | None:
+        if not cfg.owner_settings_authority_file:
+            return None
+        from opentour_cell.pilot.owner_settings import OwnerSettings
+
+        try:
+            service = OwnerSettings.open_readback(
+                cfg.directory,
+                cfg.organization,
+                self.store.engagement_id,
+                authority_file=cfg.directory / cfg.owner_settings_authority_file,
+            )
+            result = service.setup_readback(actor=actor, workflow=workflow)
+            _check(self.settings() == cfg)
+            return result
+        except (ValueError, OSError, sqlite3.Error):
+            return None
+
     def _workflow_settings_view(self, cfg: Settings, actor: str, workflow: str, view: str) -> None:
         nomination = self._nomination(actor, workflow)
+        setup = self._owner_setup_readback(cfg, actor, workflow)
         token = self.journal.context(actor, cfg.channel, view, "workflow_settings", workflow)
         self._show(
             view,
-            self.views.workflow_settings(token, workflow, *nomination),
-            authorize=lambda: _check(self._nomination(actor, workflow) == nomination),
+            self.views.workflow_settings(token, workflow, *nomination, setup=setup),
+            authorize=lambda: _check(
+                self.settings() == cfg
+                and self._nomination(actor, workflow) == nomination
+                and self._owner_setup_readback(cfg, actor, workflow) == setup
+            ),
         )
 
     def _live_model(
@@ -3552,6 +4032,26 @@ class Workbench:
         value: str,
         old_hash: str,
     ) -> None:
+        if ctx["kind"] == "queued_evidence":
+            handle = ctx["revision"]
+            queued_row, queued_target, queued_source = self._resolve_workflow_proposal(
+                actor, handle
+            )
+            _check(queued_row.action == "open_review" and queued_source == ctx["job"])
+            ctx = {**ctx, "kind": "evidence", "revision": queued_target.revision}
+            if action in {"ot_release_approve", "ot_release_changes"}:
+                _check(value == queued_target.revision)
+
+                def authorize_vote() -> None:
+                    _check(
+                        self._resolve_workflow_proposal(actor, handle)
+                        == (queued_row, queued_target, queued_source)
+                    )
+
+                self._release(
+                    cfg, actor, view, ctx, action, old_hash, authorize_vote=authorize_vote
+                )
+                return
         job = ctx["job"]
         if ctx["kind"] == "starter_score":
             _check(isinstance(old_hash, str) and bool(old_hash))
@@ -3715,16 +4215,25 @@ class Workbench:
             token = self.journal.context(
                 actor, cfg.channel, view, "current_training", revision=value
             )
+            learning = None if proof else self._learning_plan(actor, workflow)
             self._show(
                 view,
                 self.views.current_training_question(
-                    token, workflow, receipt, pin=value, proof=proof
+                    token,
+                    workflow,
+                    receipt,
+                    pin=value,
+                    proof=proof,
+                    learning_pin=learning[1] if learning else "",
                 ),
                 old_hash,
                 authorize=lambda: _check(
                     self._current_question(actor, StatusTopic.TRAINING) == selected_training
+                    and (proof or self._learning_plan(actor, workflow) == learning)
                 ),
             )
+        elif action.startswith("ot_learning_"):
+            self._learning_action(cfg, actor, view, ctx, action, value, old_hash)
         elif action == "ot_training_scopes":
             _check(ctx["kind"] == "current_training" and value == "scopes")
             self._regression_picker(cfg, actor, view, old_hash, topic=StatusTopic.TRAINING.value)
@@ -3733,6 +4242,39 @@ class Workbench:
         elif action == "ot_readouts":
             self._results(cfg, actor, view, old_hash)
         elif action in {"ot_result_prev", "ot_result_next", "ot_result_open"}:
+            if ctx["kind"] in {"arm_chart", "chart_proof"}:
+                selected = json.loads(ctx["revision"])
+                _check(action == "ot_result_open" and value == selected["pin"])
+                self._selected_chart(
+                    cfg,
+                    actor,
+                    view,
+                    selected["source"],
+                    selected["version"],
+                    value,
+                    old_hash,
+                    proof=ctx["kind"] == "arm_chart",
+                )
+                return
+            if ctx["kind"] == "chart_picker":
+                listing = json.loads(ctx["revision"])
+                version = listing["version"]
+                if action == "ot_result_open":
+                    _check(value in listing["items"])
+                    self._selected_chart(
+                        cfg, actor, view, listing["items"][value], version, value, old_hash
+                    )
+                else:
+                    plan = ArmChart(version, (ComparisonArm.INCUMBENT, ComparisonArm.SIMPLE_RULE))
+                    self._chart_picker(
+                        cfg,
+                        actor,
+                        view,
+                        plan,
+                        old_hash,
+                        listing["page"] + (1 if action == "ot_result_next" else -1),
+                    )
+                return
             if ctx["kind"] == "regressions":
                 listing = json.loads(ctx["revision"])
                 if listing.get("topic") in WORKPLACE_QUESTIONS:
@@ -3913,6 +4455,17 @@ class Workbench:
         elif action in {"ot_plugin_status", "ot_plugin_receipt"}:
             from opentour_cell.pilot.zapier_approval import ApprovalBridge
 
+            if ctx["kind"] == "queued_provider_status":
+                _check(value == ctx["job"])
+                self.private_channel(cfg, actor)
+                self._open_workflow_proposal(
+                    cfg,
+                    actor,
+                    view,
+                    ctx["revision"],
+                    receipt_request=value if action == "ot_plugin_receipt" else "",
+                )
+                return
             _check(ctx["kind"] in {"evidence", "plugin_request"})
             self.private_channel(cfg, actor)
             bridge = ApprovalBridge(
@@ -3945,10 +4498,21 @@ class Workbench:
                 dataset_revision=target.dataset_revision,
                 audit=target.audit,
             )
+        elif action in {"ot_bench_proof", "ot_bench_calc", "ot_bench_audit"} or (
+            action == "ot_evidence" and ctx["kind"] == "bench_proof"
+        ):
+            self._benchmark_proof(cfg, actor, view, ctx, action, value, old_hash)
         elif action == "ot_evidence":
             _check(
                 ctx["kind"]
-                in {"home", "evidence", "status", "eval_detail", "questions", "handoff_question"}
+                in {
+                    "home",
+                    "evidence",
+                    "status",
+                    "eval_detail",
+                    "questions",
+                    "handoff_question",
+                }
                 and value == ctx["revision"]
             )
             self._evidence(cfg, actor, view, ctx, old_hash)
@@ -4456,6 +5020,16 @@ class Workbench:
             self._regression_picker(cfg, actor, view, topic=status_topic.value)
             return
         plan = plan_query(prompt)
+        if isinstance(plan, ArmChart):
+            self._chart_picker(cfg, actor, view, plan)
+            return
+        if isinstance(plan, WorkflowDiscovery):
+            self._monthly_question(cfg, actor, view, plan)
+            return
+        if plan == QueryHold.VERSION_REQUIRED:
+            ctx = self.journal.context(actor, cfg.channel, view, "query_hold")
+            self._show(view, self.views.query_hold_modal(ctx, plan))
+            return
         if isinstance(plan, ReadoutQuestion) and plan in WORKPLACE_QUESTIONS:
             self._regression_picker(cfg, actor, view, topic=plan.value)
             return
@@ -4564,7 +5138,841 @@ class Workbench:
             and not entry["datasets"]
         )
 
-    def _publish_app_home(self, cfg: Settings, event: Json) -> None:
+    def _workflow_index(self, cfg: Settings, actor: str) -> WorkflowIndex | None:
+        from opentour_cell.pilot.workflow_benchmarks import WorkflowBenchmarks
+        from opentour_cell.pilot.workflow_index import CurrentIndexAuthority, WorkflowIndex
+
+        provider = self.workflow_index_scope
+        if provider is None:
+            return None
+
+        def current(principal: IntakePrincipal) -> IndexScope | None:
+            latest = self.settings()
+            _check(latest == cfg and principal == IntakePrincipal(cfg.organization, actor, "slack"))
+            latest.permission(actor, "inspect")
+            proposals = self._workflow_proposals(latest, actor)
+            scope = provider(latest, principal, proposals)
+            if scope is not None:
+                _check(scope.epoch == self.store.engagement_id and scope.proposals == proposals)
+            return scope
+
+        return WorkflowIndex(WorkflowBenchmarks(cfg.directory), CurrentIndexAuthority(current))
+
+    def _workflow_proposals(self, cfg: Settings, actor: str) -> tuple[ProposalAccess, ...]:
+        from opentour_cell.pilot.operating_point import digest
+        from opentour_cell.pilot.receipt_recovery import _open_db
+        from opentour_cell.pilot.release_gate import inspect_recorded_release
+        from opentour_cell.pilot.source_intake import check_current_intake
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope
+        from opentour_cell.pilot.workflow_index import ProposalAccess
+
+        entry = cfg.permission(actor, "inspect")
+        if not entry["aggregate"] or not cfg.explicit_recipient:
+            return ()
+        epoch = self.store.engagement_id
+        output = []
+        with (
+            self.journal.db() as db,
+            _open_db(cfg.directory / "learning-mandates.sqlite3") as ledger,
+        ):
+            self.journal.active(db)
+            replacements = (
+                ledger is not None
+                and ledger.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='reviewer_replacements'"
+                ).fetchone()
+            )
+            for _, source in self._result_sources(cfg, actor):
+                if not source.startswith("managed:"):
+                    continue
+                try:
+                    target = self._managed(cfg, actor, source)
+                    audit = target.audit
+                    if audit.get("release_provider") not in {"slack", "zapier_slack"}:
+                        continue
+                    run = audit["job_id"]
+                    if (
+                        ledger is not None
+                        and replacements
+                        and ledger.execute(
+                            "SELECT 1 FROM reviewer_replacements WHERE scope=? AND run=?",
+                            (digest([cfg.organization, epoch]), run),
+                        ).fetchone()
+                    ):
+                        # Only the replacement verifier can grant access to the successor.
+                        continue
+                    seen = db.execute(
+                        "SELECT p.id, p.presented, p.expires FROM presentations p "
+                        "JOIN exposures e ON p.id=e.id WHERE e.status='presented' "
+                        "AND p.actor=? AND p.revision=? AND p.policy=? AND p.scope=? "
+                        "ORDER BY p.presented DESC,p.rowid DESC LIMIT 1",
+                        (actor, target.revision, self._policy(cfg, actor), target.evidence_digest),
+                    ).fetchone()
+                    assigned = (
+                        cfg.reviewer == actor == audit.get("release_reviewer")
+                        and "review" in entry["roles"]
+                    )
+                    if seen is not None:
+                        self.journal._seal(db, "presentation", seen["id"])
+                    elif not assigned or audit["release_provider"] != "slack":
+                        continue
+                    intake = check_current_intake(
+                        cfg.directory, cfg.organization, epoch, target.dataset_revision
+                    )
+                    if audit["release_provider"] == "zapier_slack":
+                        assert seen is not None
+                        proposal = self._provider_workflow_proposal(
+                            cfg, actor, target, intake, seen
+                        )
+                        if proposal is not None:
+                            output.append(proposal)
+                        continue
+                    release = inspect_recorded_release(
+                        cfg.directory,
+                        cfg.organization,
+                        run,
+                        audit["run_revision"],
+                        audit["model_revision"],
+                    )
+                    action: Action = "open_status"
+                    state: Literal["pending", "approved", "changes_requested"] = "pending"
+                    if assigned:
+                        window = self._assigned_review_window(cfg, target)
+                        if window is None:
+                            continue
+                        stamped, deadline, grant_revision = window
+                    else:
+                        assert seen is not None
+                        stamped, deadline, grant_revision = (
+                            seen["presented"],
+                            seen["expires"],
+                            seen["id"],
+                        )
+                    if release:
+                        state = release["decision"]
+                        decided_at = release.get("recorded_at")
+                        if type(decided_at) is not int or decided_at <= 0:
+                            continue
+                        stamped = decided_at
+                        if state == "approved" and self._handoff_receipt(cfg, actor, target):
+                            action = "open_receipt"
+                    elif assigned:
+                        action = "open_review"
+                    visibility = min(entry["expires_at"], intake["expires_at"])
+                    if not release:
+                        visibility = min(visibility, deadline)
+                    output.append(
+                        ProposalAccess(
+                            BenchmarkScope(cfg.organization, epoch, intake["workflow"]),
+                            actor,
+                            digest(
+                                [
+                                    grant_revision,
+                                    intake["authority_revision"],
+                                    self._policy(cfg, actor),
+                                ]
+                            ),
+                            run,
+                            target.revision,
+                            state,
+                            stamped,
+                            deadline if not release else None,
+                            visibility,
+                            action,
+                            visibility,
+                        )
+                    )
+                except (ValueError, OSError, KeyError, sqlite3.Error):
+                    continue
+        return tuple(output)
+
+    def _assigned_review_window(self, cfg: Settings, target: Target) -> tuple[int, int, str] | None:
+        from opentour_cell.pilot.managed_run import QUEUE_FILE, _projection
+        from opentour_cell.pilot.receipt_recovery import _open_db
+        from opentour_cell.pilot.repair_workflow import managed_review_evidence
+
+        audit = target.audit
+        checked = managed_review_evidence(
+            cfg.directory,
+            cfg.organization,
+            audit["job_id"],
+            cfg.recipient,
+            cfg.team,
+            cfg.channel,
+            include_review_window=True,
+        )
+        grant = checked["review_window"]
+        with _open_db(cfg.directory / QUEUE_FILE) as db:
+            if db is None:
+                return None
+            owner = db.execute("SELECT org, engagement FROM owner WHERE singleton=1").fetchone()
+            if owner is None or tuple(owner) != (cfg.organization, self.store.engagement_id):
+                return None
+            row = db.execute(
+                "SELECT * FROM runs WHERE id=? AND revision=?",
+                (audit["job_id"], grant["plan_revision"]),
+            ).fetchone()
+            if row is None:
+                return None
+            run = _projection(row)
+        result = run["result"]
+        stamp = run["timing"]["first_result_unix_ms"]
+        if (
+            run["state"] != "ready"
+            or not result
+            or result["result_revision"] != audit["run_revision"]
+            or not stamp
+        ):
+            return None
+        return stamp // 1000, grant["expires_at"], grant["grant_revision"]
+
+    @staticmethod
+    def _provider_queue_status(cfg: Settings, actor: str, target: Target) -> Json | None:
+        from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+        bridge = ApprovalBridge(
+            cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+        )
+        audit = target.audit
+        return bridge.existing_status(
+            run_id=audit["job_id"],
+            run_revision=audit["run_revision"],
+            artifact_sha=audit["model_revision"],
+            team=cfg.team,
+            actor=actor,
+            handoff_destination=(cfg.channel, cfg.recipient),
+        )
+
+    def _provider_workflow_proposal(
+        self,
+        cfg: Settings,
+        actor: str,
+        target: Target,
+        intake: Json,
+        seen: sqlite3.Row,
+    ) -> ProposalAccess | None:
+        from opentour_cell.pilot.operating_point import digest
+        from opentour_cell.pilot.release_gate import inspect_recorded_release
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope
+        from opentour_cell.pilot.workflow_index import ProposalAccess
+        from opentour_cell.pilot.zapier_approval import ApprovalBridge
+
+        audit = target.audit
+        if cfg.reviewer != actor or audit.get("release_reviewer") != actor:
+            return None
+        entry = cfg.permission(actor, "review", target.dataset)
+        bridge = ApprovalBridge(
+            cfg.directory, cfg.organization, cfg.directory / "zapier-approval.json"
+        )
+        status = self._provider_queue_status(cfg, actor, target)
+        if not status:
+            return None
+        policy, key = bridge._policy()
+        request = bridge._request(status["request_id"], policy, key, fresh=False)
+        deadline = request["expires_at"]
+        visible_until = min(entry["expires_at"], intake["expires_at"])
+        state: Literal["pending", "expired", "approved", "changes_requested"]
+        if status["state"] in {"approved", "changes_requested"}:
+            release = inspect_recorded_release(
+                cfg.directory,
+                cfg.organization,
+                audit["job_id"],
+                audit["run_revision"],
+                audit["model_revision"],
+            )
+            if (
+                not release
+                or release.get("decision") != status["state"]
+                or not release.get("recorded_at")
+            ):
+                return None
+            state, recorded = status["state"], release["recorded_at"]
+        elif status["state"] == "expired" and status.get("recorded_at") == deadline:
+            state, recorded = "expired", deadline
+        elif status["state"] in {"staged", "accepted"} and time.time() < deadline:
+            state, recorded = "pending", request["issued_at"]
+            visible_until = min(visible_until, deadline)
+        else:
+            # An unresolved provider outcome cannot become an expired or approved proposal.
+            return None
+        return ProposalAccess(
+            BenchmarkScope(cfg.organization, self.store.engagement_id, intake["workflow"]),
+            actor,
+            digest(
+                [
+                    seen["id"],
+                    request["request_id"],
+                    intake["authority_revision"],
+                    self._policy(cfg, actor),
+                ]
+            ),
+            audit["job_id"],
+            target.revision,
+            state,
+            recorded,
+            deadline,
+            visible_until,
+            "open_status",
+            visible_until,
+        )
+
+    def _learning_plan(self, actor: str, workflow: str) -> tuple[LearningPlan, str] | None:
+        from dataclasses import asdict
+
+        from opentour_cell.pilot.slack_learning import LearningScope
+
+        service = self.learning_service
+        if service is None:
+            return None
+        cfg = self.settings()
+        with self._live_scope(actor, workflow) as (_, _, live):
+            _check(
+                live.can_inspect
+                and live.engagement_epoch == self.store.engagement_id
+                and cfg.permission(actor, "inspect", live.dataset_ref)["aggregate"]
+            )
+            scope = LearningScope(
+                cfg.organization,
+                live.engagement_epoch,
+                cfg.team,
+                actor,
+                workflow,
+                live.dataset_ref,
+                live.dataset_revision,
+            )
+            plan = service.plan(scope)
+            if plan is None:
+                return None
+            _check(plan.scope == scope and plan.schedule in {"enabled", "paused", "off"})
+            _check(
+                type(plan.max_fits) is int
+                and plan.max_fits >= 0
+                and type(plan.spend_cap_cents) is int
+                and plan.spend_cap_cents >= 0
+                and type(plan.can_benchmark) is bool
+                and type(plan.can_improve) is bool
+                and (not plan.can_improve or plan.mandate_ref and plan.max_fits > 0)
+            )
+            return plan, self.journal.opaque("learning_plan", asdict(plan))
+
+    def _learning_run_pin(self, plan: LearningPlan, receipt: LearningStatus) -> str:
+        from opentour_cell.pilot.slack_learning import bind_approval
+
+        scope_pin = self.journal.opaque("learning_run", [plan.scope.__dict__, receipt.run_ref])
+        if not receipt.revision:
+            return scope_pin
+        version = self.journal.opaque(
+            "control",
+            bind_approval([scope_pin, plan.plan_ref, receipt.revision], plan.approval_revision),
+        )
+        return scope_pin + "." + version
+
+    def _can_control_learning(self, cfg: Settings, plan: LearningPlan) -> bool:
+        actor = plan.scope.actor
+        entry = cfg.permission(actor, "inspect", plan.scope.dataset)
+        return actor == cfg.reviewer and "review" in entry["roles"] and entry["aggregate"] is True
+
+    def _control_learning(
+        self,
+        cfg: Settings,
+        plan: LearningPlan,
+        receipt: LearningStatus,
+        action: Control,
+        value: str,
+    ) -> LearningStatus:
+        service = self.learning_service
+        assert service is not None
+        receipt.validate()
+        _check(
+            self._can_control_learning(cfg, plan)
+            and value == self._learning_run_pin(plan, receipt)
+            and action in receipt.controls()
+        )
+        self.private_channel(cfg, plan.scope.actor)
+        current = self._learning_plan(plan.scope.actor, plan.scope.workflow)
+        _check(
+            self.settings() == cfg
+            and current
+            and current[0] == plan
+            and plan.current_run == receipt.run_ref
+        )
+        key = self.journal.opaque("learning_control", [value, action])
+        result = service.control(plan.scope, receipt.run_ref, action, receipt.revision, key)
+        result.validate()
+        _check(result.run_ref == receipt.run_ref)
+        self.learning_changed.set()
+        return result
+
+    def _current_learning_card(
+        self, cfg: Settings
+    ) -> tuple[LearningPlan, LearningStatus, str] | None:
+        service = self.learning_service
+        if service is None or not cfg.channel_aggregates:
+            return None
+        workflow = self._live_workflow(cfg, cfg.reviewer)
+        bound = self._learning_plan(cfg.reviewer, workflow)
+        if not bound or not bound[0].current_run:
+            return None
+        plan = bound[0]
+        assert plan.current_run
+        _check(self._can_control_learning(cfg, plan))
+        receipt = service.status(plan.scope, plan.current_run)
+        receipt.validate()
+        _check(receipt.run_ref == plan.current_run)
+        if not receipt.revision:
+            return None
+        key = self.journal.opaque(
+            "learning_card",
+            [
+                plan.scope.engagement,
+                workflow,
+                plan.scope.dataset,
+                plan.scope.dataset_revision,
+                receipt.run_ref,
+            ],
+        )
+        return plan, receipt, key
+
+    def sync_learning_card(self) -> None:
+        """Publish a single card per bound run. A lost initial reply holds the send claim."""
+        cfg = self.settings(check_engagement=False)
+        if self.learning_service is None or not cfg.channel_aggregates:
+            if not self._has_published_learning_cards():
+                return
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(
+            os.open(cfg.directory / "slack-learning-card.lock", flags, 0o600), "rb"
+        ) as lock:
+            info = os.fstat(lock.fileno())
+            _check(
+                stat.S_ISREG(info.st_mode)
+                and info.st_nlink == 1
+                and info.st_uid == os.getuid()
+                and not info.st_mode & 0o077
+            )
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            self._sync_learning_card(cfg)
+
+    def _has_published_learning_cards(self) -> bool:
+        with self.journal.db() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM learning_cards WHERE ts IS NOT NULL "
+                    "AND rendered IS NOT 'redacted' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+
+    def _redact_learning_cards(self, cfg: Settings, keep: str = "") -> None:
+        """Remove obsolete disclosures using only this installation's confirmed message bindings."""
+        with self.journal.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            _check(
+                db.execute(
+                    "SELECT 1 FROM identity WHERE id=1 AND binding=?", (cfg.binding,)
+                ).fetchone()
+            )
+            rows = db.execute(
+                "SELECT id,ts FROM learning_cards WHERE ts IS NOT NULL "
+                "AND rendered IS NOT 'redacted' AND (id!=? OR thread!=?)",
+                (keep, cfg.learning_thread_ts),
+            ).fetchall()
+            db.executemany(
+                "UPDATE learning_cards SET rendered='redaction_pending' WHERE id=?",
+                [(row["id"],) for row in rows],
+            )
+        if not rows:
+            return
+        # A departed reviewer no longer authorizes protected data. The installed app can still
+        # replace its own message with plain, data-free text in the verified private channel.
+        pending = False
+        for row in rows:
+            _check(self.settings(check_engagement=False).binding == cfg.binding)
+            # Missing Slack edit access leaves the binding pending for a retry. Old controls
+            # stay disabled even when Slack still displays the last successful update.
+            self.private_channel(cfg)
+            try:
+                response = self.web.chat_update(
+                    channel=cfg.channel,
+                    ts=row["ts"],
+                    blocks=[],
+                    text="Run details are unavailable.",
+                )
+                _check(
+                    response.get("ok") is True
+                    and response.get("channel") == cfg.channel
+                    and response.get("ts") == row["ts"]
+                )
+            except Exception:
+                pending = True
+                continue
+            with self.journal.db() as db:
+                db.execute("UPDATE learning_cards SET rendered='redacted' WHERE id=?", (row["id"],))
+        _check(not pending or keep)
+
+    def _sync_learning_card(self, cfg: Settings) -> None:
+        try:
+            with self.journal.db() as db:
+                self.journal.active(db)
+            projection = self._current_learning_card(cfg)
+            if projection:
+                self.private_channel(cfg, cfg.reviewer)
+        except Exception:
+            self._redact_learning_cards(cfg)
+            return
+        self._redact_learning_cards(cfg, projection[2] if projection else "")
+        if not projection:
+            return
+        plan, receipt, key = projection
+        pin = self._learning_run_pin(plan, receipt)
+        blocks = self.views.learning_progress_blocks(receipt, pin)
+        rendered = self.journal.opaque("learning_render", blocks)
+        with self.journal.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.journal.active(db)
+            row = db.execute("SELECT * FROM learning_cards WHERE id=?", (key,)).fetchone()
+            if row and (
+                row["thread"] != cfg.learning_thread_ts
+                or not row["ts"]
+                or row["rendered"] == rendered
+            ):
+                return
+        # Reauthorize disclosure after layout. The measured values describe the observation above.
+        try:
+            self.private_channel(cfg, cfg.reviewer)
+            current = self._learning_plan(cfg.reviewer, plan.scope.workflow)
+            _check(self.settings() == cfg and current and current[0] == plan)
+        except Exception:
+            self._redact_learning_cards(cfg)
+            raise
+        exposure = secrets.token_urlsafe(18)
+        with self.journal.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.journal.active(db)
+            db.execute(
+                "INSERT INTO exposures VALUES(?,'learning_card','admitted',?,NULL)",
+                (exposure, int(time.time())),
+            )
+            if row:
+                db.execute("UPDATE learning_cards SET rendered=NULL WHERE id=?", (key,))
+            else:
+                db.execute(
+                    "INSERT INTO learning_cards(id,thread) VALUES(?,?)",
+                    (key, cfg.learning_thread_ts),
+                )
+        # The claim is durable before a Slack call whose accepted response could be lost.
+        payload: Json = dict(channel=cfg.channel, text="Learning run progress", blocks=blocks)
+        if row:
+            response = self.web.chat_update(ts=row["ts"], **payload)
+        else:
+            if cfg.learning_thread_ts:
+                payload["thread_ts"] = cfg.learning_thread_ts
+            try:
+                response = self.web.chat_postMessage(
+                    unfurl_links=False, unfurl_media=False, **payload
+                )
+            except Exception as error:
+                # Slack SDK exceptions carry an API response for definite rejections.
+                response = getattr(error, "response", None)
+                if response is None:
+                    raise
+            if response.get("ok") is False and response.get("error") in {
+                "ratelimited",
+                "rate_limited",
+                "not_in_channel",
+                "channel_not_found",
+                "missing_scope",
+                "invalid_auth",
+                "token_revoked",
+                "thread_not_found",
+            }:
+                with self.journal.db() as db:
+                    db.execute("DELETE FROM learning_cards WHERE id=? AND ts IS NULL", (key,))
+                    db.execute("DELETE FROM exposures WHERE id=?", (exposure,))
+                return
+        ts = response.get("ts")
+        _check(
+            response.get("ok") is True
+            and response.get("channel") == cfg.channel
+            and isinstance(ts, str)
+            and re.fullmatch(r"[0-9]{1,15}\.[0-9]{1,12}", ts)
+            and (not row or row["ts"] == ts)
+        )
+        with self.journal.db() as db:
+            db.execute("UPDATE learning_cards SET ts=?,rendered=? WHERE id=?", (ts, rendered, key))
+            db.execute(
+                "UPDATE exposures SET status='presented',completed=? WHERE id=?",
+                (int(time.time()), exposure),
+            )
+
+    def _learning_card_action(self, cfg: Settings, actor: str, body: Json) -> None:
+        box, message, action = body["container"], body["message"], body["actions"][0]
+        _check(
+            body["type"] == "block_actions"
+            and actor == cfg.reviewer
+            and body["channel"]["id"] == box["channel_id"] == cfg.channel
+            and message["ts"] == box["message_ts"]
+            and (
+                message.get("thread_ts", "") == cfg.learning_thread_ts
+                or not cfg.learning_thread_ts
+                and message.get("thread_ts") == message["ts"]
+            )
+        )
+        current = self._current_learning_card(cfg)
+        _check(current)
+        assert current is not None
+        plan, receipt, key = current
+        with self.journal.db() as db:
+            self.journal.active(db)
+            row = db.execute(
+                "SELECT ts,thread,rendered FROM learning_cards WHERE id=?", (key,)
+            ).fetchone()
+            _check(
+                row
+                and row["ts"] == message["ts"]
+                and row["thread"] == cfg.learning_thread_ts
+                and row["rendered"] not in {None, "redacted", "redaction_pending"}
+            )
+        self._control_learning(
+            cfg, plan, receipt, LEARNING_CONTROLS[action["action_id"]], action["value"]
+        )
+
+    def _learning_action(
+        self,
+        cfg: Settings,
+        actor: str,
+        view: str,
+        ctx: Json,
+        action: str,
+        value: str,
+        old_hash: str,
+    ) -> None:
+        service = self.learning_service
+        _check(service is not None)
+        assert service is not None
+        selected = self._current_question(actor, StatusTopic.TRAINING)
+        _check(selected)
+        assert selected
+        workflow, current_pin, _ = selected
+        bound = self._learning_plan(actor, workflow)
+        _check(bound)
+        assert bound
+        plan, pin = bound
+        if action == "ot_learning_preview":
+            _check(
+                ctx["kind"] == "current_training"
+                and current_pin == ctx["revision"]
+                and value == pin
+            )
+            token = self.journal.context(actor, cfg.channel, view, "learning_plan", workflow, pin)
+            self._show(
+                view,
+                self.views.learning_plan_modal(token, plan, pin),
+                old_hash,
+                authorize=lambda: _check(self._learning_plan(actor, workflow) == bound),
+            )
+            return
+        _check(value == ctx["revision"])
+        if ctx["kind"] == "learning_plan":
+            _check(ctx["job"] == workflow and value == pin)
+            if action in {"ot_learning_benchmark", "ot_learning_improve"}:
+                improve = action == "ot_learning_improve"
+                _check(plan.can_improve if improve else plan.can_benchmark)
+                operation: Operation = "evaluate_and_improve" if improve else "benchmark_only"
+                from opentour_cell.pilot.slack_learning import bind_approval
+
+                key = self.journal.opaque(
+                    "learning_start",
+                    bind_approval(
+                        [plan.scope.__dict__, plan.plan_ref, operation], plan.approval_revision
+                    ),
+                )
+                if improve and plan.approval_revision:
+                    _check(self._can_control_learning(cfg, plan))
+                    self.private_channel(cfg, actor)
+                    _check(self._learning_plan(actor, workflow) == bound and self.settings() == cfg)
+                receipt = service.start(plan.scope, plan.plan_ref, operation, key)
+            else:
+                _check(action == "ot_learning_status" and plan.current_run)
+                assert plan.current_run
+                receipt = service.status(plan.scope, plan.current_run)
+                _check(receipt.run_ref == plan.current_run)
+        else:
+            _check(
+                ctx["kind"] == "learning_run"
+                and action in {"ot_learning_status", "ot_learning_cancel", *LEARNING_CONTROLS}
+            )
+            run_ref = ctx["job"]
+            _check(
+                plan.current_run == run_ref
+                and value.split(".", 1)[0]
+                == self.journal.opaque("learning_run", [plan.scope.__dict__, run_ref])
+            )
+            receipt = service.status(plan.scope, run_ref)
+            _check(receipt.run_ref == run_ref)
+            if action in LEARNING_CONTROLS:
+                receipt = self._control_learning(
+                    cfg, plan, receipt, LEARNING_CONTROLS[action], value
+                )
+            elif action == "ot_learning_cancel":
+                _check(
+                    not receipt.revision
+                    and receipt.can_cancel is True
+                    and receipt.state in {"queued", "running", "verifying"}
+                )
+                receipt = service.cancel(plan.scope, run_ref)
+                _check(receipt.run_ref == run_ref)
+        receipt.validate()
+        run_pin = self._learning_run_pin(plan, receipt)
+        token = self.journal.context(
+            actor, cfg.channel, view, "learning_run", receipt.run_ref, run_pin
+        )
+
+        def authorize_receipt() -> None:
+            current = self._learning_plan(actor, workflow)
+            _check(
+                current
+                and current[0].scope == plan.scope
+                and current[0].current_run == receipt.run_ref
+            )
+            _check(service.status(plan.scope, receipt.run_ref) == receipt)
+
+        self._show(
+            view,
+            self.views.learning_status_modal(
+                token,
+                receipt,
+                run_pin,
+                allow_control=not receipt.revision or self._can_control_learning(cfg, plan),
+            ),
+            old_hash,
+            authorize=authorize_receipt,
+        )
+
+    def _workflow_page(
+        self, cfg: Settings, actor: str, cursor: str | None
+    ) -> tuple[IndexPage | None, bool]:
+        try:
+            index = self._workflow_index(cfg, actor)
+            if index is None:
+                return None, False
+            principal = IntakePrincipal(cfg.organization, actor, "slack")
+            return index.page(principal, size=WORKFLOW_PAGE_SIZE, cursor=cursor), False
+        except (ImportError, OSError, ValueError, sqlite3.Error):
+            return None, True
+
+    def _resolve_workflow_proposal(self, actor: str, handle: str) -> tuple[IndexRow, Target, str]:
+        from opentour_cell.pilot.source_intake import check_current_intake
+
+        _check(isinstance(handle, str) and re.fullmatch(r"[0-9a-f]{64}", handle))
+        principal = IntakePrincipal(self.binding[0], actor, "slack")
+
+        current = self.settings()
+        current.permission(actor, "inspect")
+        index = self._workflow_index(current, actor)
+        _check(index is not None)
+        assert index is not None
+        row = index.select(principal, handle)
+        _check(row.proposal_ref is not None and row.proposal_revision is not None)
+        assert row.proposal_ref is not None
+        source = "managed:" + row.proposal_ref
+        target = self._managed(current, actor, source)
+        intake = check_current_intake(
+            current.directory,
+            current.organization,
+            self.store.engagement_id,
+            target.dataset_revision,
+        )
+        _check(target.revision == row.proposal_revision and intake["workflow"] == row.workflow_ref)
+        return row, target, source
+
+    def _open_workflow_proposal(
+        self, cfg: Settings, actor: str, view: str, handle: str, *, receipt_request: str = ""
+    ) -> None:
+        selected, target, source = self._resolve_workflow_proposal(actor, handle)
+
+        def authorize() -> None:
+            _check(self._resolve_workflow_proposal(actor, handle) == (selected, target, source))
+
+        if selected.action == "open_review":
+            _check(
+                cfg.reviewer == actor == target.audit.get("release_reviewer")
+                and cfg.permission(actor, "review", target.dataset)["aggregate"]
+            )
+            self._evidence(
+                cfg,
+                actor,
+                view,
+                {"job": source, "revision": target.revision},
+                "",
+                authorize=authorize,
+                queue_handle=handle,
+            )
+        elif (
+            selected.action == "open_status"
+            and target.audit.get("release_provider") == "zapier_slack"
+        ):
+            status = self._provider_queue_status(cfg, actor, target)
+            _check(
+                status
+                and status["state"]
+                in {"staged", "accepted", "approved", "changes_requested", "expired"}
+            )
+            assert status
+            _check(
+                not receipt_request
+                or receipt_request == status["request_id"]
+                and "receipt_sha256" in status
+            )
+            token = self.journal.context(
+                actor, cfg.channel, view, "queued_provider_status", status["request_id"], handle
+            )
+
+            def authorize_status() -> None:
+                authorize()
+                _check(self._provider_queue_status(self.settings(), actor, target) == status)
+
+            self._show(
+                view,
+                self.views.plugin_waiting_modal(
+                    token, status["request_id"], status, show_receipt=bool(receipt_request)
+                ),
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+                authorize=authorize_status,
+            )
+        elif selected.action == "open_status":
+            self._home(cfg, actor, view, source, authorize=authorize)
+        elif selected.action == "open_receipt":
+            receipt = self._handoff_receipt(cfg, actor, target)
+            _check(receipt)
+            assert receipt is not None
+            pin = self._receipt_pin(actor, target.revision, receipt)
+            context = self.journal.context(
+                actor, cfg.channel, view, "handoff", source, target.revision
+            )
+
+            def authorize_receipt() -> None:
+                authorize()
+                _check(self._handoff_receipt(self.settings(), actor, target) == receipt)
+
+            self._show(
+                view,
+                self.views.handoff_modal(context, pin, receipt, target.audit),
+                dataset=target.dataset,
+                dataset_revision=target.dataset_revision,
+                audit=target.audit,
+                authorize=authorize_receipt,
+            )
+        else:
+            raise Refused()
+
+    def _publish_app_home(self, cfg: Settings, event: Json, *, cursor: str | None = None) -> None:
         actor = event["user"]
         _check(
             _slack_id(actor, "UW")
@@ -4581,7 +5989,12 @@ class Workbench:
             self.web.views_publish(user_id=actor, view=self.views.app_home_view())
             return
         token = self.journal.opaque("home", [actor, cfg.team, cfg.app, cfg.channel])
-        pending = self._pending_release(cfg, actor)
+        queue, queue_denied = self._workflow_page(cfg, actor, cursor)
+        if cursor and queue is None:
+            # A stale continuation can only reopen the first currently authorized page.
+            cursor = None
+            queue, queue_denied = self._workflow_page(cfg, actor, cursor)
+        pending = self._pending_release(cfg, actor) if queue is None and not queue_denied else None
         workflow_settings = False
         if cfg.live_workflow_ref or (cfg.starter_setup and cfg.starter_setup.slack_owner == actor):
             try:
@@ -4613,6 +6026,9 @@ class Workbench:
             decision_map_entry=map_entry,
             case_entry=case_entry,
             starter_score_entry=score_entry,
+            queue=queue,
+            queue_denied=queue_denied,
+            queue_continuation=cursor is not None,
         )
         navigation = (
             can_add_workflow
@@ -4626,7 +6042,12 @@ class Workbench:
                     "app_home",
                     authorize=(
                         lambda: _check(
-                            (not score_entry or self._starter_scores(actor)[0] == score_entry)
+                            (
+                                queue is None
+                                or self._workflow_page(self.settings(), actor, cursor)
+                                == (queue, False)
+                            )
+                            and (not score_entry or self._starter_scores(actor)[0] == score_entry)
                             and (not case_entry or self._case_entry(actor) == case_entry)
                             and (not map_entry or self._map_entry(actor) == map_entry)
                             and (
@@ -4636,7 +6057,8 @@ class Workbench:
                             and (live_summary is None or self._live_summary(actor) == live_summary)
                         )
                     )
-                    if readiness is not None
+                    if queue is not None
+                    or readiness is not None
                     or live_summary is not None
                     or verifier_entry
                     or map_entry
@@ -4670,6 +6092,31 @@ class Workbench:
             and len(body["actions"]) == 1
         )
         action = body["actions"][0]
+        if action.get("action_id") == "ot_app_queue_open":
+            opened = self.web.views_open(
+                trigger_id=body["trigger_id"], view=self.views.notice_modal("checking")
+            )
+            view_id = opened["view"]["id"]
+            try:
+                self.private_channel(cfg, actor)
+                self._open_workflow_proposal(cfg, actor, view_id, action.get("value"))
+            except (ImportError, OSError, ValueError, KeyError, sqlite3.Error):
+                self._safe_notice(view_id)
+            return
+        if action.get("action_id") in {"ot_app_queue_next", "ot_app_queue_first"}:
+            self.private_channel(cfg, actor)
+            cursor = None
+            if action["action_id"] == "ot_app_queue_next":
+                cursor = action.get("value")
+                _check(isinstance(cursor, str) and re.fullmatch(r"[0-9a-f]{64}", cursor))
+            else:
+                _check(action.get("value") == "first")
+            self._publish_app_home(
+                self.settings(),
+                {"type": "app_home_opened", "tab": "home", "user": actor},
+                cursor=cursor,
+            )
+            return
         if action.get("action_id") == "ot_app_starter_score":
             self.private_channel(cfg, actor)
             version, items = self._starter_scores(actor)
@@ -4875,6 +6322,9 @@ class Workbench:
             _check(not surfaced or surfaced == cfg.channel)
             if body.get("container", {}).get("type") == "message":
                 box = body["container"]
+                if len(actions) == 1 and actions[0].get("action_id") in LEARNING_CONTROLS:
+                    self._learning_card_action(cfg, actor, body)
+                    return
                 if (
                     body.get("type") == "block_actions"
                     and len(body.get("actions", [])) == 1
@@ -4927,6 +6377,34 @@ class Workbench:
                 _check(self.store.engagement_active())
             with self.view_locks[hash(view) % len(self.view_locks)]:
                 ctx = self.journal.read_context(token, actor, cfg.channel, view)
+                if (
+                    not submission
+                    and len(actions) == 1
+                    and actions[0].get("action_id") in LEARNING_CONTROLS
+                ):
+                    box = body.get("container", {})
+                    _check(
+                        body["type"] == "block_actions"
+                        and ctx["kind"] == "learning_run"
+                        and obj.get("type") == "modal"
+                        and obj.get("callback_id") == "ot_learning_run"
+                        and obj.get("team_id", cfg.team) == cfg.team
+                        and obj.get("app_id", cfg.app) == cfg.app
+                        and box.get("type", "view") == "view"
+                        and box.get("view_id", view) == view
+                        and box.get("channel_id", cfg.channel) == cfg.channel
+                    )
+                    action = actions[0]
+                    self._learning_action(
+                        cfg,
+                        actor,
+                        view,
+                        ctx,
+                        action["action_id"],
+                        action["value"],
+                        obj.get("hash", ""),
+                    )
+                    return
                 if not submission and any(
                     a.get("action_id") == "ot_charts" for a in body.get("actions", [])
                 ):
@@ -5109,6 +6587,8 @@ def main(argv: list[str] | None = None) -> int:
         socket_sdk = importlib.import_module("slack_sdk.socket_mode")
         response = importlib.import_module("slack_sdk.socket_mode.response").SocketModeResponse
         from opentour_cell.pilot import slack_views
+        from opentour_cell.pilot.eve_learning_service import open_eve_learning_service
+        from opentour_cell.pilot.recipient_lifecycle_authority import open_lifecycle_authority
 
         bot = os.environ.get("SLACK_BOT_TOKEN", "")
         _check(bot.startswith("xoxb-"))
@@ -5116,11 +6596,28 @@ def main(argv: list[str] | None = None) -> int:
         web = sdk.WebClient(token=bot, retry_handlers=[])
         verified = web.auth_test()
         _check(verified["team_id"] == cfg.team and bool(verified["bot_id"]))
+        from opentour_cell.pilot.workflow_index_authority import open_workflow_index_scope
+
         app = Workbench(
             config,
             web,
             LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization),
             slack_views,
+            learning_service=(
+                None
+                if args.flush_approvals or args.post_launcher
+                else open_eve_learning_service(
+                    cfg.directory, cfg.organization, cfg.team, cfg.channel
+                )
+            ),
+            workflow_index_scope=open_workflow_index_scope
+            if cfg.workflow_index_publication_file
+            else None,
+            lifecycle_authority=(
+                None
+                if args.flush_approvals or args.post_launcher
+                else open_lifecycle_authority(cfg.directory)
+            ),
         )
         if args.flush_approvals:
             from opentour_cell.pilot.approval_inbox import delivery_cycle
@@ -5163,7 +6660,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 app.on_decision = drainer.wake
                 drainer.start()
-            threading.Event().wait()
+            if app.learning_service is None and not app._has_published_learning_cards():
+                threading.Event().wait()
+            else:
+                while True:
+                    app.learning_changed.clear()
+                    try:
+                        app.sync_learning_card()
+                    except Exception:
+                        # Disconnected Slack or unavailable current authority holds this delivery.
+                        pass
+                    app.learning_changed.wait(10)
         finally:
             socket.close()
         return 0
