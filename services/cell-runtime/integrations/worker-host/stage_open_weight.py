@@ -412,6 +412,13 @@ def _verify_installed(areas, profile, expected_identity=None):
             os.fchmod(model_fd, DIRECTORY_MODE)
             os.fsync(model_fd)
         verify_model_tree(model_fd, profile, areas.owner_uid)
+        # The checks above ran on the descriptor. Hold if the entry now names another tree.
+        try:
+            entry = os.stat(MODEL_NAME, dir_fd=areas.volume, follow_symlinks=False)
+        except OSError as error:
+            raise Held("model_base_replaced") from error
+        if (entry.st_dev, entry.st_ino) != (info.st_dev, info.st_ino):
+            raise Held("model_base_replaced")
     finally:
         os.close(model_fd)
 

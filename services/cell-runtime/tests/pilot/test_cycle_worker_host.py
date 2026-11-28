@@ -2,13 +2,17 @@
 
 Every model file, wheel and interpreter here is a generated sentinel. No real weights, numeric
 runtime or systemd manager is used, so these tests prove the package only, not an installed host.
+
+Nothing here is skipped for any runner identity. The real separately mounted volume is checked
+on the customer host (OPE-577 item 3); here a separate device is simulated through st_dev and a
+cross-device rename failure (EXDEV).
 """
 
+import errno
 import hashlib
 import json
 import os
 import pwd
-import shlex
 import shutil
 import signal
 import stat
@@ -637,52 +641,65 @@ def test_staging_works_when_the_volume_reports_its_own_device(site, monkeypatch)
     assert real["stat"](site["volume"]).st_dev == real["stat"](site["volume"].parent).st_dev
 
 
-def test_staging_works_with_the_volume_on_a_separate_mount(site, tmp_path):
-    """Root only: mount a private tmpfs at the volume path, as the documented layout does."""
-    if OWNER != 0 or shutil.which("unshare") is None:
-        pytest.skip("needs root and unshare to mount a private tmpfs volume")
-    probe = subprocess.run(
-        ["unshare", "-m", "--propagation", "private", "true"], capture_output=True, check=False
-    )
-    if probe.returncode != 0:
-        pytest.skip("this host refuses a private mount namespace")
-    volume = site["volume"]
-    stage_command = shlex.join(
-        pinned_cli(
-            site,
-            "stage",
-            *cli_arguments(site),
-            "--source",
-            str(site["source"]),
-            "--revision",
-            REVISION,
-        )
-    )
-    verify_command = shlex.join(pinned_cli(site, "verify", *cli_arguments(site)))
-    shell = (
-        f"mount -t tmpfs -o mode=0700 tmpfs '{volume}' && "
-        f"stat -c %d '{volume}' '{volume.parent}' && "
-        f"{stage_command} && "
-        f"{verify_command} && "
-        f"stat -c %d '{volume}/.opentour-staging' && "
-        f"stat -c '%a %u' '{volume}/.opentour-staging'"
-    )
-    completed = subprocess.run(
-        ["unshare", "-m", "--propagation", "private", "sh", "-c", shell],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    lines = completed.stdout.splitlines()
-    volume_dev, parent_dev = lines[0], lines[1]
-    assert volume_dev != parent_dev
-    assert json.loads(lines[2])["route"] == "ready"
-    assert json.loads(lines[3])["route"] == "ready"
-    assert lines[4] == volume_dev and lines[5] == "700 0"
-    # The private mount is gone: nothing was staged on the underlying directory.
+@pytest.mark.parametrize("step", ["promotion", "previous"])
+def test_a_cross_device_rename_fails_closed(site, monkeypatch, step):
+    """Simulated EXDEV: the work area is inside the volume, so a real rename never crosses
+    devices. If one were refused anyway, staging holds and nothing is left half-promoted."""
+    assert staged(site)["route"] == "ready"
+    work = site["work"].stat()
+    assert work.st_dev == site["volume"].stat().st_dev  # staging lands inside the volume
+    real_rename = os.rename
+
+    def cross_device(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        moving_in = src.startswith("staging-") and dst == "model-base"
+        moving_out = src == "model-base" and dst.startswith("previous-")
+        if (step == "promotion" and moving_in) or (step == "previous" and moving_out):
+            raise OSError(errno.EXDEV, "generated cross-device rename", src)
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "rename", cross_device)
+    result = staged(site)
+    assert (result["route"], result["reason"]) == ("held", "staging_failed")
+    monkeypatch.undo()
     assert not site["model"].exists()
+    assert copies(site["work"], "staging") == []
+    rules_only_state_unchanged(site)
+
+
+@pytest.mark.parametrize("change", ["swap", "tamper"])
+def test_a_change_between_the_identity_check_and_the_read_only_chmod_holds(
+    site, monkeypatch, change
+):
+    """The window after the promoted inode is confirmed and before it is made 0555.
+
+    The hook runs inside the descriptor-based fchmod, so a path-based chmod (A1) never
+    triggers it and the result differs, and dropping the re-verification (A2) lets a tampered
+    file through.
+    """
+    real_fchmod = os.fchmod
+    fired = []
+    planted = site["volume"] / "planted"
+
+    def racing_fchmod(fd, mode):
+        target = os.readlink(f"/proc/self/fd/{fd}")
+        if mode == 0o555 and target == str(site["model"]) and not fired:
+            fired.append(change)
+            if change == "swap":
+                shutil.copytree(site["model"], planted, copy_function=shutil.copy2)
+                os.rename(site["model"], site["volume"] / "moved-away")
+                os.rename(planted, site["model"])
+            else:
+                tamper(site["model"] / "tokenizer.json", b"changed inside the window")
+        return real_fchmod(fd, mode)
+
+    monkeypatch.setattr(os, "fchmod", racing_fchmod)
+    result = staged(site)
+    monkeypatch.undo()
+    assert fired == [change]
+    expected = "model_base_replaced" if change == "swap" else "staged_model_hash_mismatch"
+    assert (result["route"], result["reason"]) == ("held", expected)
+    assert not site["model"].exists()
+    assert stat.S_IMODE(one_held(site).stat().st_mode) == 0o700
 
 
 def plant_unremovable_held_tree(site, depth=40):
@@ -722,6 +739,7 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
     assert not site["model"].exists()
     assert grown.is_dir()
     (new_held,) = [p for p in copies(site["work"], "held") if p != grown]
+    assert stat.S_IMODE(new_held.stat().st_mode) == 0o700  # made private before it moved
     assert sorted(p.name for p in new_held.iterdir()) == sorted(site["profile"]["files"])
     rules_only_state_unchanged(site)
 

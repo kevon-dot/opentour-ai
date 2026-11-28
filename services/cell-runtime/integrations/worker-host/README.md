@@ -71,7 +71,7 @@ Any wrong revision, missing or extra file, hash mismatch, wrong owner or mode, m
 
 A running unit keeps its read-only mount of the directory that was at model-base when it started. Moving or replacing model-base takes effect only after a restart, so stop the worker units before `stage` or `verify` and start them afterwards. Otherwise run `systemctl restart opentour-cycle opentour-worker` right after.
 
-The script does not prove that the interpreter's installed packages came from the staged wheels. The hash-locked offline install proves that. Between runs of `verify`, the worker identity controls its own volume. The digest check the worker runs before each fit is the last guard. A local generated run proves the package only. It is not a customer-host installation. The repository test that stages onto a separately mounted tmpfs volume runs only as root and is skipped on non-root runners such as CI. The simulated separate-device test runs everywhere.
+The script does not prove that the interpreter's installed packages came from the staged wheels. The hash-locked offline install proves that. Between runs of `verify`, the worker identity controls its own volume. The digest check the worker runs before each fit is the last guard. A local generated run proves the package only. It is not a customer-host installation. The repository tests simulate a separately mounted volume, through a different device number and a refused cross-device rename. They run for any runner identity with nothing skipped. Staging onto the customer's real separately mounted volume is checked on the customer host, as part of the installed run (OPE-577 item 3).
 
 ## Installed witness
 
