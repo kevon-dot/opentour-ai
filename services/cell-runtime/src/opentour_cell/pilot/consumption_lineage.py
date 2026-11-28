@@ -1,10 +1,10 @@
 """Resolve a workflow claim to its recorded consumed fields and derive impact sets (OPE-544).
 
-This is a reader over immutable, customer-local consumed-field manifests written at
-decision time (OPE-416). It never recreates provenance from current documents and never
-guesses an edge: a claim or change that cannot be linked through recorded edges returns
-``unknown`` / ``hold``. All joins happen locally; nothing here performs I/O beyond the
-manifest directory.
+This is a reader over write-once, digest-pinned (unsigned), customer-local consumed-field
+manifests written at decision time (OPE-416). It never recreates provenance from current
+documents and never guesses an edge: a claim or change that cannot be linked through recorded
+edges returns ``unknown`` / ``hold``. All joins happen locally; nothing here performs I/O
+beyond the manifest directory.
 
 The producer record shape (``opentour.pilot.consumed-field-manifest.v1``) is a reader-side
 proposal until OPE-416 publishes its writer; see ``validate_manifest`` for the exact fields.
@@ -17,8 +17,10 @@ dependency, or two manifests claiming the same claim). Neither is ever completed
 Integrity: ``digest_self_consistent_only``. A manifest is pinned by a plain, unkeyed sha256
 of its own bytes. That is tamper evidence only (an edit of one file is noticed); it is not
 authentication, and anyone who can rewrite both the manifest and its pin can forge one. No
-signing or key-custody contract exists for this reader yet (OPE-566). Every reader receipt
-carries ``integrity: digest_self_consistent_only`` so no consumer reads more into it.
+signing or key-custody contract exists for this reader yet (OPE-566). The resolution receipt
+(``Resolution.to_json``) and the impact receipt (``ImpactSet.to_json``) carry
+``integrity: digest_self_consistent_only`` inside their digested body, so no consumer reads
+more into them. The redacted denial receipt carries no such field.
 
 Time authority: grant expiry is judged on the worker's own clock (``_worker_now``), never on
 a caller-supplied time. ``Request.now`` can only narrow the window: the grant is treated as
@@ -81,9 +83,12 @@ _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 
 def _time(value: object, reason: str) -> datetime:
     # Full UTC timestamps only: a date-only value such as "2026-01-01Z" is not a point in time.
-    _need(isinstance(value, str) and _TIMESTAMP.fullmatch(value), reason)
+    # Exactly ``str``: a subclass can override ``__str__`` and an impostor can fake
+    # ``__class__``; either is a refused time, never a TypeError.
+    text = value if type(value) is str else ""
+    _need(_TIMESTAMP.fullmatch(text), reason)
     try:
-        parsed = datetime.fromisoformat(str(value)[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
     except ValueError as exc:
         raise LineageError(reason) from exc
     return parsed.astimezone(UTC)
@@ -290,7 +295,10 @@ class ManifestStore:
         return manifest_digest(manifest)
 
     def all(self, tenant: str) -> list[dict[str, Any]]:
-        """Every verified manifest of one tenant; any defect raises a typed LineageError."""
+        """Every manifest of one tenant whose (unsigned) digest pin matches its bytes.
+
+        Any defect raises a typed LineageError.
+        """
         folder = self._folder(tenant)
         found = []
         for path in sorted(folder.glob("manifest-*.json")) if folder.is_dir() else []:
@@ -484,6 +492,11 @@ class ConsumptionReader:
         self.grants = grants
 
     def _authorize(self, request: Request, what: object) -> Denial | GrantState:
+        """Checks run in a fixed order and the first failure is the reason returned.
+
+        The order is identity and role, then revocation, then time format, then expiry (worker
+        clock), then grant epoch. No contract specifies this order, so tests do not pin it.
+        """
         actor = request.actor
         grant = self.grants(actor.tenant, request.workflow_ref)
         # Unknown workflow, foreign tenant and wrong role all look identical to the caller.
@@ -527,7 +540,7 @@ class ConsumptionReader:
         if not matches:
             return _finish(Resolution("unknown", "linkage_missing", claim_ref=claim_ref))
         if len(matches) > 1:
-            # Two sealed manifests claim the same claim: never pick a winner by order.
+            # Two pinned (unsigned) manifests claim the same claim: never pick a winner by order.
             return _finish(Resolution("hold", "ambiguous_linkage", claim_ref=claim_ref))
         m = matches[0]
         if m["partition"] == "protected":

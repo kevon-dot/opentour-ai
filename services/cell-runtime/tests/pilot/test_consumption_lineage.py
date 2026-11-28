@@ -30,6 +30,7 @@ from opentour_cell.pilot.consumption_lineage import (
     Request,
     Resolution,
 )
+from opentour_cell.pilot.operating_point import digest
 
 TENANT, OTHER = "generated-tenant-a", "generated-tenant-b"
 WF = "generated-wf-refund"
@@ -468,6 +469,57 @@ def test_receipts_state_the_pin_is_digest_self_consistent_only(tmp_path: Path) -
     assert got["integrity"] == "digest_self_consistent_only"
     for doc in (lineage.__doc__, ManifestStore.__doc__):
         assert doc and "digest_self_consistent_only" in doc
+
+
+class _StrSubclassBadStr(str):
+    """A real str whose ``__str__`` lies (returns a non-str)."""
+
+    def __str__(self) -> str:
+        return 5  # type: ignore[return-value]
+
+
+class _StrImpostor:
+    """Not a str at all, but ``isinstance(x, str)`` is True through ``__class__``."""
+
+    __class__ = str  # type: ignore[assignment]
+
+
+def test_non_str_times_are_invalid_time_not_type_errors(tmp_path: Path) -> None:
+    """LOW-2: only an exact ``str`` is a time; anything else is ``invalid_time``, never raised."""
+    _, grants, reader = build(tmp_path, manifest("a"))
+    for bad in (_StrSubclassBadStr(NOW), _StrImpostor()):
+        sent = Request(OWNER_ACTOR, WF, 3, bad)  # type: ignore[arg-type]
+        for out in (
+            reader.resolve_claim(sent, "claim-a"),
+            reader.impact(sent, Change("refund-request", "amount", 9)),
+        ):
+            assert isinstance(out, Denial) and out.reason == "invalid_time", (type(bad), out)
+    for bad in (_StrSubclassBadStr("2026-02-01T00:00:00Z"), _StrImpostor()):
+        grants.set(TENANT, expires_at=bad)
+        out = reader.resolve_claim(request(), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "invalid_time", type(bad)
+
+
+def test_integrity_marker_is_inside_the_digested_receipt_body(tmp_path: Path) -> None:
+    """NIT-2: editing the marker breaks the receipt's reader_digest."""
+    _, _, reader = build(tmp_path, manifest("a"))
+    for receipt in (
+        resolved(reader.resolve_claim(request(), "claim-a")).to_json(),
+        impact(reader.impact(request(), Change("refund-request", "amount", 9))).to_json(),
+    ):
+        body = {k: v for k, v in receipt.items() if k != "reader_digest"}
+        assert body["integrity"] == "digest_self_consistent_only"
+        assert digest(body) == receipt["reader_digest"]
+        forged = {**body, "integrity": "authenticated"}
+        assert digest(forged) != receipt["reader_digest"]
+
+
+def test_wording_does_not_overstate_what_the_pin_enforces() -> None:
+    """NIT-1: unsigned digest pins are not called immutable, sealed or verified."""
+    source = inspect.getsource(lineage)
+    for overstated in ("immutable", "sealed manifest", "verified manifest", "Every reader receipt"):
+        assert overstated not in source, overstated
+    assert lineage.__doc__ and "denial receipt" in lineage.__doc__
 
 
 def test_foreign_tenant_gets_no_links_and_indistinguishable_from_unknown(tmp_path: Path) -> None:
