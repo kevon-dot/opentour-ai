@@ -30,7 +30,7 @@ from opentour_training.evaluation.eve_benchmark import (
     assess_development,
     freeze_manifest,
     manifest_to_json,
-    record_disposition,
+    record_one_disposition,
     score_heldout,
     verify_isolation,
     write_once,
@@ -241,11 +241,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if result.finding is not None:
             write_once(out / "development.json", result.finding.to_json())
         if args.disposition:
-            rec = record_disposition(
-                result.scorecard, result.finding, disposition=args.disposition,
+            # No owner is named in the generated freeze, so this id is recorded as
+            # caller-asserted and cannot satisfy the named-owner gate.
+            record_one_disposition(
+                out, result.scorecard, result.finding, disposition=args.disposition,
                 owner_id="generated-owner-1", recorded_at="2026-01-01T00:00:00Z",
             )  # fmt: skip
-            write_once(out / "disposition.json", rec)
     except BenchmarkError as exc:
         print(f"REFUSED {exc.code}: {exc}", file=sys.stderr)
         return 2

@@ -698,3 +698,293 @@ def test_exclusion_reason_must_be_a_closed_code_and_ids_are_hashed_in_scorecard(
     excluded = _score().body["heldout"]["excluded"]
     assert len(excluded) == 1 and excluded[0][0].startswith("case:")
     assert excluded[0][1] == "context_not_authorized"
+
+
+# ---- post-merge audit follow-up (2026-11-28): disposition provenance, owner, one per card
+
+
+def test_disposition_refuses_a_scorecard_whose_body_does_not_match_its_digest() -> None:
+    card = _score()
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+    upgraded = {**card.body, "improvement_claim": "improvement_supported_by_interval"}
+    forged = dataclasses.replace(card, body=upgraded)  # stale digest, genuine seal copied
+    for name in ("adopt_test_simple_fix", "benchmark_only"):
+        assert _code(lambda n=name: _dispose(forged, None, n)) == "scorecard_digest_mismatch"
+
+
+def test_disposition_refuses_a_hand_built_scorecard_even_with_a_recomputed_digest() -> None:
+    card = _score()
+    upgraded = {**card.body, "improvement_claim": "improvement_supported_by_interval"}
+    for forged in (
+        eb.Scorecard(body=upgraded, scorecard_digest=eb.digest(upgraded)),
+        dataclasses.replace(card, body=upgraded, scorecard_digest=eb.digest(upgraded)),
+        eb.Scorecard(body=dict(card.body), scorecard_digest=card.scorecard_digest),  # no seal
+    ):
+        assert eb.digest(dict(forged.body)) == forged.scorecard_digest  # self-consistent
+        assert _code(lambda f=forged: _dispose(f, None, "benchmark_only")) == (
+            "scorecard_not_from_scoring"
+        )
+    injected = {**card.body, "named_owner": {"owner_id": "generated-attacker"}}
+    hand = eb.Scorecard(body=injected, scorecard_digest=eb.digest(injected))
+    assert _code(lambda: _dispose(hand, None, "benchmark_only")) == "scorecard_not_from_scoring"
+    assert _dispose(card, None, "benchmark_only")["scorecard_digest"] == card.scorecard_digest
+
+
+def test_disposition_refuses_a_hand_built_development_finding() -> None:
+    r = fx.run_fixture_benchmark()
+    assert r.finding is not None and r.finding.material_recurring_residual is True
+    genuine = _dispose(r.scorecard, r.finding, "consider_tuning")
+    assert genuine["disposition"] == "consider_tuning"
+    raw = r.finding.to_json()
+    hand_built = eb.DevelopmentFinding(
+        raw["manifest_digest"],
+        raw["baseline_serious"],
+        raw["repair_serious"],
+        raw["verified"],
+        raw["fixes"],
+        raw["regressions"],
+        tuple(raw["residual_error_families"]),
+        True,
+    )
+    edited = dataclasses.replace(r.finding, fixes=r.finding.fixes + 7)  # seal copied, body moved
+    for forged in (hand_built, edited):
+        for name in ("consider_tuning", "benchmark_only"):
+            assert _code(lambda f=forged, n=name: _dispose(r.scorecard, f, n)) == (
+                "finding_not_from_assessment"
+            )
+
+
+def _named_owner_score(owner: str) -> eb.Scorecard:
+    f, _, cfg, _, _, _ = _setup()
+    m = _freeze_with(f, named_owner_id=owner)
+    elig = tuple(c for c in f.heldout_cases if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    iso = eb.verify_isolation(
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    return _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs)
+
+
+def test_owner_id_comes_from_the_owner_named_in_the_frozen_manifest() -> None:
+    card = _named_owner_score("generated-named-owner")
+    assert card.body["named_owner"] == {"owner_id": "generated-named-owner"}
+    rec = eb.record_disposition(
+        card, None, disposition="benchmark_only", recorded_at="2026-01-01"
+    )  # no owner id supplied: it is taken from the bound record
+    assert rec["owner_id"] == "generated-named-owner"
+    assert rec["owner_binding"] == "named_in_frozen_manifest"
+    assert rec["named_owner_gate_satisfied"] is True
+    same = eb.record_disposition(
+        card,
+        None,
+        disposition="benchmark_only",
+        owner_id="generated-named-owner",
+        recorded_at="2026-01-01",
+    )
+    assert same == rec
+    for other in ("generated-other-owner", "Generated-Named-Owner", "generated-named-owner "):
+        assert _code(
+            lambda o=other: eb.record_disposition(
+                card, None, disposition="benchmark_only", owner_id=o, recorded_at="2026-01-01"
+            )
+        ) == ("owner_not_the_named_owner")
+    fixtures = fx.build_fixture_set()
+    for bad in ("", 7, b"generated-named-owner"):
+        assert _code(lambda b=bad: _freeze_with(fixtures, named_owner_id=b)) == (
+            "named_owner_invalid"
+        )
+
+
+def test_caller_asserted_owner_is_labelled_and_cannot_satisfy_the_named_owner_gate(
+    tmp_path: Path,
+) -> None:
+    card = _score()
+    assert "named_owner" not in card.body
+    rec = _dispose(card, None, "benchmark_only")
+    assert rec["owner_id"] == "generated-owner-1"
+    assert rec["owner_binding"] == "caller_asserted"
+    assert rec["named_owner_gate_satisfied"] is False
+    assert _code(
+        lambda: eb.record_disposition(
+            card, None, disposition="benchmark_only", recorded_at="2026-01-01"
+        )
+    ) == ("owner_missing")
+    proc = subprocess.run(
+        [*CLI, "--out", str(tmp_path), "--disposition", "benchmark_only"],
+        capture_output=True,
+        text=True,
+        env=ENV,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    (written,) = list(tmp_path.glob("disposition-*.json"))
+    cli_rec = json.loads(written.read_text())
+    assert cli_rec["owner_binding"] == "caller_asserted"
+    assert cli_rec["named_owner_gate_satisfied"] is False
+
+
+def test_worker_enforces_one_disposition_per_scorecard(tmp_path: Path) -> None:
+    r = fx.run_fixture_benchmark()
+    store = tmp_path / "store"
+
+    def once(card: eb.Scorecard, name: str, at: str = "2026-01-01") -> bool:
+        return eb.record_one_disposition(
+            store, card, None, disposition=name, owner_id="generated-owner-1", recorded_at=at
+        )
+
+    assert once(r.scorecard, "benchmark_only") is True
+    assert once(r.scorecard, "benchmark_only") is False  # identical retry is a no-op
+    for name, at in (("gather_more_evidence", "2026-01-01"), ("benchmark_only", "2026-01-02")):
+        assert _code(lambda n=name, a=at: once(r.scorecard, n, a)) == (
+            "disposition_already_recorded"
+        )
+    other = _score(include_repair=False)  # a different scorecard may take its own disposition
+    assert other.scorecard_digest != r.scorecard.scorecard_digest
+    assert once(other, "gather_more_evidence") is True
+    files = sorted(store.glob("disposition-*.json"))
+    assert len(files) == 2
+    recorded = {json.loads(p.read_text())["scorecard_digest"] for p in files}
+    assert recorded == {r.scorecard.scorecard_digest, other.scorecard_digest}
+    assert not list(store.glob(".tmp-*"))
+
+
+def test_cli_refuses_a_second_disposition_for_the_same_scorecard(tmp_path: Path) -> None:
+    def cli(name: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [*CLI, "--out", str(tmp_path), "--disposition", name],
+            capture_output=True,
+            text=True,
+            env=ENV,
+            check=False,
+        )
+
+    assert cli("benchmark_only").returncode == 0
+    assert cli("benchmark_only").returncode == 0  # rerun of the same disposition is idempotent
+    second = cli("gather_more_evidence")
+    assert second.returncode == 2 and "disposition_already_recorded" in second.stderr
+    assert len(list(tmp_path.glob("disposition-*.json"))) == 1
+
+
+def test_family_lower_bound_alone_withholds_the_improvement_claim() -> None:
+    """Pins both bounds: case-level lower > 0, family-level lower <= 0, so no improvement."""
+    f = fx.build_fixture_set(heldout_cases=400)
+    wide = tuple(
+        dataclasses.replace(c, family_id=f"GEN-FAM-HOLD-W{n // 40:02d}")
+        for n, c in enumerate(f.heldout_cases)
+    )  # same 400 cases, 10 families of 40 instead of 200 of 2
+    f = dataclasses.replace(f, heldout_cases=wide)
+    m = _freeze_with(f)
+    cfg = {c.arm_id: c for c in fx.ARM_CONFIGS}
+    elig = tuple(c for c in wide if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    prompts = [c.question for c in wide if c.case_id in m.heldout_eligible]
+    iso = eb.verify_isolation(m, fit_rows=[], prompt_texts=prompts, heldout_key=f.heldout_key)
+    card = eb.score_heldout(
+        m,
+        heldout_cases=wide,
+        heldout_key=f.heldout_key,
+        fit_rows=[],
+        prompt_texts=prompts,
+        isolation=iso,
+        runs=runs,
+    )
+    p = card.body["paired_comparison"]
+    assert p["family_interval"]["units"] == 10
+    assert p["fixes"] > p["regressions"]
+    assert p["interval"]["lower"] > 0  # the case-level bound alone would support a claim
+    assert p["family_interval"]["lower"] <= 0
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+    assert _code(lambda: _dispose(card, None, "adopt_test_simple_fix")) == (
+        "adopt_requires_interval_supported_improvement"
+    )
+
+
+class _ShiftyBody(dict):  # type: ignore[type-arg]
+    """Copies as the genuine body but answers an upgraded claim on direct lookup."""
+
+    def __getitem__(self, key: object) -> Any:
+        if key == "improvement_claim":
+            return "improvement_supported_by_interval"
+        return super().__getitem__(key)
+
+
+def test_disposition_reads_only_the_digest_checked_snapshot_of_the_body() -> None:
+    card = _score()
+    shifty = dataclasses.replace(card, body=_ShiftyBody(card.body))  # genuine digest and seal
+    assert shifty.body["improvement_claim"] == "improvement_supported_by_interval"
+    assert eb.digest(dict(shifty.body)) == card.scorecard_digest
+    assert _code(lambda: _dispose(shifty, None, "adopt_test_simple_fix")) == (
+        "adopt_requires_interval_supported_improvement"
+    )
+
+
+def test_a_finding_subclass_cannot_borrow_a_genuine_seal() -> None:
+    f, _, cfg, _, _, _ = _setup()
+    m = _freeze_with(f, materiality_min_errors=99)  # genuine finding: residual not material
+    dev = {a: fx.simulate_arm(cfg[a], f.development_cases, m) for a in cfg}
+    genuine = eb.assess_development(
+        m,
+        development_cases=f.development_cases,
+        development_key=f.development_key,
+        baseline=dev[eb.BASELINE_ARM],
+        repair=dev[eb.REPAIR_ARM],
+    )
+    assert genuine.material_recurring_residual is False
+    elig = tuple(c for c in f.heldout_cases if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    iso = eb.verify_isolation(
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    card = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs)
+
+    class Borrowed(eb.DevelopmentFinding):
+        def to_json(self) -> dict[str, Any]:
+            return genuine.to_json()  # what the seal was computed over
+
+    fields = {k: getattr(genuine, k) for k in genuine.__dataclass_fields__}
+    borrowed = Borrowed(**{**fields, "material_recurring_residual": True})
+    assert borrowed.seal == genuine.seal
+    assert _code(lambda: _dispose(card, borrowed, "consider_tuning")) == (
+        "finding_not_from_assessment"
+    )
+    assert _code(lambda: _dispose(card, genuine, "consider_tuning")) == (
+        "tuning_requires_material_recurring_residual"
+    )
+    assert _dispose(card, genuine, "benchmark_only")["disposition"] == "benchmark_only"
+
+
+def test_case_lower_bound_alone_withholds_the_improvement_claim() -> None:
+    """Mirror of the family pin: family-level lower > 0, case-level lower <= 0, no claim."""
+    f = fx.build_fixture_set()
+    fixes_first = tuple(
+        dataclasses.replace(
+            c,
+            family_id=(
+                f"GEN-FAM-HOLD-S{c.case_id}"
+                if int(c.case_id.split("-")[1]) % 5 in (1, 4)  # the cases the repair fixes
+                else "GEN-FAM-HOLD-REST"
+            ),
+        )
+        for c in f.heldout_cases
+    )  # every fix is its own family; everything else, regressions included, shares one
+    f = dataclasses.replace(f, heldout_cases=fixes_first)
+    m = _freeze_with(f)
+    cfg = {c.arm_id: c for c in fx.ARM_CONFIGS}
+    elig = tuple(c for c in fixes_first if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    prompts = [c.question for c in elig]
+    iso = eb.verify_isolation(m, fit_rows=[], prompt_texts=prompts, heldout_key=f.heldout_key)
+    card = eb.score_heldout(
+        m,
+        heldout_cases=fixes_first,
+        heldout_key=f.heldout_key,
+        fit_rows=[],
+        prompt_texts=prompts,
+        isolation=iso,
+        runs=runs,
+    )
+    p = card.body["paired_comparison"]
+    assert (p["fixes"], p["regressions"]) == (11, 3)
+    assert p["family_interval"]["lower"] > 0  # the family bound alone would support a claim
+    assert p["interval"]["lower"] <= 0
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
