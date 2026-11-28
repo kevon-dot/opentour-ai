@@ -12,6 +12,28 @@ scoring callback cannot change a settled scorecard. The versioned result carries
 onto the OPE-555 scorecard arm fields; a fix, a benchmark score and a release remain separate
 records.
 
+Worker journal (OPE-574, owner ruling A + C, following OPE-528): the replay journal stays
+redacted and holds no candidate output. Each journaled verdict row instead carries the scorer and
+rubric that produced it and a keyed commitment over the exact output that was scored (HMAC-SHA256
+under a per-run key, never a bare digest, because short answers are guessable by enumeration).
+Given an output presented later and the run key, ``verify_output`` detects substitution; its
+production caller is the separate evaluator. Nothing in this module or in ``eve_aggregate``
+re-scores a verdict; what they offer is "aggregation re-derived from journaled verdicts".
+Re-scoring belongs to the separate evaluator (``eve_evaluator``, the fixture-tier form of the
+OPE-528 evaluator), which replays under its own identity, keeps per-case predictions privately
+under its own custody and checks each of them against this journal's commitments. The scorer
+implementation lives in ``eve_scorer``, the aggregator in ``eve_aggregate``, the evaluator in
+``eve_evaluator`` and the staging gate in ``eve_staging``; this module imports none of them. It
+deliberately has no staging decision of its own: offering a result for review needs the worker
+rebuild, the aggregator and the independent verdict together, which only ``eve_staging`` can
+combine without this module importing the others.
+
+The run key lives in a ``CommitmentKeyStore`` file, never in the journal row it protects, and the
+worker refuses a key store under, or linked to, the journal. This is the ``locally_keyed`` evidence
+rung: the same party holds the key and the record, so a commitment is tamper evidence for
+ourselves, not proof to a third party, and relocating the key does not change that (custody is
+OPE-566's). Journal readers check that a commitment is present, never its value.
+
 Simulated: tests use generated sentinel cases and answers, a deterministic scorer, a deterministic
 inference double and an isolated trainer-transport double. Not proven: no real EVE inference, GPU,
 trainer, provider or Pi School reviewer exists here, the scorer is an exact-match stand-in and not
@@ -22,9 +44,14 @@ external gates. They are software behavior only and never provider or customer e
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import hmac
 import json
 import os
+import re
+import secrets
+import stat
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -236,12 +263,16 @@ def _checked_arm_fields(
     check and then deliver something else. The other fields are plain values read once by the
     caller. Raises ``TypeError`` for a wrong type and ``ValueError`` for an empty ``case_id`` or
     an ``answer`` with no visible content, empty or blank (a genuine abstention is ``None``).
+
+    The case id, the answer and every citation must be exactly ``str``, never a subclass: a
+    subclass can override ``__eq__`` or ``__hash__`` so that a guess compares equal to the
+    protected answer, or an unapproved citation to an approved one, inside the scorer.
     """
-    if not isinstance(case_id, str):
+    if type(case_id) is not str:
         raise TypeError("ArmOutput.case_id must be a str")
     if not case_id:
         raise ValueError("ArmOutput.case_id must not be empty")
-    if answer is not None and not isinstance(answer, str):
+    if answer is not None and type(answer) is not str:
         raise TypeError("ArmOutput.answer must be a str or None")
     if answer is not None and not _carries_content(answer):
         raise ValueError("ArmOutput.answer carries no content; use None to abstain")
@@ -251,7 +282,7 @@ def _checked_arm_fields(
         cites = tuple(citations)
     except Exception:
         raise TypeError("ArmOutput.citations could not be read as a sequence") from None
-    if not all(isinstance(citation, str) for citation in cites):
+    if not all(type(citation) is str for citation in cites):
         raise TypeError("ArmOutput.citations must contain only str")
     if type(abstained) is not bool:
         raise TypeError("ArmOutput.abstained must be a bool")
@@ -282,6 +313,29 @@ class ArmOutput:
         object.__setattr__(self, "abstained", abstained)
 
 
+def _checked_outputs(raw: object) -> tuple[ArmOutput, ...]:
+    """What ``generate`` returned, accepted only as a tuple of exact ``ArmOutput`` instances whose
+    fields pass the boundary rule again, and returned as freshly built outputs.
+
+    An inference is not trusted to have built its outputs through ``ArmOutput``: a look-alike
+    object, an ``ArmOutput`` subclass, or an instance whose fields were swapped after its own
+    check (``object.__setattr__``) would otherwise reach the scorer unchecked.
+    """
+    if type(raw) is not tuple or not all(type(o) is ArmOutput for o in raw):
+        raise EveRefusal("output_shape_invalid")
+    checked = []
+    for o in raw:
+        if type(o.citations) is not tuple:  # ArmOutput always stores a tuple; this one was edited
+            raise EveRefusal("output_shape_invalid")
+        try:
+            checked.append(
+                ArmOutput(*_checked_arm_fields(o.case_id, o.answer, o.citations, o.abstained))
+            )
+        except (TypeError, ValueError):
+            raise EveRefusal("output_shape_invalid") from None
+    return tuple(checked)
+
+
 class GenerativeInference(Protocol):
     @property
     def served_revision(self) -> str: ...
@@ -300,6 +354,9 @@ class CredentialSource(Protocol):
 
 
 class Scorer(Protocol):
+    """``scorer_id`` names the attributed party, ``version`` its code revision."""
+
+    scorer_id: str
     version: str
     rubric_revision: str
 
@@ -308,32 +365,16 @@ class Scorer(Protocol):
     ) -> Verdict: ...
 
 
-class DeterministicScorer:
-    """Exact-match stand-in for the independent evaluator. Unverifiable claims never score."""
-
-    def __init__(self, version: str, rubric_revision: str) -> None:
-        self.version = version
-        self.rubric_revision = rubric_revision
-
-    def score(self, case: EveCase, expected: ProtectedAnswer, output: ArmOutput | None) -> Verdict:
-        if output is None:
-            return Verdict.MISSING
-        if expected.expectation not in (Expectation.ANSWER, Expectation.ABSTAIN):
-            raise EveRefusal("case_not_scorable")
-        if output.abstained or output.answer is None:
-            if expected.expectation is Expectation.ABSTAIN:
-                return Verdict.CORRECT_ABSTENTION
-            return Verdict.INAPPROPRIATE_REFUSAL
-        approved = {p.passage_id for p in case.context}
-        if not output.citations or not set(output.citations) <= approved:
-            return Verdict.UNVERIFIED
-        if expected.expectation is Expectation.ABSTAIN:
-            return Verdict.SERIOUS_ERROR
-        if output.answer == expected.answer and expected.required_citations <= set(
-            output.citations
-        ):
-            return Verdict.CORRECT_ANSWER
-        return Verdict.SERIOUS_ERROR
+def scorer_attribution(scorer: object) -> tuple[str, str, str]:
+    """``(scorer_id, version, rubric_revision)`` read from the scorer, or a refusal if any is
+    missing or blank. Attribution is what the scorer declares; it is checked against the manifest,
+    not authenticated (a signed evaluator identity is OPE-566 and OPE-528 work)."""
+    values = tuple(
+        getattr(scorer, name, None) for name in ("scorer_id", "version", "rubric_revision")
+    )
+    if not all(isinstance(v, str) and v for v in values):
+        raise EveRefusal("scorer_unattributed")
+    return values  # type: ignore[return-value]
 
 
 def scorer_selfcheck(scorer: Scorer) -> bool:
@@ -371,6 +412,7 @@ class ReplayManifest:
     benchmark_id: str
     benchmark_revision: str
     registration_identity: str
+    scorer_id: str
     scorer_version: str
     rubric_revision: str
     membership_digest: str
@@ -386,6 +428,7 @@ class ReplayManifest:
                 self.benchmark_id,
                 self.benchmark_revision,
                 self.registration_identity,
+                self.scorer_id,
                 self.scorer_version,
                 self.rubric_revision,
                 self.membership_digest,
@@ -395,6 +438,80 @@ class ReplayManifest:
                 [list(e) for e in self.excluded],
             ]
         )
+
+    def document(self) -> dict[str, Any]:
+        """The frozen manifest as a JSON document, for the separate evaluator process."""
+        return {
+            "schema_version": MANIFEST_VERSION,
+            "benchmark_id": self.benchmark_id,
+            "benchmark_revision": self.benchmark_revision,
+            "registration_identity": self.registration_identity,
+            "scorer_id": self.scorer_id,
+            "scorer_version": self.scorer_version,
+            "rubric_revision": self.rubric_revision,
+            "membership_digest": self.membership_digest,
+            "content_digest": self.content_digest,
+            "answer_key_digest": self.answer_key_digest,
+            "eligible_case_ids": list(self.eligible_case_ids),
+            "excluded": [list(e) for e in self.excluded],
+            "manifest_digest": self.digest,
+        }
+
+    @staticmethod
+    def parse(raw: Any) -> ReplayManifest:
+        """Read a manifest document strictly; its digest must match its own fields.
+
+        The digest check only catches an inconsistent document. Whether the manifest names the
+        reader's own sealed cases and answer key is the reader's check, never this one's.
+        """
+        fields = _MANIFEST_TEXT_FIELDS
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != _MANIFEST_KEYS
+            or raw["schema_version"] != MANIFEST_VERSION
+            or not all(type(raw[f]) is str and raw[f] for f in fields)
+            or not isinstance(raw["eligible_case_ids"], list)
+            or not all(type(c) is str and c for c in raw["eligible_case_ids"])
+            or not isinstance(raw["excluded"], list)
+            or not all(
+                isinstance(e, list) and len(e) == 2 and all(type(v) is str and v for v in e)
+                for e in raw["excluded"]
+            )
+        ):
+            raise EveRefusal("manifest_malformed")
+        manifest = ReplayManifest(
+            benchmark_id=raw["benchmark_id"],
+            benchmark_revision=raw["benchmark_revision"],
+            registration_identity=raw["registration_identity"],
+            scorer_id=raw["scorer_id"],
+            scorer_version=raw["scorer_version"],
+            rubric_revision=raw["rubric_revision"],
+            membership_digest=raw["membership_digest"],
+            content_digest=raw["content_digest"],
+            answer_key_digest=raw["answer_key_digest"],
+            eligible_case_ids=tuple(raw["eligible_case_ids"]),
+            excluded=tuple((e[0], e[1]) for e in raw["excluded"]),
+        )
+        if manifest.digest != raw["manifest_digest"]:
+            raise EveRefusal("manifest_malformed")
+        return manifest
+
+
+MANIFEST_VERSION = "opentour.pilot.eve-replay-manifest.v1"
+_MANIFEST_TEXT_FIELDS = (
+    "benchmark_id",
+    "benchmark_revision",
+    "registration_identity",
+    "scorer_id",
+    "scorer_version",
+    "rubric_revision",
+    "membership_digest",
+    "content_digest",
+    "answer_key_digest",
+)
+_MANIFEST_KEYS = frozenset(
+    {"schema_version", "eligible_case_ids", "excluded", "manifest_digest", *_MANIFEST_TEXT_FIELDS}
+)
 
 
 def replay_membership(cases: tuple[EveCase, ...]) -> str:
@@ -435,17 +552,19 @@ def freeze(
             eligible.append(case.case_id)
         else:
             excluded.append((case.case_id, expectation.value))
+    scorer_id, scorer_version, rubric_revision = scorer_attribution(scorer)
     return ReplayManifest(
-        benchmark_id,
-        benchmark_revision,
-        registration.identity,
-        scorer.version,
-        scorer.rubric_revision,
-        replay_membership(cases),
-        cases_content_digest(cases),
-        key.digest,
-        tuple(eligible),
-        tuple(excluded),
+        benchmark_id=benchmark_id,
+        benchmark_revision=benchmark_revision,
+        registration_identity=registration.identity,
+        scorer_id=scorer_id,
+        scorer_version=scorer_version,
+        rubric_revision=rubric_revision,
+        membership_digest=replay_membership(cases),
+        content_digest=cases_content_digest(cases),
+        answer_key_digest=key.digest,
+        eligible_case_ids=tuple(eligible),
+        excluded=tuple(excluded),
     )
 
 
@@ -475,18 +594,78 @@ def verify_bound(
         raise EveRefusal("replay_not_bound")
 
 
+COMMITMENT_SCHEME = "hmac-sha256"
+_COMMITMENT = re.compile(r"hmac-sha256:[0-9a-f]{64}")
+_COMMITMENT_DOMAIN = "opentour.pilot.eve-output-commitment.v1"
+
+
 @dataclass(frozen=True)
 class ScoredRow:
+    """One journaled verdict: who scored it, under which rubric, and a commitment to the output.
+
+    ``scorer_id`` is the attributed party and ``scorer_version`` its code revision. The row never
+    holds the output. ``commitment`` is an HMAC under the run's key (held in a
+    ``CommitmentKeyStore``, never in this row) over the run, this row's other fields and the exact
+    output the scorer was handed. A row missing any attribution field, or with no commitment
+    present, cannot be constructed. Construction and the journal readers check only that a
+    commitment is present and well formed, never that it is correct: only ``verify_output``,
+    holding the run key and the output, can check its value.
+    """
+
     ref: str
     verdict: Verdict
     answered: bool
     retrieval: str
+    scorer_id: str
+    scorer_version: str
+    rubric_revision: str
+    commitment: str
+
+    def __post_init__(self) -> None:
+        attribution = (self.scorer_id, self.scorer_version, self.rubric_revision)
+        if not all(isinstance(v, str) and v for v in attribution):
+            raise EveRefusal("verdict_unattributed")
+        if not isinstance(self.commitment, str) or not _COMMITMENT.fullmatch(self.commitment):
+            raise EveRefusal("verdict_uncommitted")
+        if (
+            not isinstance(self.ref, str)
+            or not isinstance(self.verdict, Verdict)
+            or type(self.answered) is not bool
+            or not isinstance(self.retrieval, str)
+        ):
+            raise EveRefusal("journal_row_malformed")
+
+
+@dataclass(frozen=True)
+class ScorerRecord:
+    """The scorer an arm was replayed with and the self-check result the worker computed for it.
+
+    Recorded by ``replay_arm`` itself, never supplied by a caller. Readers require it to name the
+    manifest's scorer and to show a passing self-check, so a scorer handed in later (at staging)
+    cannot stand in for the one that produced the verdicts.
+    """
+
+    scorer_id: str
+    scorer_version: str
+    rubric_revision: str
+    selfcheck_passed: bool
+
+    def __post_init__(self) -> None:
+        attribution = (self.scorer_id, self.scorer_version, self.rubric_revision)
+        if not all(isinstance(v, str) and v for v in attribution):
+            raise EveRefusal("arm_scorer_unrecorded")
+        if type(self.selfcheck_passed) is not bool:
+            raise EveRefusal("arm_scorer_unrecorded")
+
+    def document(self) -> list[Any]:
+        return [self.scorer_id, self.scorer_version, self.rubric_revision, self.selfcheck_passed]
 
 
 @dataclass(frozen=True)
 class ArmRecord:
     spec: ArmSpec
     rows: tuple[ScoredRow, ...]
+    scorer: ScorerRecord | None = None  # None only for a record never journaled; readers refuse it
 
     def document(self) -> dict[str, Any]:
         return {
@@ -498,15 +677,250 @@ class ArmRecord:
                 self.spec.context_revision,
                 self.spec.decoding_digest,
             ],
-            "rows": [[r.ref, r.verdict.value, r.answered, r.retrieval] for r in self.rows],
+            "rows": [
+                [
+                    r.ref,
+                    r.verdict.value,
+                    r.answered,
+                    r.retrieval,
+                    r.scorer_id,
+                    r.scorer_version,
+                    r.rubric_revision,
+                    r.commitment,
+                ]
+                for r in self.rows
+            ],
+            "scorer": self.scorer.document() if self.scorer is not None else None,
         }
 
     @staticmethod
     def parse(raw: Any) -> ArmRecord:
-        return ArmRecord(
-            ArmSpec(*raw["spec"]),
-            tuple(ScoredRow(r[0], Verdict(r[1]), bool(r[2]), r[3]) for r in raw["rows"]),
-        )
+        """Read a journaled record strictly.
+
+        A row missing scorer id, version or rubric, a row with no commitment present, and an arm
+        without its scorer record are refused. The commitment's value is not checked here.
+        """
+        try:
+            spec = ArmSpec(*raw["spec"])
+            rows = list(raw["rows"])
+            scorer_raw = raw.get("scorer")
+        except (KeyError, TypeError, AttributeError):
+            raise EveRefusal("journal_row_malformed") from None
+        parsed = []
+        for r in rows:
+            if not isinstance(r, list):
+                raise EveRefusal("journal_row_malformed")
+            if len(r) in (4, 7):  # earlier shapes: no attribution, or no scorer identity
+                raise EveRefusal("verdict_unattributed")
+            if len(r) != 8:
+                raise EveRefusal("journal_row_malformed")
+            ref, verdict, answered, retrieval, scorer_id, scorer_version, rubric_revision, mac = r
+            attribution = (scorer_id, scorer_version, rubric_revision)
+            if not all(isinstance(v, str) and v for v in attribution):
+                raise EveRefusal("verdict_unattributed")
+            if not isinstance(mac, str) or not _COMMITMENT.fullmatch(mac):
+                raise EveRefusal("verdict_uncommitted")
+            try:
+                verdict = Verdict(verdict)
+            except ValueError:
+                raise EveRefusal("journal_row_malformed") from None
+            parsed.append(ScoredRow(ref, verdict, answered, retrieval, *attribution, mac))
+        if not isinstance(scorer_raw, list) or len(scorer_raw) != 4:
+            raise EveRefusal("arm_scorer_unrecorded")
+        return ArmRecord(spec, tuple(parsed), ScorerRecord(*scorer_raw))
+
+
+def _require_attributed(manifest: ReplayManifest, record: ArmRecord) -> None:
+    """The arm and every row must name the scorer id, version and rubric the manifest froze, and
+    the arm must have been replayed under a passing self-check. Presence is not enough."""
+    frozen = (manifest.scorer_id, manifest.scorer_version, manifest.rubric_revision)
+    if record.scorer is None:
+        raise EveRefusal("arm_scorer_unrecorded")
+    recorded = (
+        record.scorer.scorer_id,
+        record.scorer.scorer_version,
+        record.scorer.rubric_revision,
+    )
+    if recorded != frozen or any(
+        (r.scorer_id, r.scorer_version, r.rubric_revision) != frozen for r in record.rows
+    ):
+        raise EveRefusal("verdict_attribution_mismatch")
+    if record.scorer.selfcheck_passed is not True:
+        raise EveRefusal("arm_selfcheck_failed")
+
+
+def _require_complete(manifest: ReplayManifest, record: ArmRecord) -> None:
+    """The arm's rows must be exactly one per eligible case, in the manifest's order: no
+    duplicated, missing, extra or reordered row, so no total can count a case twice or skip one.
+    This is the same rule ``eve_aggregate`` applies to the journal it reads."""
+    if [r.ref for r in record.rows] != [_ref(manifest, c) for c in manifest.eligible_case_ids]:
+        raise EveRefusal("journal_rows_incomplete")
+
+
+def _require_sound(manifest: ReplayManifest, record: ArmRecord) -> None:
+    """Every reader's check on a journaled arm: attributed to the frozen scorer, replayed under a
+    passing self-check, and holding exactly the manifest's eligible cases."""
+    _require_attributed(manifest, record)
+    _require_complete(manifest, record)
+
+
+def _output_message(output: ArmOutput | None) -> list[Any] | None:
+    if output is None:
+        return None
+    return [output.case_id, output.answer, list(output.citations), output.abstained]
+
+
+def _commit(run_key: bytes, run_id: str, fields: list[Any], output: list[Any] | None) -> str:
+    message = canonical([_COMMITMENT_DOMAIN, run_id, fields, output])
+    return f"{COMMITMENT_SCHEME}:" + hmac.new(run_key, message, hashlib.sha256).hexdigest()
+
+
+def _row_fields(row: ScoredRow) -> list[Any]:
+    return [
+        row.ref,
+        row.verdict.value,
+        row.answered,
+        row.retrieval,
+        row.scorer_id,
+        row.scorer_version,
+        row.rubric_revision,
+    ]
+
+
+def output_commitment(
+    run_key: bytes, *, run_id: str, row: ScoredRow, output: ArmOutput | None
+) -> str:
+    """The commitment ``row`` would carry had ``output`` been the output scored for it.
+
+    The message binds the run (manifest and arm), the row's ref, verdict, answered flag, retrieval
+    digest and scorer attribution, and the output's case id, answer, citations and abstention, so
+    an output, a verdict or a commitment moved to another row all fail to verify.
+    """
+    return _commit(run_key, run_id, _row_fields(row), _output_message(output))
+
+
+class CommitmentKeyStore:
+    """Per-run HMAC keys for output commitments, held apart from the journal they protect.
+
+    One 32-byte key is drawn from ``secrets`` per run id on first use and appended to this file,
+    created 0600 inside a parent directory created 0700. The key is never written into the journal.
+    The file is opened with ``O_NOFOLLOW``, so a symlinked store is refused, and an existing store
+    that is not a regular file owned by the current uid with no permission beyond 0600 is refused
+    (``commitment_key_store_insecure``), for reading and for appending alike; it is never chmodded
+    into shape, because a store that was once readable by others may already have been read.
+
+    ``EveReplayWorker`` refuses a key store anywhere under the journal's directory, one that is the
+    journal file under another name (same inode or a symlink), and a key store or journal with a
+    second hard link; the store also refuses to append to a file with more than one link. That
+    check is structural only: it keeps the key out of the record, not out of the same operator's
+    reach.
+
+    Evidence rung ``locally_keyed``: the same party holds this file and the journal, so a
+    commitment is tamper evidence for ourselves, not proof to a third party. Moving this file to
+    another disk or host does not change the rung; only separated custody under OPE-566 would.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __repr__(self) -> str:
+        return f"CommitmentKeyStore(path={str(self.path)!r})"
+
+    def _open(self, flags: int) -> int | None:
+        """A descriptor for the store, checked after opening (no check-then-open race), or None
+        when reading a store that does not exist yet."""
+        try:
+            fd = os.open(self.path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except FileNotFoundError:
+            if flags & os.O_CREAT:
+                raise EveRefusal("commitment_key_unavailable") from None
+            return None
+        except OSError as error:
+            if error.errno == errno.ELOOP:  # the final path component is a symlink
+                raise EveRefusal("commitment_key_store_insecure") from None
+            raise EveRefusal("commitment_key_unavailable") from None
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & ~0o600
+            ):
+                raise EveRefusal("commitment_key_store_insecure")
+            if flags & os.O_CREAT and info.st_nlink > 1:  # re-checked on the opened file
+                raise EveRefusal("commitment_key_colocated")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _keys(self) -> dict[str, bytes]:
+        fd = self._open(os.O_RDONLY)
+        if fd is None:
+            return {}
+        keys: dict[str, bytes] = {}
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                text = handle.read().decode()
+            for line in text.splitlines():
+                if not line:
+                    continue
+                entry = json.loads(line)
+                run_id, key = entry["run_id"], bytes.fromhex(entry["key"])
+                if len(key) != 32 or keys.get(run_id, key) != key:
+                    raise ValueError("bad key entry")
+                keys[run_id] = key
+        except (OSError, ValueError, KeyError, TypeError):
+            raise EveRefusal("commitment_key_unavailable") from None
+        return keys
+
+    def key_for(self, run_id: str) -> bytes:
+        """The run's key, created on first use."""
+        existing = self._keys().get(run_id)
+        if existing is not None:
+            return existing
+        key = secrets.token_bytes(32)
+        if _hard_linked(self.path):
+            raise EveRefusal("commitment_key_colocated")
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = self._open(os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        if fd is None:  # unreachable: with O_CREAT the store is opened or refused
+            raise EveRefusal("commitment_key_unavailable")
+        with os.fdopen(fd, "ab") as handle:
+            handle.write(canonical({"run_id": run_id, "key": key.hex()}) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return key
+
+    def require(self, run_id: str) -> bytes:
+        """The run's key, or a refusal: a commitment cannot be checked without it."""
+        key = self._keys().get(run_id)
+        if key is None:
+            raise EveRefusal("commitment_key_unavailable")
+        return key
+
+
+def _hard_linked(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_nlink > 1
+    except OSError:
+        return True
+
+
+def _keys_colocated(journal: Path, keys: Path) -> bool:
+    """Whether the key store could end up in, beside or as the journal it protects."""
+    journal_path, keys_path = journal.resolve(), keys.resolve()
+    if keys_path == journal_path or keys_path.is_relative_to(journal_path.parent):
+        return True
+    if _hard_linked(journal) or _hard_linked(keys):
+        return True
+    try:
+        return journal.exists() and keys.exists() and os.path.samefile(journal, keys)
+    except OSError:
+        return True
+
+
+_EVENT_FIELDS = {"arm": ("run_id", "manifest", "record"), "settle": ("manifest", "result")}
 
 
 class Settlement(StrEnum):
@@ -524,9 +938,15 @@ class ReplayJournal:
         if not self.path.exists():
             return []
         try:
-            return [json.loads(line) for line in self.path.read_text().splitlines() if line]
+            events = [json.loads(line) for line in self.path.read_text().splitlines() if line]
         except (OSError, ValueError):
             raise EveRefusal("replay_journal_unavailable") from None
+        for event in events:  # a foreign line is a clean refusal, never a raw KeyError later
+            kind = event.get("event") if isinstance(event, dict) else None
+            fields = _EVENT_FIELDS.get(kind) if isinstance(kind, str) else None
+            if fields is None or any(f not in event for f in fields):
+                raise EveRefusal("replay_journal_unavailable")
+        return events
 
     def _append(self, event: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -557,6 +977,14 @@ class ReplayJournal:
             }
         )
         return record
+
+    def arms_for(self, manifest_digest: str) -> tuple[ArmRecord, ...]:
+        """Every arm record journaled under ``manifest_digest``, in journal order."""
+        return tuple(
+            ArmRecord.parse(e["record"])
+            for e in self._events()
+            if e["event"] == "arm" and e["manifest"] == manifest_digest
+        )
 
     def known_manifest(self, manifest_digest: str) -> bool:
         return any(e.get("manifest") == manifest_digest for e in self._events())
@@ -654,6 +1082,35 @@ def _ref(manifest: ReplayManifest, case_id: str) -> str:
     return digest([manifest.digest, case_id])[7:23]
 
 
+def verify_output(
+    *,
+    keys: CommitmentKeyStore,
+    journal: ReplayJournal,
+    manifest: ReplayManifest,
+    arm: ArmSpec,
+    case_id: str,
+    presented: ArmOutput | None,
+) -> bool:
+    """Whether ``presented`` is exactly the output scored for ``case_id`` in this journaled arm.
+
+    The row is read from the journal, never taken from the caller, its attribution is checked
+    against the manifest, and the commitment is recomputed under the run key and compared in
+    constant time. False means a substituted output, or a verdict, attribution or commitment
+    edited in the journal since. It says nothing about whether the verdict was right.
+    """
+    run_id = run_id_for(manifest, arm)
+    record = journal.arm(run_id)
+    if record is None:
+        raise EveRefusal("arm_not_journaled")
+    _require_sound(manifest, record)
+    ref = _ref(manifest, case_id)
+    rows = [r for r in record.rows if r.ref == ref]
+    if len(rows) != 1:
+        raise EveRefusal("case_not_scored")
+    expected = output_commitment(keys.require(run_id), run_id=run_id, row=rows[0], output=presented)
+    return hmac.compare_digest(expected, rows[0].commitment)
+
+
 class EveReplayWorker:
     """Replay one arm at a time against the frozen protected set and journal exactly one result."""
 
@@ -664,12 +1121,16 @@ class EveReplayWorker:
         preflight: mc.Preflight,
         credentials: CredentialSource,
         journal: ReplayJournal,
+        keys: CommitmentKeyStore,
         log: Callable[[str], None] = lambda _line: None,
     ) -> None:
+        if _keys_colocated(journal.path, keys.path):
+            raise EveRefusal("commitment_key_colocated")
         self.registry = registry
         self.preflight = preflight
         self.credentials = credentials
         self.journal = journal
+        self.keys = keys
         self._log = log
 
     def _emit(self, key: AnswerKey, line: str) -> None:
@@ -712,6 +1173,12 @@ class EveReplayWorker:
         if not capability.exact_model_attribution:
             raise EveRefusal("exact_model_revision_unverified")
         verify_bound(manifest, registration, scorer, cases, key)
+        # A scorer that fails its controls never produces a journaled verdict (OPE-573 F1).
+        if not scorer_selfcheck(scorer):
+            raise EveRefusal("scorer_selfcheck_failed")
+        attribution = scorer_attribution(scorer)
+        if attribution != (manifest.scorer_id, manifest.scorer_version, manifest.rubric_revision):
+            raise EveRefusal("scorer_identity_drift")
         if arm.decoding_digest != registration.decoding.digest:
             raise EveRefusal("decoding_drift")
         if inference.served_revision != arm.served_revision:
@@ -729,8 +1196,10 @@ class EveReplayWorker:
         run_id = run_id_for(manifest, arm)
         done = self.journal.arm(run_id)
         if done is not None:
+            _require_sound(manifest, done)
             self._emit(key, f"arm_replay_reused arm={arm.arm_id} run={run_id[7:23]}")
             return done
+        run_key = self.keys.key_for(run_id)
 
         by_id = {c.case_id: c for c in cases}
         requests, retrieval = [], {}
@@ -743,7 +1212,7 @@ class EveReplayWorker:
         check_egress(key, "request", [r.as_mapping() for r in requests])
 
         try:
-            outputs = inference.generate(arm, tuple(requests))
+            outputs = _checked_outputs(inference.generate(arm, tuple(requests)))
         except OSError:
             raise EveRefusal("inference_unavailable") from None
         requested = {r.case_id for r in requests}
@@ -755,17 +1224,24 @@ class EveReplayWorker:
         rows = []
         for case_id in manifest.eligible_case_ids:
             output = output_by_id.get(case_id)
+            # Captured before scoring: the commitment is over exactly what the scorer was handed.
+            committed_output = _output_message(output)
             case = EveCase(case_id, by_id[case_id].family_id, "", request_by_id[case_id].context)
-            verdict = scorer.score(case, key.entry(case_id), output)
+            verdict = Verdict(scorer.score(case, key.entry(case_id), output))
+            ref = _ref(manifest, case_id)
+            answered = output is not None and not output.abstained and output.answer is not None
+            fields = [ref, verdict.value, answered, retrieval[case_id], *attribution]
             rows.append(
                 ScoredRow(
-                    _ref(manifest, case_id),
+                    ref,
                     verdict,
-                    output is not None and not output.abstained and output.answer is not None,
+                    answered,
                     retrieval[case_id],
+                    *attribution,
+                    _commit(run_key, run_id, fields, committed_output),
                 )
             )
-        record = ArmRecord(arm, tuple(rows))
+        record = ArmRecord(arm, tuple(rows), ScorerRecord(*attribution, True))
         check_egress(key, "journal", record.document())
         stored = self.journal.put_arm(run_id, manifest.digest, record)
         self._emit(key, f"arm_replayed arm={arm.arm_id} run={run_id[7:23]} cases={len(rows)}")
@@ -863,22 +1339,44 @@ def build_result(
     journal: ReplayJournal,
     key: AnswerKey,
 ) -> dict[str, Any]:
-    """Recomputable versioned result. Counts only; no per-case answer or question text.
+    """Versioned result. Counts only; no per-case answer, question text or commitment.
 
     The scorer self-check is run here, never accepted from the caller, and every arm must be the
     record the replay worker journaled for this manifest, so a hand-built arm cannot be scored.
+    Every arm and verdict row must be attributed to the scorer id, version and rubric the manifest
+    froze, and every arm must record that its replay ran under a passing self-check; the self-check
+    of the ``scorer`` passed here is an additional gate and never stands in for that record. Every
+    arm must hold exactly one row per eligible case, in the manifest's order; a duplicated, missing,
+    extra or reordered row is refused (``journal_rows_incomplete``), so no count can include a case
+    twice or omit one. Its aggregation can be re-derived from the journal by ``eve_aggregate``;
+    nothing here re-scores a verdict, because the worker journal holds no candidate output.
     """
     if not arms or any(k != r.spec.arm_id or k not in ARMS for k, r in arms.items()):
         raise EveRefusal("invalid_arm_spec")
-    if (scorer.version, scorer.rubric_revision) != (
-        manifest.scorer_version,
-        manifest.rubric_revision,
-    ):
-        raise EveRefusal("scorer_version_drift")
+    # Attribution is read first, defensively: a staging scorer with a missing, empty or non-string
+    # id, version or rubric is unattributed (not stageable), never a raw AttributeError. Only a
+    # fully declared identity is compared with the manifest, version and rubric first.
+    try:
+        staging_attribution: tuple[str, str, str] | None = scorer_attribution(scorer)
+    except EveRefusal:
+        staging_attribution = None
+    if staging_attribution is not None:
+        if staging_attribution[1:] != (manifest.scorer_version, manifest.rubric_revision):
+            raise EveRefusal("scorer_version_drift")
+        if staging_attribution[0] != manifest.scorer_id:
+            raise EveRefusal("scorer_identity_drift")
     for record in arms.values():
-        if journal.arm(run_id_for(manifest, record.spec)) != record:
+        journaled = journal.arm(run_id_for(manifest, record.spec))
+        if journaled is not None:
+            _require_sound(manifest, journaled)
+        if journaled != record:
             raise EveRefusal("arm_not_journaled")
-    scorer_selfcheck_passed = scorer_selfcheck(scorer)
+    replay_selfcheck_passed = all(
+        r.scorer is not None and r.scorer.selfcheck_passed is True for r in arms.values()
+    )
+    # The staging scorer must be the scorer the manifest names, as replay requires. A declared
+    # other identity was refused above; an undeclared one cannot pass the staging gate.
+    staging_selfcheck_passed = staging_attribution is not None and scorer_selfcheck(scorer)
     treatment = arms.get("candidate") or arms.get("simple_repair")
     control = arms.get("simple_repair") if "candidate" in arms else arms.get("baseline")
     if "candidate" in arms and control is None:
@@ -902,9 +1400,12 @@ def build_result(
         "manifest_digest": manifest.digest,
         "registration_identity": manifest.registration_identity,
         "scorer": {
+            "scorer_id": manifest.scorer_id,
             "version": manifest.scorer_version,
             "rubric_revision": manifest.rubric_revision,
-            "selfcheck_passed": scorer_selfcheck_passed,
+            "replay_selfcheck_passed": replay_selfcheck_passed,
+            "staging_selfcheck_passed": staging_selfcheck_passed,
+            "selfcheck_passed": replay_selfcheck_passed and staging_selfcheck_passed,
         },
         "evidence_tier": TIER,
         "claim_scope": "implementation_only",
@@ -924,41 +1425,6 @@ def build_result(
     }
     check_egress(key, "result", body)
     return {"body": body, "result_digest": digest(body)}
-
-
-@dataclass(frozen=True)
-class StageDecision:
-    stageable: bool
-    reasons: tuple[str, ...]
-
-
-def stage_decision(result: Mapping[str, Any], *, recomputed_digest: str) -> StageDecision:
-    """Whether a result may be offered for Slack review. It is never a release authorization.
-
-    ``recomputed_digest`` must come from rebuilding the result with a fresh journal and scorer;
-    a digest alone proves only that the body is self-consistent, so the body's tier, scope and
-    authorization flags are checked as well.
-    """
-    try:
-        body = result["body"]
-        reasons = []
-        if not body["scorer"]["selfcheck_passed"]:
-            reasons.append("scorer_selfcheck_failed")
-        if result["result_digest"] != digest(body) or recomputed_digest != result["result_digest"]:
-            reasons.append("recompute_mismatch")
-        if (
-            body["schema_version"] != VERSION
-            or body["evidence_tier"] != TIER
-            or body["claim_scope"] != "implementation_only"
-        ):
-            reasons.append("result_not_generated_implementation_only")
-        if body["fit_authorized"] is not False or body["release_authorized"] is not False:
-            reasons.append("authorization_flag_set")
-        if body["improvement_claim"] != "observed_net_fixes":
-            reasons.append(f"improvement_{body['improvement_claim']}")
-    except (KeyError, TypeError):
-        return StageDecision(False, ("result_malformed",))
-    return StageDecision(not reasons, tuple(reasons))
 
 
 def guard_fit_payload(key: AnswerKey, plan: FitPlan) -> None:

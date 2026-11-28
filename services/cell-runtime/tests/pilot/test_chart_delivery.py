@@ -77,6 +77,21 @@ def test_named_reviewer_gets_one_aggregate_ephemeral_without_changing_the_run(
             in payload["text"]
         )
         assert f"{wrong}/{len(known)} verified automated decisions wrong" in payload["text"]
+        if arm == "incumbent":
+            continue
+        pairs = frozen["paired_cases"]
+        common = [r for r in known if r["incumbent"]["status"] == "automatic"]
+        incumbent_only = sum(
+            r["incumbent"]["status"] == "automatic" and r[arm]["status"] != "automatic"
+            for r in pairs
+        )
+        arm_only = sum(r["incumbent"]["status"] != "automatic" for r in rows)
+        prefix = f"Current vs. {label.lower()}: "
+        assert (
+            f"{prefix}{len(common)} comparable cases, {len(pairs) - len(common)} excluded. "
+            f"Only current automated: {incumbent_only}. Only {label.lower()} automated: {arm_only}."
+            in payload["text"]
+        )
     for excluded in (
         "generated-repair",
         "case_id",

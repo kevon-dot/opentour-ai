@@ -141,6 +141,272 @@ def test_signed_preview_retry_roles_and_real_worker(tmp_path):
     assert s.service.reconcile(first, actor=s.owner)["withdrawn"] is True
 
 
+def test_owner_cli_uses_displayed_revision_for_signed_lifecycle(tmp_path):
+    s = Setup(tmp_path)
+    c = s.customer
+    workflow = s.policy["mandate"]["workflow"]
+    archive = Path(settings.__file__).parents[2]
+    entry = (
+        [sys.executable, "-I", "-S", "-B", str(archive), "owner-settings"]
+        if archive.suffix == ".pyz" and archive.is_file()
+        else [sys.executable, "-m", "opentour_cell.pilot.owner_settings"]
+    )
+    common = [
+        "--directory",
+        str(c.owner),
+        "--organization",
+        c.org,
+        "--engagement",
+        c.eng,
+        "--authority",
+        str(s.authority),
+    ]
+    policy_file = c.owner / "generated-owner-policy.json"
+    packet_file = c.owner / "generated-owner-packet.json"
+
+    def cli(command, *args, actor=s.owner, allowed=True):
+        result = subprocess.run(
+            [*entry, command, *common, "--actor", actor, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if allowed:
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout)
+        assert result.returncode == 2 and not result.stdout
+        return None
+
+    def prepare(base, *, action="save", policy=None):
+        args = ["--expected-revision", base, "--action", action]
+        if policy is not None:
+            save(policy_file, policy)
+            args += ["--input", str(policy_file)]
+        return cli("preview", *args)
+
+    def approve(preview):
+        save(packet_file, s.sign(preview["claim"]))
+        return cli("save", "--input", str(packet_file))
+
+    status = cli("status", "--workflow", workflow)
+    assert status["revision"] is None and status["state"] == "unconfigured"
+    first_preview = prepare("initial", policy=s.policy)
+    assert first_preview["claim"]["prior_revision"] is None
+    assert not any(p["method"] == "resources/read" for p in s.protocol())
+    before = s.protocol()
+    save(packet_file, {"claim": first_preview["claim"]})
+    cli("save", "--input", str(packet_file), allowed=False)
+    assert s.protocol() == before
+    first = approve(first_preview)
+    assert cli("save", "--input", str(packet_file)) == first
+    assert cli("status", "--workflow", workflow, actor=s.reviewer)["budget"] is None
+
+    saved = c.owner / "generated-owner-receipt.json"
+    save(saved, first)
+    worker = cli("worker", "--input", str(saved), actor=s.operator)
+    assert autonomous_cycle.cycle_once(c.owner, c.org, worker["config"])["state"] == (
+        "pending_slack_review"
+    )
+    before = s.protocol()
+    for invalid in ("initial", "generated-invalid-revision"):
+        cli("preview", "--expected-revision", invalid, "--input", str(policy_file), allowed=False)
+    assert s.protocol() == before
+
+    next_policy = deepcopy(s.policy)
+    next_policy["mandate"].update(mandate_id="cli-renewed-settings", max_runs=1)
+    renewal = prepare(first["revision"], action="renew", policy=next_policy)
+    assert renewal["changed_fields"] == ["mandate_id", "max_runs"]
+    assert renewal["prior"]["revision"] == first["revision"]
+    renewed = approve(renewal)
+    status = cli("status", "--workflow", workflow, actor=s.operator)
+    assert status["revision"] == renewed["revision"]
+    assert status["budget"]["runs"] == {"limit": 1, "used": 1, "remaining": 0}
+    assert status["budget"]["monetary_usage"] == "unavailable"
+
+    before = s.protocol()
+    pause = approve(prepare(renewed["revision"], action="pause"))
+    assert cli("status", "--workflow", workflow)["state"] == "paused"
+    revoked = approve(prepare(pause["revision"], action="revoke"))
+    status = cli("status", "--workflow", workflow, actor=s.reviewer)
+    assert status["state"] == "revoked" and status["revision"] == revoked["revision"]
+    cli("worker", "--input", str(saved), actor=s.operator, allowed=False)
+    assert autonomous_cycle.cycle_once(c.owner, c.org, worker["config"])["state"] == "held"
+    assert s.protocol() == before
+
+
+def test_scoped_setup_status_is_read_only_and_rechecks_roles_after_restart(tmp_path):
+    s = Setup(tmp_path)
+    c = s.customer
+    workflow = s.policy["mandate"]["workflow"]
+    first = s.service.setup_readback(actor=s.owner, workflow=workflow)
+    assert first == {
+        "workflow": workflow,
+        "revision": None,
+        "mandate_revision": None,
+        "state": "unconfigured",
+        "may_preview": True,
+        "budget": None,
+    }
+    preview = s.service.preview(s.policy, actor=s.owner, expected_revision=first["revision"])
+    receipt = s.service.save(s.sign(preview["claim"]), actor=s.owner)
+    before = s.protocol()
+
+    def status(actor, selected):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "opentour_cell.pilot.owner_settings",
+                "status",
+                "--directory",
+                str(c.owner),
+                "--organization",
+                c.org,
+                "--engagement",
+                c.eng,
+                "--authority",
+                str(s.authority),
+                "--actor",
+                actor,
+                "--workflow",
+                selected,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    reviewer = status(s.reviewer, workflow)
+    assert reviewer.returncode == 0, reviewer.stderr
+    assert json.loads(reviewer.stdout) == {
+        **first,
+        "revision": receipt["revision"],
+        "mandate_revision": receipt["mandate_revision"],
+        "state": "active",
+        "may_preview": False,
+    }
+    operator = status(s.operator, workflow)
+    assert operator.returncode == 0, operator.stderr
+    money = json.loads(operator.stdout)["budget"]
+    assert money["currency"] == "USD"
+    assert money["monetary_limit_cents"] == 0 and money["monetary_usage"] == "unavailable"
+    denied = status(s.reviewer, "generated-different-workflow")
+    assert denied.returncode == 2 and not denied.stdout
+    save(s.authority, dict(read(s.authority), reviewers=["UOTHER"]))
+    denied = status(s.reviewer, workflow)
+    assert denied.returncode == 2 and not denied.stdout
+    held_status = s.service.setup_readback(actor=s.operator, workflow=workflow)
+    assert held_status["state"] == "authority_changed"
+    assert held_status["budget"] is None
+    assert s.protocol() == before
+    assert not list(c.owner.glob("settings-cycle-*.json"))
+
+
+def test_readback_open_cannot_initialize_settings_tables(tmp_path):
+    s = Setup(tmp_path)
+    c = s.customer
+    with c.ledger._db() as db:
+        db.execute("DROP TABLE owner_settings_heads")
+        db.execute("DROP TABLE owner_settings_revisions")
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_storage_uninitialized"):
+        settings.OwnerSettings.open_readback(c.owner, c.org, c.eng, authority_file=s.authority)
+    with c.ledger._db(write=False) as db:
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name LIKE 'owner_settings_%'"
+        ).fetchone()
+    assert s.protocol() == before
+
+
+def test_current_source_readback_checks_withdrawal_without_materializing_a_grant(tmp_path):
+    s = Setup(tmp_path)
+    receipt = s.apply()
+    workflow = s.policy["mandate"]["workflow"]
+    connection = read(s.customer.owner / s.policy["connection_file"])
+    source_owner = connection["scope"]["owner_attestation"]
+    marker = settings.source_intake._revocation(s.service.store, source_owner)
+    before = s.protocol()
+    with patch.object(
+        settings.workplace,
+        "_validated_grant",
+        side_effect=AssertionError("readback must not materialize a temporary grant"),
+    ):
+        assert s.service.setup_readback(actor=s.owner, workflow=workflow)["state"] == "active"
+        save(marker, {"kind": "generated-withdrawal-marker"})
+        held = s.service.setup_readback(actor=s.owner, workflow=workflow)
+    assert held["state"] == "held" and held["revision"] == receipt["revision"]
+    assert s.protocol() == before
+
+
+def test_independent_withdrawal_cannot_be_relabelled_by_a_pending_pause(tmp_path):
+    s = Setup(tmp_path)
+    receipt = s.apply()
+    pause = s.sign(s.preview(action="pause")["claim"])
+    s.customer.ledger.withdraw(receipt["mandate_id"], actor=s.owner)
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_mandate_already_withdrawn"):
+        s.service.save(pause, actor=s.owner)
+    workflow = s.policy["mandate"]["workflow"]
+    status = s.service.setup_readback(actor=s.reviewer, workflow=workflow)
+    assert status["state"] == "revoked" and status["revision"] == receipt["revision"]
+    assert s.protocol() == before
+
+
+def test_only_a_new_signed_revoke_changes_a_saved_pause_to_revoked(tmp_path):
+    s = Setup(tmp_path)
+    s.apply()
+    paused = s.apply(action="pause")
+    s.customer.ledger.withdraw(paused["mandate_id"], actor=s.owner)
+    workflow = s.policy["mandate"]["workflow"]
+    assert s.service.setup_readback(actor=s.reviewer, workflow=workflow)["state"] == "paused"
+    revoked = s.apply(action="revoke")
+    status = s.service.setup_readback(actor=s.reviewer, workflow=workflow)
+    assert status["state"] == "revoked" and status["revision"] == revoked["revision"]
+
+
+def test_preview_and_signed_save_refuse_outdated_and_cross_workflow_claims_without_io(tmp_path):
+    s = Setup(tmp_path)
+    first = s.apply()
+    successor = deepcopy(s.policy)
+    successor["mandate"]["mandate_id"] = "setup-successor"
+    foreign = deepcopy(successor)
+    foreign["mandate"]["workflow"] = "generated-foreign-workflow"
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_workflow_mismatch"):
+        s.service.preview(foreign, actor=s.owner, expected_revision=first["revision"])
+    with pytest.raises(settings.SettingsError, match="settings_revision_conflict"):
+        s.service.preview(successor, actor=s.owner, expected_revision=None)
+    assert s.protocol() == before
+    preview = s.service.preview(successor, actor=s.owner, expected_revision=first["revision"])
+    original = preview["claim"]
+    rogue = deepcopy(original)
+    rogue["policy"] = foreign
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_workflow_mismatch"):
+        s.service.save(s.sign(rogue), actor=s.owner)
+    assert s.protocol() == before
+    receipt = s.service.save(s.sign(original), actor=s.owner)
+    before = s.protocol()
+    stale = deepcopy(original)
+    stale["policy"]["mandate"]["mandate_id"] = "stale-successor"
+    with pytest.raises(settings.SettingsError, match="settings_revision_conflict"):
+        s.service.save(s.sign(stale), actor=s.owner)
+    assert s.protocol() == before
+    assert s.service.inspect(actor=s.owner)["current"] == receipt
+
+
+def test_unqualified_monetary_cap_is_refused_before_catalogue(tmp_path):
+    s = Setup(tmp_path)
+    baseline = s.apply()
+    policy = deepcopy(s.policy)
+    policy["mandate"].update(mandate_id="paid-successor", max_cost_cents=1)
+    before = s.protocol()
+    with pytest.raises(MandateError, match="invalid_mandate_budget"):
+        s.service.preview(policy, actor=s.owner, expected_revision=baseline["revision"])
+    assert s.service.inspect(actor=s.owner)["current"] == baseline
+    assert s.protocol() == before
+
+
 @pytest.mark.parametrize("actor", ["generated-worker", "UREVIEWER", "forged-owner"])
 def test_wrong_roles_cannot_preview_or_save_before_provider(tmp_path, actor):
     s = Setup(tmp_path)
@@ -241,6 +507,125 @@ def test_competing_saves_and_explicit_prior_preview_atomicity(tmp_path):
         assert db.execute("SELECT count(*) FROM owner_settings_revisions").fetchone()[0] == 2
 
 
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("unknown_term", "invalid_protected_terms"),
+        ("invalid_coverage", "invalid_operating_limits"),
+        ("malformed_terms", "invalid_protected_terms"),
+        ("duplicate_slices", "invalid_agreed_slice"),
+    ],
+)
+def test_invalid_operating_terms_cannot_replace_saved_policy(tmp_path, change, reason):
+    s = Setup(tmp_path)
+    first = s.apply()
+    policy = deepcopy(s.policy)
+    policy["mandate"]["mandate_id"] = "settings-invalid-terms"
+    # A real valid preview supplies the exact existing source/role bindings. The
+    # custodian signs the malformed candidate directly to exercise save as well.
+    claim = s.preview(policy)["claim"]
+    if change == "unknown_term":
+        policy["agreement"]["terms"]["unknown_term"] = "generated"
+    elif change == "invalid_coverage":
+        policy["agreement"]["terms"]["minimum_coverage_bps"] = 10001
+    elif change == "malformed_terms":
+        policy["agreement"]["terms"] = []
+    else:
+        policy["agreement"]["terms"]["critical_slices"] = ["generated", "generated"]
+    policy["mandate"]["agreement_revision"] = digest(policy["agreement"])
+    claim["policy"] = policy
+    packet = s.sign(claim)
+    before = s.protocol()
+
+    def counts():
+        with sqlite3.connect(s.customer.ledger.path) as db:
+            return tuple(
+                db.execute("SELECT count(*) FROM " + table).fetchone()[0]
+                for table in ("mandates", "renewals", "owner_settings_revisions", "reservations")
+            )
+
+    prior_counts = counts()
+    with pytest.raises(ValueError, match=reason):
+        s.preview(policy)
+    with pytest.raises(ValueError, match=reason):
+        s.service.save(packet, actor=s.owner)
+    assert s.protocol() == before
+    assert counts() == prior_counts
+    assert s.service.inspect(actor=s.owner)["current"] == first
+    assert not s.customer.ledger.inspect(first["mandate_id"])["withdrawn"]
+
+
+def test_valid_changed_operating_terms_reach_normal_worker(tmp_path):
+    s = Setup(tmp_path)
+    first = s.apply()
+    policy = deepcopy(s.policy)
+    policy["mandate"]["mandate_id"] = "settings-new-terms"
+    policy["agreement"]["terms"].update(
+        minimum_coverage_bps=0, error_ceiling_bps=10000, minimum_verified_cases=1
+    )
+    policy["mandate"]["agreement_revision"] = digest(policy["agreement"])
+    preview = s.preview(policy)
+    assert preview["prior"] == first
+    assert preview["claim"]["prior_revision"] == first["revision"]
+    second = s.service.save(s.sign(preview["claim"]), actor=s.owner)
+    assert second["policy"]["agreement"]["terms"] == policy["agreement"]["terms"]
+    assert s.customer.ledger.inspect(first["mandate_id"])["withdrawn"]
+    config = s.service.worker_config(second, actor=s.operator)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "opentour_cell.pilot.cycle_worker",
+            "--directory",
+            str(s.customer.owner),
+            "--organization",
+            s.customer.org,
+            "--config",
+            config["config_file"],
+            "--once",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert json.loads(proc.stdout)["state"] == "pending_slack_review"
+    assert any(p["method"] == "resources/read" for p in s.protocol())
+
+
+@pytest.mark.parametrize("exported", [False, True])
+def test_saved_legacy_terms_require_signed_repair_before_reexport(tmp_path, exported):
+    s = Setup(tmp_path)
+    policy = deepcopy(s.policy)
+    policy["agreement"]["terms"]["unknown_term"] = "generated"
+    policy["mandate"]["agreement_revision"] = digest(policy["agreement"])
+    # Reproduce the prior writer's missing terms validation while retaining real
+    # signature, source authority, durable save and worker export behavior.
+    with patch.object(
+        settings.comparison_plan, "_terms", return_value=policy["agreement"]["terms"]
+    ):
+        legacy = s.apply(policy)
+        old = s.service.worker_config(legacy, actor=s.operator) if exported else None
+    before = s.protocol()
+    with pytest.raises(ValueError, match="invalid_protected_terms"):
+        s.service.worker_config(legacy, actor=s.operator)
+    assert s.protocol() == before
+    assert s.service.inspect(actor=s.owner)["current"] == legacy
+    assert not s.customer.ledger.inspect(legacy["mandate_id"])["withdrawn"]
+    # Repair is an authorized successor, never an in-place rewrite of the receipt.
+    repaired_policy = deepcopy(s.policy)
+    repaired_policy["mandate"]["mandate_id"] = "settings-repaired-terms"
+    repaired = s.apply(repaired_policy, action="renew")
+    assert repaired["prior_revision"] == legacy["revision"]
+    assert s.customer.ledger.inspect(legacy["mandate_id"])["withdrawn"]
+    assert s.service.worker_config(repaired, actor=s.operator)["revision"] == repaired["revision"]
+    if old is not None:
+        before = s.protocol()
+        result = autonomous_cycle.cycle_once(s.customer.owner, s.customer.org, old["config"])
+        assert result["state"] == "held"
+        assert s.protocol() == before
+
+
 @pytest.mark.parametrize("action", ["pause", "revoke"])
 def test_pause_revoke_old_worker_and_stale_receipt_zero_reads(tmp_path, action):
     s = Setup(tmp_path)
@@ -251,6 +636,9 @@ def test_pause_revoke_old_worker_and_stale_receipt_zero_reads(tmp_path, action):
     assert receipt["prior_revision"] == first["revision"]
     assert receipt["prior_treatment"]["release"] == "denied"
     before = s.protocol()
+    projected = s.service.setup_readback(actor=s.reviewer, workflow=s.policy["mandate"]["workflow"])
+    assert projected["state"] == {"pause": "paused", "revoke": "revoked"}[action]
+    assert projected["revision"] == receipt["revision"] and projected["budget"] is None
     held = autonomous_cycle.cycle_once(s.customer.owner, s.customer.org, config["config"])
     assert held["state"] == "held"
     assert s.protocol() == before
@@ -269,6 +657,8 @@ def test_read_only_scope_never_starts_worker_and_unknown_fields_refused(tmp_path
     s.policy["mandate"]["mode"] = "manual"
     receipt = s.apply()
     before = s.protocol()
+    projected = s.service.setup_readback(actor=s.owner, workflow=s.policy["mandate"]["workflow"])
+    assert projected["state"] == "read_only" and projected["budget"]["fits"]["limit"] == 0
     with pytest.raises(MandateError, match="manual_learning_only"):
         s.service.worker_config(receipt, actor=s.operator)
     assert s.protocol() == before
@@ -479,6 +869,12 @@ def test_lowered_renewal_row_cap_stops_before_content_acquisition(tmp_path):
     now = s.customer.ledger.inspect(receipt["mandate_id"])
     assert now["runs"] == 0 and now["cumulative_runs"] == 1
     assert now["cumulative_rows"] == usage["cumulative_rows"]
+    before = s.protocol()
+    setup = s.service.setup_readback(actor=s.owner, workflow=p["mandate"]["workflow"])
+    assert setup["revision"] == receipt["revision"]
+    assert setup["budget"]["runs"] == {"limit": 1, "used": 1, "remaining": 0}
+    assert setup["budget"]["rows"]["used"] == usage["cumulative_rows"]
+    assert s.protocol() == before
 
 
 def test_renewal_fits_seconds_accounting_and_scope_isolation(tmp_path):

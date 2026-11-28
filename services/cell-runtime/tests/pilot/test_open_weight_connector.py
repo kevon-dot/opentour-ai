@@ -15,7 +15,7 @@ from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot import open_weight_connector as owc
 from opentour_cell.pilot import open_weight_reference as ref
 from opentour_cell.pilot.connector_conformance import ACTOR, CountingGuard, standard_grants
-from opentour_cell.pilot.connector_ext import Fenceable, UsageReporting, UsageSource
+from opentour_cell.pilot.connector_ext import CappedUsage, Fenceable, UsageReporting, UsageSource
 from opentour_cell.pilot.model_family import FamilyError, verify_model_directory
 
 ARCHITECTURES = ["generated-toy-linear", "generated-toy-normmlp"]
@@ -724,3 +724,377 @@ def test_a_corrupt_completed_event_makes_usage_unknown_instead_of_raising(
             event[field] = bad
     journal.write_text("".join(json.dumps(event) + "\n" for event in events))
     assert connector.usage(receipt) is None
+    assert connector.hold_reason(receipt) == "usage_unverifiable"
+
+
+# ---------------------------------------------------------------------------------------------
+# OPE-508 follow-up: the open-weight route adopts the managed route's usage-vs-cap hold.
+# W1 measured usage above the journaled cap is held ``over_cap``: no candidate, no replay, no
+#    promotion or serving, ``hold_reason`` reports it and ``settleable`` is False
+# W2 usage exactly at the cap is accepted and released
+# W3 missing or malformed journaled usage is held ``usage_unverifiable``
+# W4 a journaled cap that is missing or not a plain int is held ``cap_unverifiable``
+# W5 dispatch journals all four maxima and the currency; release compares to those
+# W6 ``hold_reason`` is None unless the job is COMPLETED, and checks the receipt
+# W7 an intent bound that is not exactly ``int`` (an ``int`` subclass, bool, float) is refused
+# ---------------------------------------------------------------------------------------------
+OW_MAXIMA = ("maximum_minor_units", "maximum_seconds", "maximum_rows", "maximum_steps")
+
+
+class SneakyInt(int):
+    """An ``int`` subclass. It serializes like the plain int, so it matches the intent digest."""
+
+
+class _ClockFreeRunner:
+    """The real subprocess runner, except that ``fit`` never consults the connector's clock.
+
+    ``_execute`` then reads the clock exactly three times (start, the stop check after the fit and
+    the measurement), so a scripted clock can make the measured wall time land where a test wants.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.profile = inner.profile
+
+    def installed_revision(self) -> str:
+        return str(self.inner.installed_revision())
+
+    def fit(self, rows: Any, steps: int, seconds: int, control: Any) -> owc.FitOutput:
+        return self.inner.fit(rows, steps, seconds, _Never())  # type: ignore[no-any-return]
+
+    def predict(self, artifact_dir: Path | None, inputs: Any) -> Any:
+        return self.inner.predict(artifact_dir, inputs)
+
+
+def _measured(
+    family: toy.Family, state: Path, key: str, seconds: float
+) -> tuple[owc.OpenWeightConnector, mc.FitIntent, mc.JobReceipt]:
+    """A real fit whose measured wall time is ``seconds`` (the deadline is never reached)."""
+    connector = family.connector(state)
+    connector.runner = _ClockFreeRunner(connector.runner)  # type: ignore[assignment]
+    ticks = iter([0.0, 0.0])
+    connector.clock = lambda: next(ticks, seconds)
+    intent = family.intent(key)
+    receipt = connector.submit(intent, connector.serialize_development(intent, toy.TRAIN))
+    connector.clock = time.time
+    return connector, intent, receipt
+
+
+def _journal_of(connector: owc.OpenWeightConnector) -> Path:
+    return next((connector.root / "jobs").glob("*/journal.jsonl"))
+
+
+def _rewrite(connector: owc.OpenWeightConnector, edit: Any) -> None:
+    journal = _journal_of(connector)
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    for event in events:
+        edit(event)
+    journal.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+
+def _hand_built(connector: owc.OpenWeightConnector, receipt: mc.JobReceipt) -> mc.Candidate:
+    """What ``collect`` would return, built from the journal without calling ``collect``."""
+    events = [json.loads(line) for line in _journal_of(connector).read_text().splitlines()]
+    artifact = next(e["artifact_sha256"] for e in events if e["event"] == "completed")
+    return mc.Candidate(
+        receipt.intent,
+        receipt.job_ref,
+        receipt.intent.binding.immutable_revision,
+        artifact,
+        "simulated:hand-built",
+    )
+
+
+def _assert_ow_held(
+    family: toy.Family,
+    connector: owc.OpenWeightConnector,
+    receipt: mc.JobReceipt,
+    reason: str,
+) -> None:
+    exact = f"^{reason}$"
+    assert receipt.state is mc.JobState.COMPLETED  # the receipt stays the job's own state
+    # The evidence ref hashes the journal bytes, so a rewritten journal needs a fresh receipt.
+    receipt = connector.status(receipt)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(receipt) == reason
+    with pytest.raises(ValueError, match=exact):
+        connector.collect(receipt)
+    pre = mc.Preflight(connector, standard_grants(family.binding, receipt.intent))
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        pre.collect_candidate(ACTOR, receipt)
+    candidate = _hand_built(connector, receipt)
+    with pytest.raises(ValueError, match=exact):
+        connector.predict_for_replay(candidate, toy.EVAL_INPUTS)
+    with pytest.raises(ValueError, match=exact):
+        connector.promote(candidate)
+    assert connector.serving() == "base"
+    # A target promoted before the hold existed is never served either.
+    owc._append(
+        connector.root / "serving.jsonl",
+        {
+            "event": "promote",
+            "artifact_sha256": candidate.artifact_or_serving_revision,
+            "job_ref": candidate.job_ref,
+        },
+    )
+    with pytest.raises(ValueError, match=exact):
+        connector.serve(toy.EVAL_INPUTS)
+    usage = connector.usage(receipt)
+    if reason == "usage_unverifiable":
+        assert usage is None
+    else:
+        assert isinstance(usage, CappedUsage) and usage.settleable is False
+        assert usage.cap_status == ("over_cap" if reason == "over_cap" else "cap_unknown")
+    # A restart replays the hold from the journal alone.
+    assert family.connector(connector.root).hold_reason(receipt) == reason
+
+
+def _assert_ow_released(
+    family: toy.Family, connector: owc.OpenWeightConnector, receipt: mc.JobReceipt
+) -> None:
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(receipt) is None
+    pre = mc.Preflight(connector, standard_grants(family.binding, receipt.intent))
+    candidate = pre.collect_candidate(ACTOR, receipt)
+    assert candidate == connector.collect(receipt)
+    assert connector.predict_for_replay(candidate, toy.EVAL_INPUTS)
+    connector.promote(candidate)
+    assert connector.serving() == candidate.artifact_or_serving_revision
+    assert connector.serve(toy.EVAL_INPUTS)
+    usage = connector.usage(receipt)
+    assert isinstance(usage, CappedUsage) and usage.settleable is True
+    assert usage.cap_status == "within_cap"
+
+
+@pytest.mark.parametrize("seconds", [61.0, 10_000.0])
+def test_w1_measured_usage_above_the_journaled_cap_is_held(
+    family: toy.Family, tmp_path: Path, seconds: float
+) -> None:
+    connector, _, receipt = _measured(family, tmp_path / "state", "generated-over", seconds)
+    _assert_ow_held(family, connector, receipt, "over_cap")
+    usage = connector.usage(receipt)
+    assert usage is not None and usage.seconds == int(seconds)  # the real figure, never clamped
+
+
+def test_w2_usage_exactly_at_the_cap_is_released(family: toy.Family, tmp_path: Path) -> None:
+    connector, intent, receipt = _measured(family, tmp_path / "state", "generated-at-cap", 60.0)
+    assert intent.bound.maximum_seconds == 60 and intent.bound.maximum_minor_units == 0
+    _assert_ow_released(family, connector, receipt)
+    usage = connector.usage(receipt)
+    assert usage is not None and (usage.seconds, usage.incurred_minor_units) == (60, 0)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("seconds", None),
+        ("rows", -1),
+        ("steps", 1.5),
+        ("minor_units", True),
+        ("minor_units", "drop"),
+        ("currency", "drop"),
+        ("currency", ""),
+    ],
+)
+def test_w3_missing_or_malformed_journaled_usage_is_usage_unverifiable(
+    family: toy.Family, tmp_path: Path, field: str, value: object
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    _, _, receipt = dispatch(family, connector, "generated-unverifiable")
+
+    def corrupt(event: dict[str, Any]) -> None:
+        if event["event"] == "completed":
+            if value == "drop":
+                event.pop(field, None)
+            else:
+                event[field] = value
+
+    _rewrite(connector, corrupt)
+    _assert_ow_held(family, connector, receipt, "usage_unverifiable")
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("currency", "drop"),
+        ("maximum_minor_units", "drop"),
+        ("maximum_seconds", "drop"),
+        ("maximum_rows", "drop"),
+        ("maximum_steps", "drop"),
+        ("maximum_steps", True),
+        ("maximum_seconds", 60.0),
+        ("maximum_rows", -1),
+        ("currency", "EUR"),
+    ],
+)
+def test_w4_unusable_journaled_cap_is_cap_unverifiable(
+    family: toy.Family, tmp_path: Path, field: str, value: object
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    _, _, receipt = dispatch(family, connector, "generated-cap-unverifiable")
+
+    def corrupt(event: dict[str, Any]) -> None:
+        if event["event"] == "accepted":
+            if value == "drop":
+                event.pop(field, None)
+            else:
+                event[field] = value
+
+    _rewrite(connector, corrupt)
+    _assert_ow_held(family, connector, receipt, "cap_unverifiable")
+
+
+def test_w5_dispatch_journals_all_four_maxima_and_release_compares_to_them(
+    family: toy.Family, tmp_path: Path
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    _, intent, receipt = dispatch(family, connector, "generated-journaled-maxima")
+    first = json.loads(_journal_of(connector).read_text().splitlines()[0])
+    assert first["event"] == "accepted"
+    assert {name: first.get(name) for name in ("currency", *OW_MAXIMA)} == {
+        "currency": "USD",
+        "maximum_minor_units": 0,
+        "maximum_seconds": 60,
+        "maximum_rows": 16,
+        "maximum_steps": 64,
+    }
+    assert connector.hold_reason(receipt) is None
+    steps = family.profile.resource.max_steps
+
+    def lower(event: dict[str, Any]) -> None:
+        if event["event"] == "accepted":
+            event["maximum_steps"] = steps - 1  # the caller's bound (64) still allows 40 steps
+
+    _rewrite(connector, lower)
+    assert intent.bound.maximum_steps >= steps
+    _assert_ow_held(family, connector, receipt, "over_cap")
+
+
+def test_w6_hold_reason_is_none_unless_completed_and_checks_the_receipt(
+    family: toy.Family, tmp_path: Path
+) -> None:
+    ticks = iter(range(0, 10_000, 100))
+    connector = family.connector(tmp_path / "failed", slow=True)
+    connector.clock = lambda: float(next(ticks))
+    intent = family.intent("generated-failed-hold")
+    failed = connector.submit(intent, connector.serialize_development(intent, toy.TRAIN))
+    assert failed.state is mc.JobState.FAILED and connector.hold_reason(failed) is None
+    done_connector = family.connector(tmp_path / "done")
+    _, _, done = dispatch(family, done_connector, "generated-done-hold")
+    other = replace(done, intent=family.intent("generated-other-intent"))
+    with pytest.raises(owc.ConnectorRefusal, match="IDEMPOTENCY_CONFLICT"):
+        done_connector.hold_reason(other)
+    with pytest.raises(ValueError, match="JOB_REFERENCE_UNKNOWN"):
+        done_connector.hold_reason(replace(done, job_ref="simulated:other"))
+
+
+def test_w6_canceled_job_reports_no_hold(family: toy.Family, tmp_path: Path) -> None:
+    connector = family.connector(tmp_path / "state", slow=True)
+    intent = family.intent("generated-canceled-hold")
+    pre = mc.Preflight(connector, standard_grants(family.binding, intent))
+    thread = threading.Thread(
+        target=lambda: pre.submit_reserved_fit(
+            ACTOR, intent, toy.TRAIN, reservation_guard=CountingGuard()
+        )
+    )
+    thread.start()
+    live = None
+    deadline = time.monotonic() + 10
+    while live is None and time.monotonic() < deadline:
+        live = connector.lookup(intent)
+        time.sleep(0.02)
+    assert live is not None
+    canceled = connector.cancel(live)
+    thread.join(timeout=30)
+    assert canceled.state is mc.JobState.CANCELED and connector.hold_reason(canceled) is None
+
+
+@pytest.mark.parametrize("limit", OW_MAXIMA)
+@pytest.mark.parametrize("kind", ["subclass", "bool", "float"])
+def test_w7_intent_bound_that_is_not_exactly_int_is_refused_before_dispatch(
+    family: toy.Family, tmp_path: Path, limit: str, kind: str
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    intent = family.intent("generated-sneaky")
+    value = getattr(intent.bound, limit)
+    forged_value = {"subclass": SneakyInt(value), "bool": bool(value), "float": float(value)}[kind]
+    forged = replace(intent, bound=replace(intent.bound, **{limit: forged_value}))
+    payload = connector.serialize_development(forged, toy.TRAIN)
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        connector.submit(forged, payload)
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        owc.intent_digest(forged)
+    assert not list((connector.root / "jobs").iterdir())
+
+
+@pytest.mark.parametrize("limit", OW_MAXIMA)
+def test_w7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(
+    family: toy.Family, tmp_path: Path, limit: str
+) -> None:
+    connector, intent, receipt = _measured(family, tmp_path / "state", "generated-l1", 61.0)
+    sneaky = replace(
+        intent, bound=replace(intent.bound, **{limit: SneakyInt(getattr(intent.bound, limit))})
+    )
+    forged = replace(receipt, intent=sneaky)
+    for call in (
+        lambda: connector.hold_reason(forged),
+        lambda: connector.status(forged),
+        lambda: connector.collect(forged),
+        lambda: connector.lookup(sneaky),
+    ):
+        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+            call()
+    assert connector.usage(forged) is None  # usage reports an unusable receipt as unknown
+    assert connector.hold_reason(receipt) == "over_cap"
+
+
+# Review of #241. F3 (owner-delegate decision: round up): measured seconds are rounded up, so any
+# fraction of a second over the cap is ``over_cap``. F4 (owner-delegate decision: refuse before
+# spend): a negative maximum or a currency that is not an ISO-4217-shaped code is refused before
+# anything is journaled or run.
+@pytest.mark.parametrize("seconds", [60.001, 60.5, 60.999])
+def test_w8_a_fraction_of_a_second_over_the_cap_is_over_cap(
+    family: toy.Family, tmp_path: Path, seconds: float
+) -> None:
+    connector, _, receipt = _measured(family, tmp_path / "state", "generated-fraction", seconds)
+    _assert_ow_held(family, connector, receipt, "over_cap")
+    usage = connector.usage(receipt)
+    assert usage is not None and usage.seconds == 61  # rounded up, never down
+
+
+@pytest.mark.parametrize("seconds", [59.001, 59.999, 60.0])
+def test_w8_measured_seconds_up_to_the_cap_are_within(
+    family: toy.Family, tmp_path: Path, seconds: float
+) -> None:
+    connector, _, receipt = _measured(family, tmp_path / "state", "generated-within", seconds)
+    _assert_ow_released(family, connector, receipt)
+    usage = connector.usage(receipt)
+    assert usage is not None and usage.seconds == 60
+
+
+@pytest.mark.parametrize("limit", OW_MAXIMA)
+def test_w9_negative_intent_bound_is_refused_before_dispatch(
+    family: toy.Family, tmp_path: Path, limit: str
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    intent = family.intent("generated-negative")
+    forged = replace(intent, bound=replace(intent.bound, **{limit: -1}))
+    payload = connector.serialize_development(forged, toy.TRAIN)
+    with pytest.raises(ValueError, match="^fit_bound_negative$"):
+        connector.submit(forged, payload)
+    assert not list((connector.root / "jobs").iterdir())
+
+
+@pytest.mark.parametrize("currency", ["", "usd", "US", "USDX", None])
+def test_w9_invalid_intent_currency_is_refused_before_dispatch(
+    family: toy.Family, tmp_path: Path, currency: object
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    intent = family.intent("generated-currency")
+    forged = replace(intent, bound=replace(intent.bound, currency=currency))
+    payload = connector.serialize_development(forged, toy.TRAIN)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        connector.submit(forged, payload)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        owc.intent_digest(forged)
+    assert not list((connector.root / "jobs").iterdir())

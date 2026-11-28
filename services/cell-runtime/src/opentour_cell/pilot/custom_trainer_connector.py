@@ -17,13 +17,29 @@ before any call to the trainer, the trainer acknowledgement, cancel intent befor
 terminal state, collection and scope fences. Terminal state is final: a late callback or poll for a
 settled job changes nothing. A job whose submit outcome is unconfirmed is never resent.
 
+Usage-vs-cap hold (OPE-508 decision, shared with the managed and open-weight routes through
+``connector_ext.usage_hold``): the intent record journals the intent's currency and all four
+maxima, and the terminal record journals the trainer-reported usage when it is well formed. A job
+the trainer reports COMPLETED keeps that state and is released only when its journaled usage is
+verifiably within the journaled cap (usage exactly at a maximum is accepted). Otherwise it is held
+as ``over_cap``, ``usage_unverifiable`` (including a trainer that reported no usage at all) or
+``cap_unverifiable``: ``collect`` fetches no result and builds no candidate, ``predict_for_replay``
+refuses it, ``hold_reason`` reports the reason (``None`` unless the job is COMPLETED) and
+``usage().settleable`` is False. This route has no ``handoff_reference``; ``collect`` and replay
+are where its result is released. A job still running whose reported usage is not verifiably
+within the cap is stopped, as before. An intent bound whose maxima are not exactly ``int`` is
+refused before anything is journaled and in every receipt.
+
 Simulated: tests drive this module with a generated sentinel trainer written independently of it
 (``reference_customer_trainer``) and with fault-injecting wrappers. Credentials are generated
 placeholders resolved server-side and never logged or placed in errors.
 Not proven: no real customer trainer, GPU, paid compute, provider or real credential is touched.
 Tests prove software behavior only and establish no provider or customer evidence. Passing here
 yields ``EvidenceTier.FIXTURE`` at most (see ``integration_tier``); real-trainer qualification and
-customer witnessing are unsatisfied external gates.
+customer witnessing are unsatisfied external gates. ``CUSTOMER_WITNESSED`` is unreachable from
+production code: ``classify_integration`` and ``integration_tier`` accept no witness verifier until
+the OPE-566 ``PilotVerifier`` lands and is wired as the only accepted verifier (OPE-582 keys
+pending), so a well-formed, bound customer witness classifies as ``SOFTWARE_QUALIFIED``.
 """
 
 from __future__ import annotations
@@ -34,15 +50,32 @@ import hmac
 import json
 import math
 import os
+import re
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from opentour_cell.pilot import model_connector as mc
-from opentour_cell.pilot.connector_ext import EvidenceTier, FenceReceipt, Usage, UsageSource
+from opentour_cell.pilot.connector_ext import (
+    CAP_WITHIN,
+    EvidenceTier,
+    FenceReceipt,
+    JournaledCap,
+    Usage,
+    UsageFigures,
+    UsageSource,
+    cap_status,
+    capped_usage,
+    journal_bound,
+    require_exact_bound,
+    usage_document,
+    usage_hold,
+    usage_valid,
+)
 
 VERSION = "opentour.pilot.custom-trainer-connector.v1"
 ADAPTER_VERSION = "opentour.pilot.trainer-adapter.v1"
@@ -212,20 +245,258 @@ def check_compatibility(
     return verdict("compatible")
 
 
-def integration_tier(
-    trainer_origin: str, qualification_ref: str | None, customer_witness_ref: str | None
-) -> EvidenceTier:
-    """Classify an integration. A generated or simulated trainer is FIXTURE whatever refs claim."""
-    generated = trainer_origin.startswith(("generated-", "simulated:")) or trainer_origin.endswith(
-        ".invalid"
+# ---- Integration evidence tier ----
+#
+# The tiers are FIXTURE < SOFTWARE_QUALIFIED < CUSTOMER_WITNESSED. A caller can claim anything, so
+# every step up fails closed:
+#
+# * The trainer identity must be an exact ``str``: a subclass could override ``casefold``,
+#   ``strip`` or ``__eq__`` and so choose its own key. It is NFKC-normalised and casefolded, and an
+#   identity carrying invisible, control or non-ASCII characters is refused outright (FIXTURE), so
+#   case, fullwidth, zero-width and homoglyph variants of a fixture marker cannot pass.
+# * Owner ruling (OPE-566): a name CONTAINING a generated, simulated, reference, fixture or sentinel
+#   token, or naming a ``.invalid`` host (with or without a trailing dot, port or path), is FIXTURE
+#   whatever is supplied. The tokens are matched as substrings of the normalised key, so
+#   ``GeneratedTrainer``, ``fixtures-trainer`` and ``references-acme`` are all FIXTURE. This rule
+#   can only lower a tier, never raise one; a real customer trainer whose name contains a token
+#   must be renamed.
+# * SOFTWARE_QUALIFIED needs a non-blank qualification reference (still caller-asserted).
+# * CUSTOMER_WITNESSED needs software qualification plus a structured ``CustomerWitness`` record
+#   (never a bare string) under purpose ``opentour.pilot.customer-witness.v1``, bound to the exact
+#   engagement, trainer id, job id, artifact revision and observed outcome under classification,
+#   naming the ``customer_owner`` role, and authenticated by the OPE-566 ``PilotVerifier`` only
+#   (owner ruling). Only a successfully completed job can be witnessed (OPE-566 decision): the
+#   observed outcome must be exactly ``JobState.COMPLETED``'s value, so a failed, cancelled or
+#   unknown job is refused with ``customer_witness_outcome_refused``.
+# * ``PilotVerifier`` has not landed and the OPE-582 issuer keys do not exist, so no verifier is
+#   accepted anywhere. Two independent lines hold that:
+#   1. The rules (``_classify_integration``) call a verifier only when
+#      ``type(verifier) is _ACCEPTED_VERIFIER_TYPE``, and that constant is ``None`` in production.
+#      Every verifier is therefore refused with ``customer_witness_unverifiable`` and never called,
+#      whatever path reaches the rules: an alias, ``functools.partial``, a ``globals()`` lookup or
+#      an import from another module. Tests that need the CUSTOMER_WITNESSED positive case
+#      monkeypatch the constant to their test double's class.
+#   2. The production entry points, ``classify_integration`` and ``integration_tier``, drop any
+#      verifier a caller passes and call the rules with ``verifier=None``.
+#   CUSTOMER_WITNESSED is therefore unreachable from production code.
+#
+# Wiring rule for when ``PilotVerifier`` lands: ``_ACCEPTED_VERIFIER_TYPE`` becomes
+# ``PilotVerifier`` (an exact type match: never a subclass, never any object that merely matches
+# the structural ``CustomerWitnessVerifier`` shape), the entry points forward the verifier, and the
+# ``WitnessSubject`` is derived at wiring time from the connector's journal state for the settled
+# job (engagement, trainer id, job id, collected artifact revision, terminal outcome), never from a
+# caller argument.
+
+CUSTOMER_WITNESS_PURPOSE = "opentour.pilot.customer-witness.v1"
+WITNESS_ROLE_CUSTOMER_OWNER = "customer_owner"
+_WITNESS_ROLES = frozenset({WITNESS_ROLE_CUSTOMER_OWNER})
+# Any one of these tokens anywhere in a normalised trainer identity marks a fixture trainer.
+_FIXTURE_TOKENS = frozenset({"generated", "simulated", "reference", "fixture", "sentinel"})
+# ``.invalid`` as a whole host label: followed by the end, a dot, a port, a path or anything that
+# cannot continue a label.
+_INVALID_HOST = re.compile(r"\.invalid(?![a-z0-9-])")
+# The only witnessable outcome: a successful terminal finish. Compared as an exact ``str``.
+_WITNESSABLE_OUTCOME: str = mc.JobState.COMPLETED.value
+# The one verifier class whose instances the rules may call. ``None``: no verifier is accepted
+# until the OPE-566 ``PilotVerifier`` lands, when this becomes that class.
+_ACCEPTED_VERIFIER_TYPE: type[object] | None = None
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Co", "Cs", "Cn", "Zl", "Zp"})
+
+
+@dataclass(frozen=True)
+class WitnessSubject:
+    """The exact integration a witness must be about.
+
+    Today the classifying caller supplies it, which is harmless only because no production path
+    can reach CUSTOMER_WITNESSED. Once ``PilotVerifier`` is wired the subject comes from the
+    connector's journal, never from the caller.
+    """
+
+    engagement: str
+    trainer_id: str
+    job_id: str
+    artifact_revision: str
+    observed_outcome: str
+
+
+@dataclass(frozen=True)
+class CustomerWitness:
+    """A structured ``opentour.pilot.customer-witness.v1`` record. Unverified data.
+
+    ``attestation`` is the opaque issuer evidence (signatures under the OPE-566 profile: the
+    customer's anchored key, co-signed by a permitted operator custodian key) that only
+    ``PilotVerifier`` may check. This module never interprets it.
+    """
+
+    engagement: str
+    trainer_id: str
+    job_id: str
+    artifact_revision: str
+    observed_outcome: str
+    witness_role: str
+    purpose: str
+    attestation: str
+
+
+_WITNESS_BOUND_FIELDS = (
+    "engagement",
+    "trainer_id",
+    "job_id",
+    "artifact_revision",
+    "observed_outcome",
+)
+
+
+class CustomerWitnessVerifier(Protocol):
+    """The call shape a witness verifier is invoked with. It is not an acceptance criterion.
+
+    Matching this shape grants nothing: the production entry points accept no verifier, and once
+    ``PilotVerifier`` lands they accept that concrete class only. The verifier must return exactly
+    ``True`` only when ``witness`` is authenticated by its issuers and is about ``subject``; any
+    other return value, and any exception, is a refusal.
+    """
+
+    def verify_customer_witness(
+        self, witness: CustomerWitness, subject: WitnessSubject
+    ) -> bool: ...
+
+
+@dataclass(frozen=True)
+class IntegrationVerdict:
+    tier: EvidenceTier
+    reason: str
+
+
+def _invisible(text: str) -> bool:
+    return any(unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in text)
+
+
+def _trainer_key(origin: object) -> str | None:
+    """NFKC, casefold and strip a trainer identity; ``None`` when it is not a clean identity.
+
+    Only an exact ``str`` is accepted: a subclass's overridden methods would otherwise run here.
+    """
+    if type(origin) is not str or _invisible(origin):
+        return None
+    key = unicodedata.normalize("NFKC", origin).casefold().strip()
+    if not key or _invisible(key) or not all(" " <= ch <= "~" for ch in key):
+        return None
+    return key
+
+
+def is_fixture_trainer(origin: object) -> bool:
+    """True for a name containing a fixture token, a ``.invalid`` host, or an unclean identity."""
+    key = _trainer_key(origin)
+    if key is None:
+        return True
+    return any(token in key for token in _FIXTURE_TOKENS) or _INVALID_HOST.search(key) is not None
+
+
+def _clean_text(value: object) -> bool:
+    """An exact, non-blank ``str`` with no invisible characters. Subclasses are refused."""
+    return type(value) is str and not _invisible(value) and bool(value.strip())
+
+
+def classify_integration(
+    trainer_origin: str,
+    qualification_ref: str | None,
+    customer_witness: CustomerWitness | None = None,
+    *,
+    subject: WitnessSubject | None = None,
+    witness_verifier: object = None,
+) -> IntegrationVerdict:
+    """Classify an integration with a fixed reason. Fails closed at every step up the ladder.
+
+    The production entry point. It accepts no witness verifier until the OPE-566 ``PilotVerifier``
+    lands: ``witness_verifier`` is never called (and ``_ACCEPTED_VERIFIER_TYPE`` is ``None``), so
+    the highest reachable tier is SOFTWARE_QUALIFIED, with ``customer_witness_unverifiable`` for a
+    well-formed, bound witness.
+    """
+    del witness_verifier  # refused uncalled: no verifier is accepted before PilotVerifier
+    return _classify_integration(
+        trainer_origin, qualification_ref, customer_witness, subject=subject, verifier=None
     )
-    if generated or not trainer_origin:
-        return EvidenceTier.FIXTURE
-    if customer_witness_ref:
-        return EvidenceTier.CUSTOMER_WITNESSED
-    if qualification_ref:
-        return EvidenceTier.SOFTWARE_QUALIFIED
-    return EvidenceTier.FIXTURE
+
+
+def _classify_integration(
+    trainer_origin: object,
+    qualification_ref: object,
+    customer_witness: object,
+    *,
+    subject: object,
+    verifier: object,
+) -> IntegrationVerdict:
+    """The classification rules. Private: production passes ``verifier=None`` only.
+
+    Whoever calls this, a verifier is called only when its exact type is
+    ``_ACCEPTED_VERIFIER_TYPE``, which is ``None`` in production. A record built without its
+    attributes (``object.__new__``) is malformed, never an ``AttributeError``.
+    """
+    if _trainer_key(trainer_origin) is None:
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "trainer_identity_unverifiable")
+    if is_fixture_trainer(trainer_origin):
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "fixture_trainer")
+    if not _clean_text(qualification_ref):
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "software_qualification_absent")
+
+    def capped(reason: str) -> IntegrationVerdict:
+        return IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, reason)
+
+    witness = customer_witness
+    if witness is None:
+        return capped("customer_witness_absent")
+    if type(witness) is not CustomerWitness:
+        return capped("customer_witness_unstructured")
+    witness_fields = (*_WITNESS_BOUND_FIELDS, "witness_role", "purpose", "attestation")
+    claimed = {name: getattr(witness, name, None) for name in witness_fields}
+    if not all(_clean_text(value) for value in claimed.values()):
+        return capped("customer_witness_malformed")
+    if claimed["purpose"] != CUSTOMER_WITNESS_PURPOSE:
+        return capped("customer_witness_purpose_refused")
+    if claimed["witness_role"] not in _WITNESS_ROLES:
+        return capped("customer_witness_role_refused")
+    if type(subject) is not WitnessSubject:
+        return capped("customer_witness_binding_mismatch")
+    about = {name: getattr(subject, name, None) for name in _WITNESS_BOUND_FIELDS}
+    if not all(_clean_text(value) for value in about.values()):
+        return capped("customer_witness_subject_malformed")
+    if (
+        claimed["observed_outcome"] != _WITNESSABLE_OUTCOME
+        or about["observed_outcome"] != _WITNESSABLE_OUTCOME
+    ):
+        return capped("customer_witness_outcome_refused")
+    if about["trainer_id"] != trainer_origin or any(
+        claimed[name] != about[name] for name in _WITNESS_BOUND_FIELDS
+    ):
+        return capped("customer_witness_binding_mismatch")
+    accepted = _ACCEPTED_VERIFIER_TYPE
+    if verifier is None or accepted is None or type(verifier) is not accepted:
+        return capped("customer_witness_unverifiable")
+    try:
+        verified = cast(CustomerWitnessVerifier, verifier).verify_customer_witness(witness, subject)
+    except Exception:  # any verifier failure is a refusal, never "skip and continue"
+        return capped("customer_witness_refused")
+    if verified is not True:
+        return capped("customer_witness_refused")
+    return IntegrationVerdict(EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified")
+
+
+def integration_tier(
+    trainer_origin: str,
+    qualification_ref: str | None,
+    customer_witness: CustomerWitness | None = None,
+    *,
+    subject: WitnessSubject | None = None,
+    witness_verifier: object = None,
+) -> EvidenceTier:
+    """The tier alone; ``classify_integration`` gives the reason. Accepts no verifier either."""
+    return classify_integration(
+        trainer_origin,
+        qualification_ref,
+        customer_witness,
+        subject=subject,
+        witness_verifier=witness_verifier,
+    ).tier
 
 
 def sign_result(secret: str, result: TrainerResult | Mapping[str, str]) -> str:
@@ -300,7 +571,17 @@ def _token(intent: mc.FitIntent) -> str:
 
 
 def _intent_digest(intent: mc.FitIntent) -> str:
+    """The journal's binding to one intent. Refuses a bound whose maxima are not exactly ``int``."""
+    require_exact_bound(intent.bound)
     return hashlib.sha256(_canon(asdict(intent)).encode()).hexdigest()
+
+
+def _terminal_record(token: str, state: str, view: TrainerView) -> dict[str, Any]:
+    """A terminal state record, with the trainer's usage when it is well formed."""
+    record: dict[str, Any] = {"t": "state", "k": token, "state": state}
+    if view.usage is not None and usage_valid(view.usage):
+        record["usage"] = usage_document(view.usage)
+    return record
 
 
 @dataclass
@@ -314,6 +595,8 @@ class _Entry:
     cancel_requested: bool = False
     artifact_ref: str = ""
     artifact_digest: str = ""
+    cap: JournaledCap = field(default_factory=JournaledCap)  # journaled with the intent
+    usage: UsageFigures | None = None  # journaled with the terminal state
 
 
 @dataclass
@@ -347,12 +630,14 @@ class _Journal:
             if kind == "intent":
                 entry.tenant, entry.intent_digest = record["tenant"], record["digest"]
                 entry.credential_ref = record["credential_ref"]
+                entry.cap = JournaledCap.from_document(record.get("cap"))  # absent: unverifiable
             elif kind == "accepted" and not entry.job_id:
                 entry.job_id, entry.trainer_version = record["job_id"], record["trainer_version"]
             elif kind == "cancel_intent":
                 entry.cancel_requested = True
             elif kind == "state" and entry.state not in _TERMINAL:
                 entry.state = record["state"]
+                entry.usage = UsageFigures.from_document(record.get("usage"))
             elif kind == "collected" and not entry.artifact_ref:  # first collection is final
                 entry.artifact_ref, entry.artifact_digest = record["ref"], record["digest"]
         return fold
@@ -548,6 +833,7 @@ class CustomTrainerConnector:
 
     def submit(self, intent: mc.FitIntent, development: bytes) -> mc.JobReceipt:
         binding = intent.binding
+        cap = journal_bound(intent.bound)  # refuses a bound that is not exactly int, first
         self._open(binding)
         registration, credential, manifest = self._gate(binding)
         if hashlib.sha256(development).hexdigest() != intent.development_digest:
@@ -579,6 +865,7 @@ class CustomTrainerConnector:
                     "tenant": binding.tenant,
                     "credential_ref": binding.credential_ref,
                     "digest": digest,
+                    "cap": cap,  # the cap compared at release
                 }
             ]
 
@@ -647,9 +934,14 @@ class CustomTrainerConnector:
         if view.client_token != token or view.job_id != entry.job_id:
             raise ValueError("trainer_identity_mismatch")
         observed = view.state if view.state in _STATE else "unknown"
-        if view.usage is not None and not _within(view.usage, intent.bound):
-            # Over the bound, malformed, or in a foreign currency: the cap can no longer be
-            # verified. Stop the job. FAILED is claimed only once the trainer says it stopped:
+        if observed == "completed" and not entry.cancel_requested:
+            # A finished job keeps the trainer's own state and is journaled with its usage; the
+            # hold (``_hold``) decides at release whether its result may leave. It is not stopped:
+            # it has already stopped spending.
+            pass
+        elif view.usage is not None and cap_status(view.usage, entry.cap) != CAP_WITHIN:
+            # Over the journaled cap, malformed, or in a foreign currency: the cap can no longer
+            # be verified. Stop the job. FAILED is claimed only once the trainer says it stopped:
             # an unhonored stop leaves the job RUNNING (still spending) with durable cancel intent.
             self.journal.append({"t": "cancel_intent", "k": token})
             stopped = self.transport.request_cancel(self._credential(intent.binding), entry.job_id)
@@ -659,8 +951,37 @@ class CustomTrainerConnector:
         elif entry.cancel_requested and observed == "completed":
             observed = "canceled"  # a stopped job never publishes a winner
         if observed in _TERMINAL:
-            entry = self.journal.append({"t": "state", "k": token, "state": observed}).jobs[token]
+            entry = self.journal.append(_terminal_record(token, observed, view)).jobs[token]
         return self._receipt(intent, token, entry, live=observed)
+
+    @staticmethod
+    def _hold(entry: _Entry) -> str | None:
+        """The fixed hold reason of a COMPLETED job, from its journal alone; else ``None``."""
+        if entry.state != "completed" or entry.cancel_requested:
+            return None  # only a COMPLETED job has a result to hold
+        return usage_hold(entry.usage, entry.cap)
+
+    def _observed(self, job: mc.JobReceipt, token: str) -> _Entry:
+        """The journaled entry, after observing a job whose terminal state is not journaled yet.
+
+        ``lookup`` (and so ``Preflight.reconcile_fit``) can report a live COMPLETED state without
+        journaling it; observing as ``status`` does journals the terminal state with its usage, so
+        every path that reads a hold sees the same outcome.
+        """
+        entry = self._known(job, token)
+        if entry.state not in _TERMINAL:
+            self.status(job)
+            entry = self._known(job, token)
+        return entry
+
+    def hold_reason(self, job: mc.JobReceipt) -> str | None:
+        """The fixed reason a COMPLETED job's result is held, else ``None``.
+
+        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. A job whose terminal
+        state is not journaled yet is observed first (as ``status`` would); a settled job is read
+        from the journal only.
+        """
+        return self._hold(self._observed(job, _token(job.intent)))
 
     @staticmethod
     def _same_job(view: TrainerView, token: str, entry: _Entry) -> None:
@@ -740,7 +1061,7 @@ class CustomTrainerConnector:
             view.state
         )
         if outcome:
-            entry = self.journal.append({"t": "state", "k": token, "state": outcome}).jobs[token]
+            entry = self.journal.append(_terminal_record(token, outcome, view)).jobs[token]
         else:
             entry = self.journal.read().jobs[token]
         return self._receipt(intent, token, entry, live="running")
@@ -753,8 +1074,14 @@ class CustomTrainerConnector:
             raise ValueError("connector_fenced")
         if entry.cancel_requested or entry.state == "canceled":
             raise ValueError("job_canceled")
+        entry = self._observed(job, token)  # a receipt from ``lookup`` may not be journaled yet
+        if entry.cancel_requested or entry.state == "canceled":
+            raise ValueError("job_canceled")
         if entry.state != "completed":
             raise ValueError("job_not_completed")
+        hold = self._hold(entry)
+        if hold is not None:
+            raise ValueError(hold)  # no result is fetched and no candidate is built
         # Versions are re-verified with the trainer now, not taken from the result it hands back.
         _, credential, manifest = self._gate(intent.binding)
         if manifest.trainer_version != entry.trainer_version:
@@ -812,6 +1139,9 @@ class CustomTrainerConnector:
             raise ValueError("candidate_not_collected")
         if entry.cancel_requested or entry.state != "completed":
             raise ValueError("job_canceled")
+        hold = self._hold(entry)
+        if hold is not None:
+            raise ValueError(hold)  # a held job's artifact is never used
         registration, credential, _ = self._gate(binding)
         first = self.transport.predict(credential, entry.artifact_ref, inputs)
         second = self.transport.predict(credential, entry.artifact_ref, inputs)
@@ -824,22 +1154,22 @@ class CustomTrainerConnector:
     # ---- shared usage and fencing capabilities ----
 
     def usage(self, job: mc.JobReceipt) -> Usage | None:
-        """Trainer-reported usage. ``None`` means unknown, never zero."""
+        """Trainer-reported usage once the job is terminal. ``None`` means unknown, never zero.
+
+        The figure is the one journaled with the terminal state (a live job is first observed as
+        ``status`` would), compared to the journaled cap, so ``cap_status`` and ``settleable``
+        match the release rule. Malformed or missing usage is never journaled and reads ``None``.
+        """
         intent = job.intent
-        entry = self._known(job, _token(intent))
-        view = self.transport.poll(self._credential(intent.binding), entry.job_id)
-        if view.usage is None or view.job_id != entry.job_id or view.client_token != _token(intent):
+        token = _token(intent)
+        entry = self._known(job, token)
+        if entry.state not in _TERMINAL:
+            self.status(job)
+            entry = self._known(job, token)
+        reported = entry.usage
+        if entry.state not in _TERMINAL or reported is None or not usage_valid(reported):
             return None
-        reported = view.usage
-        return Usage(  # raises ValueError("INVALID_USAGE") on malformed trainer values
-            entry.job_id,
-            reported.currency,
-            reported.minor_units,
-            reported.seconds,
-            reported.rows,
-            reported.steps,
-            UsageSource.PROVIDER_REPORTED,
-        )
+        return capped_usage(entry.job_id, reported, entry.cap, UsageSource.PROVIDER_REPORTED)
 
     def fence(self, scope: str) -> FenceReceipt:
         """Durably block new submit/collect/replay for a tenant, then stop its live jobs.
@@ -872,7 +1202,7 @@ class CustomTrainerConnector:
                 unresolved += 1  # intent stays durable; collect is already refused
                 continue
             if view.state in ("canceled", "completed"):
-                self.journal.append({"t": "state", "k": token, "state": "canceled"})
+                self.journal.append(_terminal_record(token, "canceled", view))
                 canceled.append(job_id)
             else:
                 unresolved += 1
@@ -890,25 +1220,6 @@ class CustomTrainerConnector:
     def usable_target(self, binding: mc.ModelBinding) -> str:
         """The prior usable target. A fenced, canceled or uncollected job never replaces it."""
         return binding.immutable_revision
-
-
-def _within(usage: TrainerUsage, bound: mc.FitBound) -> bool:
-    """True only for well-formed usage in the bound's currency and inside every limit.
-
-    Malformed values (non-int, bool, negative, NaN) or a foreign currency return False: a cap
-    that cannot be verified is treated as breached, never as satisfied.
-    """
-    counts = (usage.minor_units, usage.seconds, usage.rows, usage.steps)
-    if any(type(count) is not int or count < 0 for count in counts):
-        return False
-    return (
-        isinstance(usage.currency, str)
-        and usage.currency == bound.currency
-        and usage.minor_units <= bound.maximum_minor_units
-        and usage.seconds <= bound.maximum_seconds
-        and usage.rows <= bound.maximum_rows
-        and usage.steps <= bound.maximum_steps
-    )
 
 
 def settle_callback(
