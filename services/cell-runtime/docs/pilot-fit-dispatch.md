@@ -29,6 +29,8 @@ Ordering rules:
 * A submission is resent only after the backend affirmatively confirms that no job exists. At most two attempts are made, under the same reservation and the same provider idempotency key (the execution ID).
 * A backend that cannot confirm absence (no OPE-506 connector can today) leaves the reservation held for a custodian.
 * `status` is read-only. It never calls the backend and never writes the ledger.
+* Withdrawal, changed evidence and a revoked training grant are detected on the next `advance`. While a fit is live, the worker should call `advance` on a short cadence.
+* The ledger's recheck runs inside its writer transaction and reads the mandate store, the routing store and the grant source. An OPE-442 ledger must not hold a lock those reads need.
 
 ## Policy field mapping (the reservation record)
 

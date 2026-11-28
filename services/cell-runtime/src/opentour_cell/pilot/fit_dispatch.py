@@ -471,6 +471,10 @@ class FitLedger(Protocol):
     to ``settled`` with the settlement, once; an identical repeat returns the entry and a
     different one raises ``settlement_conflict``. Any other exception means the ledger is
     unavailable, and the dispatcher then sends nothing.
+
+    ``recheck`` reads the mandate store, the routing store and the owner's grant source while
+    the ledger's writer transaction is open, so the ledger must not hold a lock those stores
+    need (keep it in its own file, or let those reads proceed beside its writer).
     """
 
     def reserve(
