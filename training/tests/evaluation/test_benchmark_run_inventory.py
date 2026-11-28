@@ -16,12 +16,15 @@ from typing import Any
 
 import pytest
 from ope526_run_inventory import POPULATIONS, build_document, git_measurement, write_document
+from opentour_training.evaluation.benchmark_audit.audit import audit
 from opentour_training.evaluation.benchmark_audit.model import FamilyRecord, Verdict
 from opentour_training.evaluation.benchmark_audit.run_inventory import (
     EVIDENCE_LABEL,
     GENERATED_KIND,
     ROW2_CODES,
     Measurement,
+    RunSpec,
+    inventory_row,
     select_branch,
 )
 
@@ -333,3 +336,19 @@ def test_git_measurement_reports_a_dirty_tree(tmp_path: Path, change: str) -> No
         (repo / "staged.txt").write_text("staged\n")
         _git(repo, "add", "staged.txt")
     assert git_measurement(repo, clock).dirty is True
+
+
+def test_claim_provenance_fields_are_copied_when_the_receipt_reports_them() -> None:
+    """PR #219 adds these claim fields; the row carries them as reported, never invents them."""
+    spec, build = POPULATIONS[0]
+    inputs = build()
+    receipt = audit(inputs)
+    plain = inventory_row(spec, inputs, receipt, MEASURED, elapsed_ms=0.0)
+    assert "caller_asserted_dependencies" not in plain["claims"]
+    reported = json.loads(json.dumps(receipt))
+    reported["claims"]["caller_asserted_dependencies"] = ["exposed_families"]
+    reported["claims"]["customer_accuracy_alert_blocked_by"] = ["evidence_origin_not_observed"]
+    row = inventory_row(spec, inputs, reported, MEASURED, elapsed_ms=0.0)
+    assert row["claims"]["caller_asserted_dependencies"] == ["exposed_families"]
+    assert row["claims"]["customer_accuracy_alert_blocked_by"] == ["evidence_origin_not_observed"]
+    assert isinstance(spec, RunSpec)

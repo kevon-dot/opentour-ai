@@ -494,6 +494,26 @@ def test_issuance_sealed_in_another_store_is_refused(tmp_path: Path) -> None:
     assert check(receipt, other).refusals == ()
 
 
+def test_a_whole_log_transplanted_into_another_store_is_refused(tmp_path: Path) -> None:
+    """The chain starts from a genesis bound to the store id, so a log cannot be moved."""
+    source = new_store(tmp_path, name="source")
+    rows = (
+        sqlite3.connect(source.directory / LEDGER_FILE)
+        .execute("SELECT seq, event, prev, head FROM events ORDER BY seq")
+        .fetchall()
+    )
+    target = WorkerAuditStore.create(tmp_path / "target")
+    db = sqlite3.connect(target.directory / LEDGER_FILE, isolation_level=None)
+    db.executemany("INSERT INTO events (seq, event, prev, head) VALUES (?, ?, ?, ?)", rows)
+    db.close()
+    last_seq, _, _, last_head = rows[-1]
+    target_id = worker_store.store_identity(target.directory)
+    worker_store._write_head(target.directory, target_id, last_seq, last_head)
+    assert target_id != source.store_id
+    with pytest.raises(worker_store.StoreError, match="audit_ledger_chain_broken"):
+        target.state()
+
+
 def test_resealed_forgery_is_still_held_because_the_issuer_is_unauthenticated(
     tmp_path: Path,
 ) -> None:
