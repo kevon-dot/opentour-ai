@@ -2554,6 +2554,7 @@ class Workbench:
         *,
         authorize: Callable[[], None] | None = None,
         queue_handle: str = "",
+        proof_workflow: str | None = None,
     ) -> None:
         target = self._readout(cfg, actor, ctx["job"])
         _check(target and target.revision == ctx["revision"])
@@ -2623,7 +2624,7 @@ class Workbench:
             and actor == target.audit.get("release_reviewer"),
             charts_allowed=charts and not queue_handle,
             benchmark_allowed=named_reviewer,
-            workflow=cfg.workflow_label,
+            workflow=cfg.workflow_label if proof_workflow is None else proof_workflow,
         )
         proof = self._show(
             view,
@@ -2814,6 +2815,21 @@ class Workbench:
             return {}, workflow
 
         audit, workflow = authorized_proof()
+
+        def authorize_current() -> None:
+            _check(authorized_proof() == (audit, workflow))
+
+        if action == "ot_evidence":
+            self._evidence(
+                cfg,
+                actor,
+                view,
+                ctx,
+                old_hash,
+                authorize=authorize_current,
+                proof_workflow=workflow or "Workflow unavailable",
+            )
+            return
         token = self.journal.context(actor, cfg.channel, view, "bench_proof", ctx["job"], value)
         self._show(
             view,
@@ -2822,7 +2838,7 @@ class Workbench:
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
-            authorize=lambda: _check(authorized_proof() == (audit, workflow)),
+            authorize=authorize_current,
         )
 
     def _open_handoff(
@@ -4457,7 +4473,9 @@ class Workbench:
                 dataset_revision=target.dataset_revision,
                 audit=target.audit,
             )
-        elif action in {"ot_bench_proof", "ot_bench_calc", "ot_bench_audit"}:
+        elif action in {"ot_bench_proof", "ot_bench_calc", "ot_bench_audit"} or (
+            action == "ot_evidence" and ctx["kind"] == "bench_proof"
+        ):
             self._benchmark_proof(cfg, actor, view, ctx, action, value, old_hash)
         elif action == "ot_evidence":
             _check(
@@ -4469,7 +4487,6 @@ class Workbench:
                     "eval_detail",
                     "questions",
                     "handoff_question",
-                    "bench_proof",
                 }
                 and value == ctx["revision"]
             )

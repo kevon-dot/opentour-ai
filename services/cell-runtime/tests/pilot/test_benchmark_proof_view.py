@@ -1,5 +1,6 @@
 """Generated managed run through the private Slack evidence controls."""
 
+import pytest
 from test_managed_slack import setup_workflow
 from test_reviewer_workflow import buttons, screen, text
 from test_status_questions import counts
@@ -57,18 +58,39 @@ def test_aggregate_member_gets_limitation_and_same_scope_return(tmp_path):
     assert set(buttons(screen(h, view))) == {"ot_evidence", "ot_home"}
 
 
-def test_proof_binds_workflow_to_frozen_intake_across_selection_change(tmp_path):
+@pytest.mark.parametrize("action", ["ot_bench_calc", "ot_evidence"])
+def test_proof_binds_workflow_to_frozen_intake_across_selection_change(tmp_path, action):
     h, _, _, _ = setup_workflow(tmp_path, "rule")
     h.config.pop("workflow_label", None)
     h.save()
     view = h.launch()
-    for action in ("ot_evidence", "ot_bench_proof"):
-        h.action(view, action, buttons(screen(h, view))[action])
+    for step in ("ot_evidence", "ot_bench_proof"):
+        h.action(view, step, buttons(screen(h, view))[step])
     proof = text(h, view)
     assert "Workflow · " in proof and "Workflow · unavailable" not in proof
-    ref = buttons(screen(h, view))["ot_bench_calc"]
+    ref = buttons(screen(h, view))[action]
     h.config["live_workflow_ref"] = "unrelated-workflow"
     h.save()
-    h.action(view, "ot_bench_calc", ref)
+    h.action(view, action, ref)
     assert "Access unavailable" in text(h, view)
     assert "unrelated-workflow" not in text(h, view)
+
+
+def test_back_rechecks_source_scope_at_disclosure(tmp_path, monkeypatch):
+    h, _, _, _ = setup_workflow(tmp_path, "rule")
+    view = h.launch()
+    for action in ("ot_evidence", "ot_bench_proof"):
+        h.action(view, action, buttons(screen(h, view))[action])
+    back = buttons(screen(h, view))["ot_evidence"]
+    show = h.app._show
+
+    def move_selection(view_id, modal, *args, **kwargs):
+        if modal.get("callback_id") == "ot_evidence_view":
+            h.config["live_workflow_ref"] = "unrelated-workflow"
+            h.save()
+        return show(view_id, modal, *args, **kwargs)
+
+    monkeypatch.setattr(h.app, "_show", move_selection)
+    h.action(view, "ot_evidence", back)
+    assert "Access unavailable" in text(h, view)
+    assert "Frozen workflow comparison" not in text(h, view)
