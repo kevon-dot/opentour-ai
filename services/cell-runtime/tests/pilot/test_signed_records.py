@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import shutil
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -533,6 +534,57 @@ def test_unknown_purpose_refused(kit: Kit) -> None:
     refused("purpose_unknown", partial(verifier.verify, record, "opentour.pilot.other.v1"))
     for internal in (sr.REGISTRY_PURPOSE, sr.ENROLMENT_PURPOSE, sr.ROTATION_PURPOSE):
         refused("purpose_unknown", partial(verifier.verify, kit.registry(), internal))
+
+
+class _PurposeSubclass(str):
+    """A ``str`` subclass equal to, and hashing like, a real purpose."""
+
+
+def _fullwidth(purpose: str) -> str:
+    # Every ASCII letter as its fullwidth form (U+FF21..U+FF5A); NFKC maps them back.
+    return "".join(chr(ord(char) + 0xFEE0) if char.isalpha() else char for char in purpose)
+
+
+def purpose_lookalikes(purpose: str) -> dict[str, str]:
+    first = purpose.index("o")  # every purpose starts "opentour."
+    return {
+        "str_subclass": _PurposeSubclass(purpose),
+        "leading_space": " " + purpose,
+        "trailing_space": purpose + " ",
+        "trailing_newline": purpose + "\n",
+        "tab_padded": "\t" + purpose + "\t",
+        "nbsp_padded": "\u00a0" + purpose + "\u00a0",
+        "stripped_suffix": purpose[:-1],
+        "upper_case": purpose.upper(),
+        "title_case": purpose.title(),
+        "one_capital": purpose[:first] + "O" + purpose[first + 1 :],
+        "fullwidth_letters": _fullwidth(purpose),
+        "one_fullwidth_o": purpose[:first] + "\uff4f" + purpose[first + 1 :],
+    }
+
+
+def test_purpose_must_be_the_exact_registered_string(kit: Kit) -> None:
+    # #243 F1: no isinstance check (M12) and no normalisation (M13) of the purpose. Each
+    # record verifies under its exact purpose; every lookalike is refused before any
+    # signature is read.
+    verifier = kit.enrolled()
+    signers = {sr.VERDICT_PURPOSE: (kit.evaluator,), sr.BENCHMARK_AUDIT_PURPOSE: (kit.auditor,)}
+    for purpose in sorted(sr.RECORD_PURPOSES):
+        payload = consent(kind=purpose)
+        record = sign(payload, purpose, *signers.get(purpose, (kit.customer, kit.operator)))
+        assert verifier.verify(record, purpose) == payload
+        lookalikes = purpose_lookalikes(purpose)
+        assert type(lookalikes["str_subclass"]) is not str
+        assert lookalikes["str_subclass"] == purpose
+        assert lookalikes["str_subclass"] in sr.RECORD_PURPOSES  # only the type differs
+        assert all(lookalike.strip() == purpose for lookalike in list(lookalikes.values())[1:6])
+        assert lookalikes["upper_case"].casefold() == purpose
+        assert unicodedata.normalize("NFKC", lookalikes["fullwidth_letters"]) == purpose
+        assert unicodedata.normalize("NFKC", lookalikes["one_fullwidth_o"]) == purpose
+        for name, lookalike in lookalikes.items():
+            with pytest.raises(sr.PilotRecordRefused) as caught:
+                verifier.verify(record, lookalike)
+            assert caught.value.code == "purpose_unknown", name
 
 
 def test_unknown_key_id_refused(kit: Kit) -> None:
@@ -2716,16 +2768,111 @@ def test_a_custodian_unknown_to_the_registry_on_a_pending_narrowing_does_not_res
     assert dropped.verify(spend, SPEND)
 
 
-def test_a_current_custodian_without_the_scope_purpose_on_a_pending_narrowing_does_not_restrict(
+def test_a_current_custodian_without_the_scope_purpose_on_a_pending_narrowing_restricts(
     kit: Kit,
 ) -> None:
-    # Still current, but holding the scope purpose at no revision and not verify-only listed:
-    # it was never a scope co-signer this registry recognises, so the walk ends there.
+    # F1-r7 (owner-delegate decision; was "... does not restrict"): still current, but
+    # holding the scope purpose at no revision and not verify-only listed. The walk only
+    # ever restricts, so for capping alone it resolves the co-signer by key id at any
+    # revision whatever its purposes: the pending revocation still holds.
     retiring = pending_by_retiring_custodian(kit, [GRANT])
     entry = retiring.entry(purposes=[GRANT])
     current = kit.verifier(kit.registry("2", keys=[*kit.issuers(), entry]))
     spend = sign(consent(), SPEND, kit.customer, kit.operator)
-    assert current.verify(spend, SPEND)
+    grant = sign(consent(), GRANT, kit.customer, kit.operator)
+    refused("customer_purpose_not_enrolled", partial(current.verify, spend, SPEND))
+    assert current.verify(grant, GRANT)
+    # Capping only: never accepted, so a locked operation leaves the floor where it was.
+    enrolment = kit.enrolment(engagement_id=ENGAGEMENT)
+    refused("customer_anchor_already_pinned", partial(current.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    refused("customer_purpose_not_enrolled", partial(current.verify, spend, SPEND))
+    # While it caps, an inheriting rotation must restate, and may not restate wider.
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    inheriting = kit.rotation(kit.customer, second)
+    refused("customer_scope_restatement_required", partial(current.rotate_customer_key, inheriting))
+    wide = kit.rotation(kit.customer, second, consent_purposes=sorted(EVERY_CONSENT))
+    refused("customer_rotation_scope_widens", partial(current.rotate_customer_key, wide))
+    # The same key at another registry revision, still without the purpose, also caps.
+    moved = retiring.entry(registry_revision="rev-9", purposes=[GRANT])
+    elsewhere = kit.verifier(kit.registry("3", keys=[*kit.issuers(), moved]))
+    refused("customer_purpose_not_enrolled", partial(elsewhere.verify, spend, SPEND))
+    assert elsewhere.verify(grant, GRANT)
+
+
+def test_a_purposeless_custodian_on_a_pending_widening_never_widens(kit: Kit) -> None:
+    # F1-r7 mutant check: resolving by key id whatever the purposes is for capping alone.
+    # A pending widening it co-signed, inside its window, caps and never adds a purpose.
+    retiring = Signer(sr.OPERATOR_CUSTODIAN, [SCOPE_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), retiring.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT, SPEND]))
+    # Adds publication, removes spend.
+    lose_floor_write(
+        kit, verifier, kit.scope_update(sorted({GRANT, PUBLICATION}), kit.customer, retiring)
+    )
+    records = {
+        purpose: sign(consent(), purpose, kit.customer, kit.operator)
+        for purpose in sorted(EVERY_CONSENT)
+    }
+    assert verifier.verify(records[PUBLICATION], PUBLICATION)  # pending, permitted co-signer
+    entry = retiring.entry(purposes=[GRANT])
+    current = kit.verifier(kit.registry("2", keys=[*kit.issuers(), entry]))
+    assert current.verify(records[GRANT], GRANT)
+    for purpose in sorted(EVERY_CONSENT - {GRANT}):
+        refused("customer_purpose_not_enrolled", partial(current.verify, records[purpose], purpose))
+    enrolment = kit.enrolment(engagement_id=ENGAGEMENT)
+    refused("customer_anchor_already_pinned", partial(current.pin_customer_anchor, enrolment))
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    refused("customer_purpose_not_enrolled", partial(current.verify, records[SPEND], SPEND))
+
+
+def test_a_purposeless_custodian_never_authorizes_or_re_verifies_a_scope_update(
+    kit: Kit,
+) -> None:
+    # F1-r7: never for acceptance. A new update it co-signs is refused, and an accepted
+    # update it co-signed makes the anchor unverifiable (unchanged).
+    holder = Signer(sr.OPERATOR_CUSTODIAN, [SCOPE_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), holder.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment())
+    stripped = kit.verifier(
+        kit.registry("2", keys=[*kit.issuers(), holder.entry(purposes=[GRANT])])
+    )
+    for scope in ([GRANT], sorted(EVERY_CONSENT)):
+        update = kit.scope_update(scope, kit.customer, holder)
+        refused("key_purpose_not_permitted", partial(stripped.update_customer_scope, update))
+        assert stored(kit, REVISION_KEY)["sequence"] == "1"
+    grant = sign(consent(), GRANT, kit.customer, kit.operator)
+    assert stripped.verify(grant, GRANT)
+    accepted = kit.verifier(kit.registry("3", keys=[*kit.issuers(), holder.entry()]))
+    accepted.update_customer_scope(kit.scope_update([GRANT], kit.customer, holder))
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    dropped = kit.verifier(kit.registry("4", keys=[*kit.issuers(), holder.entry(purposes=[GRANT])]))
+    refused("customer_anchor_unverifiable", partial(dropped.verify, grant, GRANT))
+
+
+def test_a_pending_update_by_a_custodian_key_id_held_by_another_role_does_not_restrict(
+    kit: Kit,
+) -> None:
+    # Resolution by key id is still restricted to the custodian role: an evaluator key
+    # signing as custodian is unknown to the walk, which ends there.
+    verifier = kit.enrolled()
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    payload = kit.scope_payload([GRANT])
+    planted = {
+        "payload": payload,
+        "signatures": [
+            kit.customer.signature(payload, SCOPE_PURPOSE),
+            kit.evaluator.signature(
+                payload,
+                SCOPE_PURPOSE,
+                signer_role=sr.OPERATOR_CUSTODIAN,
+                key_registry_revision="rev-9",
+            ),
+        ],
+    }
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, planted]})
+    spend = sign(consent(), SPEND, kit.customer, kit.operator)
+    assert verifier.verify(spend, SPEND)
 
 
 def test_a_routine_registry_bump_keeps_a_pending_narrowing(kit: Kit) -> None:
@@ -2889,6 +3036,216 @@ def test_an_expired_pending_rotation_alone_changes_nothing(
     for purpose in (GRANT, SPEND):
         record = sign(consent(not_after=stamp(80000)), purpose, kit.customer, kit.operator)
         assert verifier.verify(record, purpose)
+
+
+# --- INFO-1 (review of #246): the valid pending prefix counts --------------------------
+
+
+def expired() -> Json:
+    return {"issued_at": stamp(-7200), "not_after": stamp(-1)}
+
+
+def far() -> Json:
+    return {"not_after": stamp(80000)}
+
+
+def pending_rotation(kit: Kit, scope: list[str]) -> tuple[sr.PilotVerifier, Signer, Json]:
+    """Enrol ``scope``, rotate to a second key and lose the floor write: a pending rotation
+    still inside its window. Returns the verifier, the new key and the enrolment entry."""
+    verifier = kit.verifier()
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=scope))
+    old_floor = record_path(kit, REVISION_KEY).read_bytes()
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, second))
+    record_path(kit, REVISION_KEY).write_bytes(old_floor)
+    return verifier, second, stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+
+
+def later_entry(kit: Kit, second: Signer, kind: str) -> Json:
+    if kind == "expired_widening":
+        scope = sorted({GRANT, PUBLICATION, SPEND})
+        payload = kit.scope_payload(scope, customer=second, previous="2") | expired()
+        return json.loads(sign(payload, SCOPE_PURPOSE, second, kit.operator))
+    if kind == "not_yet_valid":
+        window = {"issued_at": stamp(86400), "not_after": stamp(2 * 86400)}
+        return json.loads(kit.scope_update([GRANT], customer=second, previous="2", **window))
+    if kind == "expired_rotation":
+        third = Signer(sr.CUSTOMER_OWNER, registry_revision="3")
+        return json.loads(kit.rotation(second, third, **expired()))
+    assert kind == "unknown_kind"
+    return json.loads(sign(consent(), GRANT, second, kit.operator))
+
+
+@pytest.mark.parametrize(
+    "kind", ["expired_widening", "not_yet_valid", "expired_rotation", "unknown_kind"]
+)
+def test_a_pending_rotation_in_window_counts_despite_a_later_entry_that_does_not(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    # INFO-1: a later pending entry that fails no longer drops the valid rotation before
+    # it, so the key the customer rotated away from does not verify again.
+    verifier, second, enrolment = pending_rotation(kit, [GRANT, SPEND])
+    rotation = stored(kit, ANCHOR_KEY)["value"]["chain"][1]
+    chain = [enrolment, rotation, later_entry(kit, second, kind)]
+    write_record(kit, ANCHOR_KEY, 2, {"chain": chain})
+    old_grant = sign(consent(**far()), GRANT, kit.customer, kit.operator)
+    records = {
+        purpose: sign(consent(**far()), purpose, second, kit.operator)
+        for purpose in sorted(EVERY_CONSENT)
+    }
+
+    def check() -> None:
+        refused("customer_key_not_anchored", partial(verifier.verify, old_grant, GRANT))
+        assert verifier.verify(records[GRANT], GRANT)
+        assert verifier.verify(records[SPEND], SPEND)
+        # The later entry never widens: it caps or is ignored.
+        for purpose in (PUBLICATION, ROUTING):
+            refused(
+                "customer_purpose_not_enrolled",
+                partial(verifier.verify, records[purpose], purpose),
+            )
+
+    check()
+    # A locked operation rolls the floor over the valid prefix only.
+    refused(
+        "customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, kit.enrolment())
+    )
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    assert stored(kit, REVISION_KEY)["value"]["head_payload_sha256"] == payload_digest(
+        canonical(rotation)
+    )
+    # Accepted now, so it no longer reverts once its own window has passed.
+    later_now(monkeypatch)
+    check()
+
+
+def test_an_expired_narrowing_after_a_pending_rotation_in_window_applies_to_the_new_key(
+    kit: Kit,
+) -> None:
+    # INFO-1: the remainder is walked restriction-only from the head of the valid prefix,
+    # so a revocation signed by the new key still holds; as a pure narrowing by that key
+    # with a current custodian, it is recorded when the floor next rolls forward.
+    verifier, second, enrolment = pending_rotation(kit, sorted(EVERY_CONSENT))
+    rotation = stored(kit, ANCHOR_KEY)["value"]["chain"][1]
+    payload = kit.scope_payload([GRANT], customer=second, previous="2") | expired()
+    narrowing = json.loads(sign(payload, SCOPE_PURPOSE, second, kit.operator))
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, rotation, narrowing]})
+    old_grant = sign(consent(), GRANT, kit.customer, kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, old_grant, GRANT))
+    assert verifier.verify(sign(consent(), GRANT, second, kit.operator), GRANT)
+    for purpose in sorted(EVERY_CONSENT - {GRANT}):
+        record = sign(consent(), purpose, second, kit.operator)
+        refused("customer_purpose_not_enrolled", partial(verifier.verify, record, purpose))
+    third = Signer(sr.CUSTOMER_OWNER, registry_revision="4")
+    rotated = verifier.rotate_customer_key(
+        kit.rotation(second, third, previous_anchor_revision="3")
+    )
+    assert (rotated.anchor_revision, rotated.consent_purposes) == (4, {GRANT})
+    assert stored(kit, REVISION_KEY)["sequence"] == "4"
+    assert len(stored(kit, ANCHOR_KEY)["value"]["chain"]) == 4
+
+
+def test_a_valid_prefix_that_itself_expires_reverts_as_before(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unchanged floor rule: a prefix entry counts only while it passes the time check now.
+    verifier, second, enrolment = pending_rotation(kit, sorted(EVERY_CONSENT))
+    rotation = stored(kit, ANCHOR_KEY)["value"]["chain"][1]
+    payload = kit.scope_payload([GRANT], customer=second, previous="2") | expired()
+    narrowing = json.loads(sign(payload, SCOPE_PURPOSE, second, kit.operator))
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, rotation, narrowing]})
+    later_now(monkeypatch)
+    old = {
+        purpose: sign(consent(**far()), purpose, kit.customer, kit.operator)
+        for purpose in (GRANT, SPEND)
+    }
+    assert verifier.verify(old[GRANT], GRANT)
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, old[SPEND], SPEND))
+    new_grant = sign(consent(**far()), GRANT, second, kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, new_grant, GRANT))
+    enrolment_bytes = kit.enrolment(issued_at=stamp(7000), not_after=stamp(20000))
+    refused(
+        "customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, enrolment_bytes)
+    )
+    assert stored(kit, REVISION_KEY)["sequence"] == "1"
+
+
+@pytest.mark.parametrize("behind", ["expired_narrowing", "expired_widening"])
+def test_a_rotation_behind_an_entry_that_does_not_count_does_not_count_while_it_is_pending(
+    kit: Kit, behind: str
+) -> None:
+    # The documented residual: the prefix stops at the first entry that does not count, and
+    # a rotation chained from that entry's revision is only walked through, never accepted.
+    # Once a locked operation records an expired pure narrowing, the rotation chains from
+    # the new floor and counts inside its own window; behind a cap it never counts.
+    verifier = kit.verifier()
+    scope = sorted(EVERY_CONSENT) if behind == "expired_narrowing" else [GRANT, SPEND]
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=scope))
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    if behind == "expired_narrowing":
+        updated = [GRANT, SPEND]
+    else:
+        updated = sorted({GRANT, PUBLICATION, SPEND})
+    payload = kit.scope_payload(updated) | expired()
+    entry = json.loads(sign(payload, SCOPE_PURPOSE, kit.customer, kit.operator))
+    second = Signer(sr.CUSTOMER_OWNER, registry_revision="3")
+    rotation = json.loads(kit.rotation(kit.customer, second, previous_anchor_revision="2"))
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, entry, rotation]})
+    old = {
+        purpose: sign(consent(), purpose, kit.customer, kit.operator)
+        for purpose in sorted(EVERY_CONSENT)
+    }
+    new_grant = sign(consent(), GRANT, second, kit.operator)
+    for purpose in (GRANT, SPEND):
+        assert verifier.verify(old[purpose], purpose)
+    for purpose in (PUBLICATION, ROUTING):
+        refused("customer_purpose_not_enrolled", partial(verifier.verify, old[purpose], purpose))
+    refused("customer_key_not_anchored", partial(verifier.verify, new_grant, GRANT))
+    refused(
+        "customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, kit.enrolment())
+    )
+    if behind == "expired_widening":
+        assert stored(kit, REVISION_KEY)["sequence"] == "1"
+        refused("customer_key_not_anchored", partial(verifier.verify, new_grant, GRANT))
+        return
+    # The narrowing is recorded; the rotation is now a valid pending entry on the floor.
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    assert verifier.verify(new_grant, GRANT)
+    refused("customer_key_not_anchored", partial(verifier.verify, old[GRANT], GRANT))
+    routing = sign(consent(), ROUTING, second, kit.operator)
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, routing, ROUTING))
+
+
+def test_a_valid_prefix_never_widens_past_what_it_grants_alone(kit: Kit) -> None:
+    # A co-signed widening inside its window counts as it would alone; an expired update
+    # after it can only narrow from there, never re-add what the widening left out.
+    verifier = kit.verifier()
+    verifier.pin_customer_anchor(kit.enrolment(consent_purposes=[GRANT, SPEND]))
+    lose_floor_write(kit, verifier, kit.scope_update(sorted({GRANT, PUBLICATION, SPEND})))
+    enrolment, widening = stored(kit, ANCHOR_KEY)["value"]["chain"]
+    payload = kit.scope_payload(sorted({GRANT, PUBLICATION, ROUTING}), previous="2") | expired()
+    mixed = json.loads(sign(payload, SCOPE_PURPOSE, kit.customer, kit.operator))
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, widening, mixed]})
+    records = {
+        purpose: sign(consent(), purpose, kit.customer, kit.operator)
+        for purpose in sorted(EVERY_CONSENT)
+    }
+    # Prefix scope {grant, publication, spend} ∩ cap {grant, publication, routing}.
+    for purpose in (GRANT, PUBLICATION):
+        assert verifier.verify(records[purpose], purpose)
+    for purpose in (ROUTING, SPEND):
+        refused(
+            "customer_purpose_not_enrolled", partial(verifier.verify, records[purpose], purpose)
+        )
+    # The floor rolls over the prefix, never over the capping entry.
+    refused(
+        "customer_anchor_already_pinned", partial(verifier.pin_customer_anchor, kit.enrolment())
+    )
+    assert stored(kit, REVISION_KEY)["sequence"] == "2"
+    assert stored(kit, REVISION_KEY)["value"]["head_payload_sha256"] == payload_digest(
+        canonical(widening)
+    )
+    refused("customer_purpose_not_enrolled", partial(verifier.verify, records[ROUTING], ROUTING))
 
 
 # --- F2 (review of #246): rotation never carries a retired purpose forward ----------

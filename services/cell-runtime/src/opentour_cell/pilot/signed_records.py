@@ -115,21 +115,26 @@ Chain entries up to the anchor revision floor were accepted by this worker and a
 re-verified for signatures and engagement binding only. Entries beyond the floor are
 *pending* (for example a rotation or scope update whose floor write was interrupted): they
 count only while they also pass the time check now, the ``MAX_VALIDITY`` ceiling included,
-and a pending scope update needs a current custodian at its exact registry revision.
-Otherwise the anchor is derived at the floor and the pending tail does not count, except
-that revocation fails closed: pending entries that pass every check but expiry still
-restrict, so the effective scope is the floor scope ∩ the pending scopes (see
-``_restrict``). A pure narrowing by the floor key with a current custodian advances the head
-and becomes an accepted, signed entry when the floor is next rolled forward. Everything else
-only caps the scope at read time and is never accepted, so nothing widens: an update that
-widens; one co-signed by a custodian resolved as on replay (the same key id at another
-registry revision, or ``former_custodian_keys``); and anything after a pending rotation,
-which is walked through but never accepted, so a narrowing signed by its new key caps the
-floor key's scope. A custodian key id unknown to every revision and the former list, or any
-other failure, ends that walk. Any locked operation on the engagement (a pin, a
-rotation or a scope update) first rolls the floor forward over a pending tail that is
-still inside its window, or over the pure narrowings above, after which they are accepted
-and no longer expire.
+and a pending scope update needs a current custodian at its exact registry revision. The
+longest prefix of pending entries that all pass counts, in order, exactly as a whole valid
+tail would, so a later entry that has expired, is not yet valid or is malformed does not
+drop a pending rotation still inside its window (review of #246, INFO-1). From the first
+entry that does not count, the rest of the tail is walked from the prefix head (the floor
+head when the prefix is empty) and only restricts: revocation fails closed, so pending
+entries that pass every check but expiry still restrict, and the effective scope is the
+prefix scope ∩ the remaining pending scopes (see ``_restrict``). A pure narrowing by the
+head key with a current custodian advances the head and becomes an accepted, signed entry
+when the floor is next rolled forward. Everything else only caps the scope at read time and
+is never accepted, so nothing widens: an update that widens; one whose custodian is not
+current for the scope purpose at its exact registry revision, resolved for capping alone by
+key id at any registry revision whatever that key's purposes, or from
+``former_custodian_keys`` (owner-delegate decision, F1-r7); and anything after a pending
+rotation in that remainder, which is walked through but never accepted, so a narrowing
+signed by its new key caps the head key's scope. A custodian key id unknown to every
+revision and the former list, or any other failure, ends that walk. Any locked operation on
+the engagement (a pin, a rotation or a scope update) first rolls the floor forward over the
+valid pending prefix and the pure narrowings above, after which they are accepted and no
+longer expire.
 
 The enrolment co-signature is re-verified against the operator custodian key named by key
 id, accepted only if a current registry entry for that id carries the enrolment purpose (at
@@ -151,7 +156,8 @@ custodian into that list therefore keeps the anchors whose scope updates it co-s
 former custodian key never authorizes a new scope update and never makes a pending one
 count, which needs a current custodian at its exact registry revision; a pending update it
 co-signed may only restrict at read time (see the pending tail above), as may one whose
-custodian was relisted at another registry revision. A scope update also needs
+custodian was relisted at another registry revision, or is still current but no longer
+holds the scope purpose at any revision. A scope update also needs
 the anchored customer key's signature, so a former custodian key cannot widen a scope on its
 own. Dropping a key from both lists still invalidates every anchor whose enrolment or scope
 update it co-signed.
@@ -195,15 +201,20 @@ Recovery:
   supervised re-enrolment: delete both anchor records and pin a new enrolment, with the
   customer confirming the key fingerprint out of band per OPE-583.
 * An interrupted rotation (chain written, floor write lost) counts while inside its window,
-  and the next locked operation on that engagement rolls the floor forward. Remaining risk:
-  if nothing touches the engagement's anchor under the lock before the rotation expires, the
-  anchor reverts to the key the customer rotated away from. Re-run the rotation with a fresh
-  record signed by both keys. An interrupted scope update counts the same way while inside
-  its window. After it expires a narrowing still holds, and the next locked operation
-  records it as accepted; a widening does not take effect, so re-run it with a fresh
-  co-signed update. An update that both widens and narrows caps the scope at their
-  intersection only while it stays stored: a rotation must then restate its scope, and a
-  fresh co-signed update replaces the cap.
+  even when a later pending entry does not count, and the next locked operation on that
+  engagement rolls the floor forward. Remaining risk: if nothing touches the engagement's
+  anchor under the lock before the rotation expires, the anchor reverts to the key the
+  customer rotated away from. Re-run the rotation with a fresh record signed by both keys.
+  A rotation stored after a pending entry that does not count (one expired, malformed, or
+  co-signed by a custodian that only caps) chains from that entry's revision, so it does not
+  count while that entry is pending. If that entry is a pure narrowing, the next locked
+  operation records it and the rotation then counts inside its own window; behind anything
+  else it never counts: re-run it from the floor. An interrupted scope update counts the
+  same way while inside its window. After it expires a narrowing still holds, and the next
+  locked operation records it as accepted; a widening does not take effect, so re-run it
+  with a fresh co-signed update. An update that both widens and narrows caps the scope at
+  their intersection only while it stays stored: a rotation must then restate its scope,
+  and a fresh co-signed update replaces the cap.
 * An anchor at ``MAX_ANCHOR_CHAIN`` entries refuses every further entry
   (``customer_scope_limit``, ``customer_rotation_limit``), so its customer can neither
   narrow nor revoke a purpose nor rotate the key. Both need a supervised re-enrolment:
@@ -214,7 +225,8 @@ Recovery:
 * Retiring a custodian key: add it to ``former_custodian_keys`` so the enrolments and
   accepted scope updates it co-signed keep verifying. A scope update it co-signed that was
   still pending (its floor write lost) then only caps the scope at read time and is never
-  accepted; re-run it with a current custodian to record it.
+  accepted; re-run it with a current custodian to record it. The same holds when the scope
+  purpose is removed from a custodian key that stays in the registry.
 
 Time: every signed document carries issuer-signed ``issued_at`` and ``not_after``. The local
 clock only shortens validity: refuse after ``not_after`` or more than ``ISSUED_AT_SKEW``
@@ -304,7 +316,9 @@ REQUIRED_ROLES: Final[Mapping[str, frozenset[str]]] = {
 # purpose (or a malformed entry) makes an accepted chain unverifiable.
 _CHAIN_ENTRY_PURPOSES: Final = frozenset({ROTATION_PURPOSE, CONSENT_SCOPE_PURPOSE})
 # Refusals meaning "this custodian key is not current for the scope purpose at this registry
-# revision"; only then may the restriction walk try ``former_custodian_keys``.
+# revision"; only then may the restriction walk resolve it for capping alone
+# (``_capping_custodian``: its key id at any revision whatever its purposes, or the former
+# list).
 _CUSTODIAN_NOT_CURRENT: Final = frozenset(
     {"key_unknown", "key_revision_not_active", "key_purpose_not_permitted"}
 )
@@ -1391,6 +1405,35 @@ class PilotVerifier:
 
         return resolve
 
+    def _capping_custodian(self) -> Resolver:
+        """Resolve a pending scope update's co-signer by key id, for the restriction walk only.
+
+        Owner-delegate decision (F1-r7): the walk only ever restricts, so for capping alone
+        the co-signer may be any ``operator_custodian`` entry for that key id at any registry
+        revision, whatever its purposes, or the id in ``former_custodian_keys``; the key id
+        fixes the public key. An entry resolved this way only caps the scope at read time: it
+        is never accepted, never advances the head and never widens. It is never used for a
+        new, pending-counted or accepted scope update, nor for any other purpose. A key id
+        unknown to every registry revision and to the former list still ends the walk.
+        """
+
+        def resolve(signature: _Signature) -> PilotTrustedKey:
+            current = [
+                key
+                for key in self._registry.keys.values()
+                if key.key_id == signature.key_id and key.role == OPERATOR_CUSTODIAN
+            ]
+            key = current[0] if current else self._registry.former.get(signature.key_id)
+            if key is None:
+                raise PilotRecordRefused("key_unknown")
+            return replace(
+                key,
+                registry_revision=signature.key_registry_revision,
+                purposes=frozenset({CONSENT_SCOPE_PURPOSE}),
+            )
+
+        return resolve
+
     def _registry_current(self) -> None:
         _check_window(self._registry.issued_at, self._registry.not_after, "registry")
         # A newer verified registry (for example one that drops a key) supersedes this one.
@@ -1579,9 +1622,10 @@ class PilotVerifier:
         The first ``accepted`` entries were accepted by this worker: any failure there makes
         the anchor unverifiable, except that an authenticated enrolment without a scope is
         refused as ``customer_consent_scope_missing``. Later entries are pending and count
-        only while they also pass the time check now; otherwise the whole pending tail is
-        ignored. Returns the current head, the payload digests and the entries it was
-        derived from.
+        only while they also pass the time check now. The longest such prefix counts, in
+        order, exactly as a whole valid tail would; from the first entry that does not, the
+        rest only restricts (``_restrict``). Returns the current head, the payload digests
+        and the entries it was derived from.
         """
         chain = self._chain_entries(record)
         if len(chain) < accepted:
@@ -1604,42 +1648,47 @@ class PilotVerifier:
             raise PilotRecordRefused("customer_anchor_unverifiable") from None
         except JournalError:
             raise PilotRecordRefused("customer_anchor_unverifiable") from None
-        pending_head, pending = head, []
-        try:
-            for item in chain[accepted:]:
-                engagement, pending_head, digest = self._chain_step(
-                    item, pending_head, accepted=False
-                )
+        pending: list[str] = []
+        for item in chain[accepted:]:
+            try:
+                engagement, step, digest = self._chain_step(item, head, accepted=False)
                 if engagement != engagement_id:
                     raise PilotRecordRefused("customer_anchor_unverifiable")
-                pending.append(digest)
-        except (PilotRecordRefused, JournalError):
-            # Not acceptable as a whole now: derive the anchor at the floor, still restricted
-            # by the expired pending scope updates (fail closed on revocation).
-            head, narrowed = self._restrict(engagement_id, head, chain[accepted:])
-            return head, digests + narrowed, chain[: accepted + len(narrowed)]
-        return pending_head, digests + pending, chain
+            except (PilotRecordRefused, JournalError):
+                # The valid pending prefix counts exactly as it would alone; the remainder,
+                # from the first entry that does not count now, is walked restriction-only
+                # from the prefix head (fail closed on revocation, never widening).
+                rest = chain[accepted + len(pending) :]
+                head, narrowed = self._restrict(engagement_id, head, rest)
+                kept = [*digests, *pending, *narrowed]
+                return head, kept, chain[: len(kept)]
+            head = step
+            pending.append(digest)
+        return head, digests + pending, chain
 
     def _restrict(
         self, engagement_id: str, head: _AnchorHead, tail: list[dict[str, Any]]
     ) -> tuple[_AnchorHead, list[str]]:
-        """Walk a pending tail that does not count, keeping only what narrows the scope.
+        """Walk the rest of a pending tail that does not count, keeping only what narrows.
 
-        Each entry must pass every check now except expiry (``scope_expired``,
-        ``rotation_expired``), chained from the floor; the walk ends at the first that
+        ``head`` is the head of the valid pending prefix (the floor head when there is
+        none). Each entry must pass every check now except expiry (``scope_expired``,
+        ``rotation_expired``), chained from ``head``; the walk ends at the first that
         does not.
 
-        * A pure narrowing (its scope within the current signed scope) by the floor key,
+        * A pure narrowing (its scope within the current signed scope) by the head key,
           co-signed by a current custodian at its exact registry revision, advances the
           head; the next locked operation rolls the floor over it, so it becomes an
           accepted, signed entry.
-        * Anything else only caps the floor head (``ceiling``, intersected): an update that
-          widens, one co-signed by a custodian resolved as on replay (the same key id at any
-          registry revision holding the scope purpose, or ``former_custodian_keys``), and
-          every entry after a pending rotation. A pending rotation itself is walked through
-          (its scope caps too) so that a later narrowing signed by its new key still caps,
-          but it is never accepted and the key is never switched. A capped entry is never
-          accepted, never rolls the floor over and never widens.
+        * Anything else only caps the head (``ceiling``, intersected): an update that
+          widens, one whose co-signer is not a current custodian for the scope purpose at
+          its exact registry revision (resolved for capping alone by ``_capping_custodian``:
+          the same key id at any registry revision whatever its purposes, or
+          ``former_custodian_keys``), and every entry after a pending rotation. A pending
+          rotation itself is walked through (its scope caps too) so that a later narrowing
+          signed by its new key still caps, but it is never accepted and the key is never
+          switched. A capped entry is never accepted, never rolls the floor over and never
+          widens.
 
         A custodian key id unknown to every registry revision and to the former list ends
         the walk. A cap holds only while its entry stays stored; a rotation must restate
@@ -1658,7 +1707,7 @@ class PilotVerifier:
                 except PilotRecordRefused as refusal:
                     if rotation or refusal.code not in _CUSTODIAN_NOT_CURRENT:
                         raise
-                    custodian = self._replay_scope_custodian()
+                    custodian = self._capping_custodian()
                     body, updated, digest = self._restricting(record, shadow, False, custodian)
                     fallback = True
             except (PilotRecordRefused, JournalError):
@@ -1700,7 +1749,8 @@ class PilotVerifier:
             return check(False)
 
     def _settle_pending(self, engagement_id: str) -> None:
-        """Under the lock: roll the anchor floor forward over a pending tail still in window.
+        """Under the lock: roll the anchor floor forward over the valid pending prefix (each
+        entry still inside its window) and the pure narrowings the restriction walk keeps.
 
         After this, the pending rotation is accepted and no longer reverts when it expires.
         Any inconsistency is left for the caller's own read to refuse.
