@@ -476,16 +476,23 @@ class WorkflowBenchmarks:
             )
 
     def inspect(
-        self, scope: BenchmarkScope, reference: str, *, current_run: str | None = None
+        self, scope: BenchmarkScope, reference: str | int, *, current_run: str | None = None
     ) -> Json | None:
-        """Only under the caller's explicit benchmark inspection guard, including old versions."""
+        """Read an exact reference or workflow-local version under the inspection guard."""
+        selector: str | int
+        if type(reference) is int:
+            _require(0 < reference < 2**63, "invalid_benchmark_version")
+            field = "version"
+            selector = reference
+        else:
+            field = "reference"
+            selector = require_ref(reference)
         if not self.path.exists():
             return None
         with self._db() as db:
             row = db.execute(
-                "SELECT * FROM benchmarks WHERE tenant=? AND epoch=? AND workflow=? "
-                "AND reference=?",
-                (scope.tenant, scope.engagement_epoch, scope.workflow_ref, reference),
+                f"SELECT * FROM benchmarks WHERE tenant=? AND epoch=? AND workflow=? AND {field}=?",
+                (scope.tenant, scope.engagement_epoch, scope.workflow_ref, selector),
             ).fetchone()
             if row is None:
                 return None
@@ -614,7 +621,7 @@ class BenchmarkIntake:
         return status
 
     def inspect_benchmark(
-        self, actor: IntakePrincipal, workflow: str, reference: str
+        self, actor: IntakePrincipal, workflow: str, reference: str | int
     ) -> Json | None:
         if self.inspection is None:
             return None
@@ -623,7 +630,7 @@ class BenchmarkIntake:
             current_run = self.intake.current_benchmark_run(
                 scope.tenant, workflow, scope.engagement_epoch
             )
-            return self.benchmarks.inspect(scope, require_ref(reference), current_run=current_run)
+            return self.benchmarks.inspect(scope, reference, current_run=current_run)
 
     def adopt_starter_state(
         self,
