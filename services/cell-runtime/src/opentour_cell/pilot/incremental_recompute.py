@@ -1,15 +1,22 @@
 """Recompute only the affected mind-map families and prove parity with a clean rebuild.
 
 Simulated: a SQLite-backed local store, generated sentinel families and in-process workers.
-Not proven: provider behavior, the OPE-544 consumption manifest, million-scale fixtures, any
-speed claim beyond the registered local scenario, or authorization of a fit.
+Not proven: provider behavior, use of the OPE-544 consumption manifest, million-scale
+fixtures, any speed claim beyond the registered local scenario, or authorization of a fit.
 
-Scope (OPE-525). The tenant-local consumption manifest and reverse lookup (OPE-544) and
-write-time consumption capture (OPE-416) are not on ``main``. This module therefore takes
-declared consumption (``Family.consumes``) as typed input and builds its own reverse index
-from it; swap the index source once OPE-544 lands. Nothing here authorizes a fit: plans and
-manifests always carry ``fit_authorized = False`` and rows are never exposed, only digests,
-so protected per-case answers cannot leak through a manifest.
+Scope (OPE-525). OPE-544's consumed-field manifest reader and reverse lookup are on ``main``
+(``opentour_cell.pilot.consumption_lineage``), but this module does not consume them yet.
+Write-time consumption capture (OPE-416), the writer those manifests depend on, is not on
+``main``. This module therefore takes declared consumption (``Family.consumes``) as typed
+input and builds its own reverse index from it; swap the index source for the OPE-544 reader
+once OPE-416 writes real manifests. Nothing here authorizes a fit: plans and manifests always
+carry ``fit_authorized = False`` and rows are never exposed, only digests, so protected
+per-case answers cannot leak through a manifest.
+
+The cache key binds ``TOOL_VERSION``, ``VERIFIER_VERSION`` (the verifier/finality rule a
+built artifact was checked under) and ``ARTIFACT_SCHEMA_VERSION``. The same versions are in
+the stored registry fingerprint, so bumping any of them forces a bounded full rebuild with no
+reuse of earlier jobs or snapshot results.
 """
 
 from __future__ import annotations
@@ -26,6 +33,8 @@ from opentour_cell.pilot.operating_point import canonical, digest
 
 TOOL_VERSION = "opentour.recompute.v1"
 MANIFEST_VERSION = "opentour.recompute.manifest.v1"
+VERIFIER_VERSION = "opentour.recompute.verifier-finality.v1"
+ARTIFACT_SCHEMA_VERSION = "opentour.recompute.family-artifact.v1"
 DEVELOPMENT = "development"
 PROTECTED = "protected"
 BUILT, HELD, BLOCKED = "built", "held", "blocked"
@@ -277,7 +286,8 @@ def evaluate_family(registry: Registry, family_id: str, state: SourceState) -> F
     key = digest({
         "tenant": fam.tenant, "purpose": fam.purpose, "epoch": epoch, "inputs": inputs,
         "family": fam.family_id, "family_revision": fam.revision, "parent": fam.parent_id,
-        "split": fam.split, "tool": TOOL_VERSION,
+        "split": fam.split, "tool": TOOL_VERSION, "verifier": VERIFIER_VERSION,
+        "artifact_schema": ARTIFACT_SCHEMA_VERSION,
     })  # fmt: skip
     content = digest({"cache_key": key, "kind": "family-artifact"})
     return FamilyResult(family_id, fam.tenant, fam.split, BUILT, (), content, key, epoch)
@@ -336,7 +346,7 @@ def make_plan(
         if fam_id not in prior:
             reasons[fam_id].add("no_prior_result")
     mode = "incremental"
-    if registry_changed:  # family set, revision or consumption moved: no prior result is safe
+    if registry_changed:  # family set, revision, consumption or a build version moved
         mode = "bounded_full_rebuild"
         for fam_id in registry.families:
             reasons[fam_id].add("registry_changed")
@@ -427,14 +437,21 @@ class _Tx:
 
 
 def registry_fingerprint(registry: Registry) -> str:
-    """Digest of every family field that feeds a result (revision, split, lineage, consumption)."""
-    return digest([
-        [
-            f.family_id, f.tenant, f.purpose, f.split, f.parent_id, f.lineage_complete,
-            f.revision, [ref.key() for ref in f.consumes],
-        ]
-        for f in (registry.families[k] for k in sorted(registry.families))
-    ])  # fmt: skip
+    """Digest of every input that feeds a result besides source state.
+
+    Family fields (revision, split, lineage, consumption) plus the tool, verifier/finality and
+    artifact-schema versions: a version bump invalidates every prior result, not just new jobs.
+    """
+    return digest({
+        "versions": [TOOL_VERSION, VERIFIER_VERSION, ARTIFACT_SCHEMA_VERSION],
+        "families": [
+            [
+                f.family_id, f.tenant, f.purpose, f.split, f.parent_id, f.lineage_complete,
+                f.revision, [ref.key() for ref in f.consumes],
+            ]
+            for f in (registry.families[k] for k in sorted(registry.families))
+        ],
+    })  # fmt: skip
 
 
 class RecomputeService:

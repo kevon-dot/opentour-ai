@@ -392,3 +392,68 @@ def test_randomized_event_sequences_match_a_clean_rebuild(tmp_path: Path) -> Non
             service.run("w", now=step * 1000)
             parity(service)
         service.close()
+
+
+@pytest.mark.parametrize("epoch", [None, 2])
+def test_authority_moved_before_publish_publishes_nothing(
+    svc: RecomputeService, epoch: int | None
+) -> None:
+    """A grant that moves outside the event log is caught by the publish-point recheck.
+
+    ``submit`` always advances the cursor, so an event-driven grant change is refused as
+    LATE_CHANGE first. The AUTHORITY_MOVED recheck guards the remaining path: source state
+    rewritten without a new event (another writer, a restore). Simulate exactly that.
+    """
+    svc.submit([upsert("e1", 2, FREIGHT, 11)])
+    admissions, cursor = svc.admission_count(), svc.cursor()
+    moved = SourceState(svc.source_state().values, grants={(TENANT, PURPOSE): epoch})
+
+    def rewrite_authority() -> None:
+        svc._put_state(moved)
+        assert svc.cursor() == cursor  # no event: the cursor check cannot see this
+
+    with pytest.raises(PublishConflict) as exc:
+        svc.run("w", now=0, before_publish=rewrite_authority)
+    assert exc.value.code == "AUTHORITY_MOVED"
+    assert svc.revision() == 1  # nothing published under the stale epoch
+    assert svc.admit("C") is False and svc.admission_count() == admissions
+    report = svc.run("w", now=1)  # a fresh plan sees the moved grant and rebuilds
+    assert report.manifest.results["C"].grant_epoch == epoch
+    parity(svc)
+
+
+@pytest.mark.parametrize("constant", ["VERIFIER_VERSION", "ARTIFACT_SCHEMA_VERSION"])
+def test_cache_key_binds_verifier_and_artifact_schema_versions(
+    monkeypatch: pytest.MonkeyPatch, constant: str
+) -> None:
+    registry, state = Registry(fams()), base_state()
+    before = ir.evaluate_family(registry, "C", state)
+    monkeypatch.setattr(ir, constant, getattr(ir, constant) + "-next")
+    after = ir.evaluate_family(registry, "C", state)
+    assert before.status == after.status == BUILT
+    assert after.cache_key != before.cache_key
+    assert after.digest != before.digest
+
+
+@pytest.mark.parametrize("constant", ["VERIFIER_VERSION", "ARTIFACT_SCHEMA_VERSION"])
+def test_version_bump_invalidates_cache_and_prior_snapshot_across_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, constant: str
+) -> None:
+    path = str(tmp_path / "ver.db")
+    first = RecomputeService(path, Registry(fams()))
+    boot = first.bootstrap(base_state())
+    jobs = first.job_count()
+    first.close()
+    monkeypatch.setattr(ir, constant, getattr(ir, constant) + "-next")
+    restarted = RecomputeService(path, Registry(fams()))
+    report = restarted.run("w", now=0)  # no change events: only the version moved
+    built = [f for f, r in report.manifest.results.items() if r.status == BUILT]
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert set(report.plan.dirty) == set(restarted.registry.families)
+    assert report.cache_hits == 0 and report.jobs_started == len(built) > 0
+    assert restarted.job_count() == jobs + len(built)
+    for family in built:
+        assert report.manifest.results[family].cache_key != boot.results[family].cache_key
+    parity(restarted)
+    assert restarted.admit("C") is True
+    assert restarted.run("w", now=1).plan.dirty == ()  # versions stored: incremental again
