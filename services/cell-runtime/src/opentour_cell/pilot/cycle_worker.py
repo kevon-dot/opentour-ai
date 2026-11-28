@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 import threading
@@ -12,6 +13,21 @@ from typing import Any
 
 from opentour_cell.pilot.repair_workflow import _private_json
 from opentour_cell.pilot.training_data import identifier
+
+
+def learning_tick(directory: Path, organization: str) -> dict[str, Any]:
+    """One schedule tick for learning runs under the current standing mandate.
+
+    The owner opts in by authorizing the scheduler selection. The tick rereads the mandate's
+    pause state, mode, fit count and caps every time; it never stores its own copy.
+    """
+    from opentour_cell.pilot.learning_runs import LearningRunError, run_schedule_tick
+
+    try:
+        tick = run_schedule_tick(directory, organization)
+    except LearningRunError as error:
+        return {"state": "held", "reason": str(error)}
+    return {"state": tick["tick"], "reason": tick["reason_code"], "run_id": tick["run_ref"]}
 
 
 def run(
@@ -24,6 +40,7 @@ def run(
     stopped: threading.Event,
 ) -> int:
     from opentour_cell.pilot.autonomous_cycle import cycle_once
+    from opentour_cell.pilot.learning_runs import SCHEDULE_SELECTION
 
     identifier(organization)
     if (
@@ -35,8 +52,13 @@ def run(
         raise ValueError("invalid_worker_configuration")
     while not stopped.is_set():
         try:
-            settings = _private_json(config)
-            outcome: dict[str, Any] = cycle_once(directory, organization, settings)
+            outcome: dict[str, Any]
+            if os.path.lexists(directory / SCHEDULE_SELECTION):
+                # Scheduled learning goes only through the shared learning-run admission, so a
+                # Slack or Zapier trigger for the same intent converges on the same run.
+                outcome = learning_tick(directory, organization)
+            else:
+                outcome = cycle_once(directory, organization, _private_json(config))
             report = {
                 key: outcome[key]
                 for key in (
