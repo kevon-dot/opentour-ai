@@ -1,0 +1,2387 @@
+{
+ "schema": "opentour.ope530.stage-time.v2",
+ "batch_id": "cb614d341102",
+ "started_at": "2026-11-28T00:13:41.482Z",
+ "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+ "git_tree_dirty": false,
+ "harness": "training/profiles/benchmarks/ope530/harness/stage_time.py",
+ "cache_method": "fadvise-dontneed (cold) or read-through (warm) before every process",
+ "machine": {
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "logical_cpus": 4,
+  "mem_total_gib": 15.7,
+  "kernel": "6.18.44-fc-v880",
+  "machine": "x86_64",
+  "virtualization": "unknown"
+ },
+ "finished_at": "2026-11-28T00:16:22.738Z",
+ "git_head_after": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+ "git_head_changed": false,
+ "rows": [
+  {
+   "run_id": "cb614d341102-r0-cold-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:13:41.482Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "cold",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 67.7,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0
+    },
+    "fit": {
+     "wall_ms": 2196.5,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "worker_elapsed_ms": 1993,
+     "steps": 64,
+     "peak_rss_bytes": 297439232,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1683.0,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1618,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1715.6,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1638,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 72.4,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5735.2
+  },
+  {
+   "run_id": "cb614d341102-r0-cold-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:13:47.539Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "cold",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824827.5865104,
+   "marks": {
+    "interp_ready": 1795824827.605712,
+    "done": 1795824829.7260299
+   },
+   "durations_ms": {
+    "import_numeric_ms": 86.7,
+    "hash_inputs_ms": 252.9,
+    "tokenizer_load_ms": 71.8,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 2.3,
+    "frozen_forward_ms": 1459.2,
+    "optimizer_steps_ms": 14.0,
+    "rehash_base_ms": 230.8,
+    "interpreter_start_ms": 15.6,
+    "module_load_ms": 19.2
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     768.6,
+     690.7
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 297476096,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2179.6,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r0-cold-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:13:49.751Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "cold",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824829.809123,
+   "marks": {
+    "interp_ready": 1795824829.8292813,
+    "done": 1795824831.3539586
+   },
+   "durations_ms": {
+    "import_numeric_ms": 70.6,
+    "hash_inputs_ms": 243.3,
+    "tokenizer_load_ms": 66.1,
+    "model_map_ms": 0.8,
+    "tokenize_ms": 1.9,
+    "frozen_forward_ms": 902.3,
+    "score_ms": 0.6,
+    "rehash_base_ms": 237.5,
+    "interpreter_start_ms": 16.8,
+    "module_load_ms": 20.2
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     675.9,
+     226.4
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 294100992,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1584.5,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r0-cold-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:13:51.378Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "cold",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824831.504469,
+   "import_service_ms": 31.7,
+   "validate_ms": 1.9,
+   "worker_subprocess_ms": 2147.7,
+   "publish_ms": 1.8,
+   "worker_internal_elapsed_ms": 1970,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2225.8,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0
+  },
+  {
+   "run_id": "cb614d341102-r0-warm-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:13:53.711Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "warm",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 78.3,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0
+    },
+    "fit": {
+     "wall_ms": 2235.0,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "worker_elapsed_ms": 2055,
+     "steps": 64,
+     "peak_rss_bytes": 298553344,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1598.8,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1540,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1620.9,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1562,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 60.4,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5593.4
+  },
+  {
+   "run_id": "cb614d341102-r0-warm-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:00.430Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "warm",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824840.5708456,
+   "marks": {
+    "interp_ready": 1795824840.5903602,
+    "done": 1795824842.6420686
+   },
+   "durations_ms": {
+    "import_numeric_ms": 49.4,
+    "hash_inputs_ms": 230.0,
+    "tokenizer_load_ms": 64.7,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 1.1,
+    "frozen_forward_ms": 1463.8,
+    "optimizer_steps_ms": 10.5,
+    "rehash_base_ms": 229.9,
+    "interpreter_start_ms": 30.4,
+    "module_load_ms": 19.5
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     721.3,
+     742.4
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 299204608,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2131.6,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r0-warm-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:02.673Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "warm",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824842.8409104,
+   "marks": {
+    "interp_ready": 1795824842.862005,
+    "done": 1795824844.4154246
+   },
+   "durations_ms": {
+    "import_numeric_ms": 52.8,
+    "hash_inputs_ms": 241.2,
+    "tokenizer_load_ms": 92.2,
+    "model_map_ms": 1.0,
+    "tokenize_ms": 1.2,
+    "frozen_forward_ms": 932.9,
+    "score_ms": 0.2,
+    "rehash_base_ms": 230.3,
+    "interpreter_start_ms": 28.0,
+    "module_load_ms": 21.1
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     704.3,
+     228.5
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 293462016,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1625.3,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r0-warm-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:04.439Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 0,
+   "state": "warm",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824844.6287413,
+   "import_service_ms": 26.4,
+   "validate_ms": 4.7,
+   "worker_subprocess_ms": 2098.2,
+   "publish_ms": 1.8,
+   "worker_internal_elapsed_ms": 1990,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2167.8,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0
+  },
+  {
+   "run_id": "cb614d341102-r1-warm-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:06.780Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "warm",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 60.9,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0
+    },
+    "fit": {
+     "wall_ms": 2338.2,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "worker_elapsed_ms": 2146,
+     "steps": 64,
+     "peak_rss_bytes": 298635264,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1618.9,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1549,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1622.3,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1561,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 61.4,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5701.7
+  },
+  {
+   "run_id": "cb614d341102-r1-warm-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:13.081Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "warm",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824853.2139254,
+   "marks": {
+    "interp_ready": 1795824853.2353072,
+    "done": 1795824855.2431285
+   },
+   "durations_ms": {
+    "import_numeric_ms": 54.0,
+    "hash_inputs_ms": 234.8,
+    "tokenizer_load_ms": 64.4,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 1.1,
+    "frozen_forward_ms": 1408.9,
+    "optimizer_steps_ms": 10.6,
+    "rehash_base_ms": 231.7,
+    "interpreter_start_ms": 17.5,
+    "module_load_ms": 21.4
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     708.7,
+     700.1
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 298442752,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2070.3,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r1-warm-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:15.267Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "warm",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824855.3944392,
+   "marks": {
+    "interp_ready": 1795824855.4135878,
+    "done": 1795824856.9300036
+   },
+   "durations_ms": {
+    "import_numeric_ms": 48.7,
+    "hash_inputs_ms": 244.0,
+    "tokenizer_load_ms": 70.1,
+    "model_map_ms": 0.8,
+    "tokenize_ms": 0.9,
+    "frozen_forward_ms": 914.1,
+    "score_ms": 0.2,
+    "rehash_base_ms": 236.1,
+    "interpreter_start_ms": 15.6,
+    "module_load_ms": 19.1
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     674.0,
+     240.0
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 293580800,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1573.7,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r1-warm-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:16.953Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "warm",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824857.145152,
+   "import_service_ms": 24.1,
+   "validate_ms": 3.3,
+   "worker_subprocess_ms": 2071.9,
+   "publish_ms": 6.1,
+   "worker_internal_elapsed_ms": 1966,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2140.5,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0
+  },
+  {
+   "run_id": "cb614d341102-r1-cold-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:19.272Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "cold",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 111.8,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0
+    },
+    "fit": {
+     "wall_ms": 2316.3,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "worker_elapsed_ms": 2085,
+     "steps": 64,
+     "peak_rss_bytes": 297447424,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1796.3,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1722,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1851.9,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1759,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 88.9,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 6165.2
+  },
+  {
+   "run_id": "cb614d341102-r1-cold-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:25.771Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "cold",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824865.8338666,
+   "marks": {
+    "interp_ready": 1795824865.8635037,
+    "done": 1795824868.058655
+   },
+   "durations_ms": {
+    "import_numeric_ms": 128.6,
+    "hash_inputs_ms": 236.2,
+    "tokenizer_load_ms": 69.0,
+    "model_map_ms": 1.0,
+    "tokenize_ms": 3.6,
+    "frozen_forward_ms": 1505.6,
+    "optimizer_steps_ms": 15.7,
+    "rehash_base_ms": 233.9,
+    "interpreter_start_ms": 26.2,
+    "module_load_ms": 29.6
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     732.8,
+     772.8
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 297820160,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2275.5,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r1-cold-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:28.085Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "cold",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824868.160409,
+   "marks": {
+    "interp_ready": 1795824868.1899102,
+    "done": 1795824869.9167929
+   },
+   "durations_ms": {
+    "import_numeric_ms": 136.2,
+    "hash_inputs_ms": 327.5,
+    "tokenizer_load_ms": 73.3,
+    "model_map_ms": 0.8,
+    "tokenize_ms": 1.7,
+    "frozen_forward_ms": 948.8,
+    "score_ms": 0.5,
+    "rehash_base_ms": 236.4,
+    "interpreter_start_ms": 22.2,
+    "module_load_ms": 29.5
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     716.3,
+     232.5
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 294010880,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1800.7,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r1-cold-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:29.940Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 1,
+   "state": "cold",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824870.073328,
+   "import_service_ms": 30.4,
+   "validate_ms": 2.4,
+   "worker_subprocess_ms": 2162.7,
+   "publish_ms": 1.8,
+   "worker_internal_elapsed_ms": 2019,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2233.1,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0
+  },
+  {
+   "run_id": "cb614d341102-r2-cold-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:32.292Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "cold",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 72.2,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0
+    },
+    "fit": {
+     "wall_ms": 2559.1,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "worker_elapsed_ms": 2325,
+     "steps": 64,
+     "peak_rss_bytes": 297312256,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1818.8,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1710,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 2068.4,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1935,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 85.6,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 6604.1
+  },
+  {
+   "run_id": "cb614d341102-r2-cold-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:39.142Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "cold",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824879.2041574,
+   "marks": {
+    "interp_ready": 1795824879.2273684,
+    "done": 1795824881.5266764
+   },
+   "durations_ms": {
+    "import_numeric_ms": 106.7,
+    "hash_inputs_ms": 252.2,
+    "tokenizer_load_ms": 90.8,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 5.5,
+    "frozen_forward_ms": 1564.3,
+    "optimizer_steps_ms": 24.5,
+    "rehash_base_ms": 252.8,
+    "interpreter_start_ms": 25.1,
+    "module_load_ms": 23.2
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     783.7,
+     780.6
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 297336832,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2372.8,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r2-cold-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:41.553Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "cold",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824881.6223059,
+   "marks": {
+    "interp_ready": 1795824881.6454127,
+    "done": 1795824883.2843328
+   },
+   "durations_ms": {
+    "import_numeric_ms": 75.4,
+    "hash_inputs_ms": 254.9,
+    "tokenizer_load_ms": 75.0,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 4.8,
+    "frozen_forward_ms": 987.8,
+    "score_ms": 0.6,
+    "rehash_base_ms": 237.2,
+    "interpreter_start_ms": 21.2,
+    "module_load_ms": 23.1
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     740.9,
+     246.9
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 292421632,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1706.8,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r2-cold-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:43.309Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "cold",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824883.4872658,
+   "import_service_ms": 30.0,
+   "validate_ms": 1.6,
+   "worker_subprocess_ms": 2225.0,
+   "publish_ms": 1.8,
+   "worker_internal_elapsed_ms": 2056,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2298.9,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0
+  },
+  {
+   "run_id": "cb614d341102-r2-warm-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:45.769Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "warm",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 59.9,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0
+    },
+    "fit": {
+     "wall_ms": 2212.5,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "worker_elapsed_ms": 2039,
+     "steps": 64,
+     "peak_rss_bytes": 298651648,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1614.8,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1547,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1657.7,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1590,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 60.6,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5605.5
+  },
+  {
+   "run_id": "cb614d341102-r2-warm-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:52.285Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "warm",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824892.4165668,
+   "marks": {
+    "interp_ready": 1795824892.442747,
+    "done": 1795824894.507452
+   },
+   "durations_ms": {
+    "import_numeric_ms": 68.0,
+    "hash_inputs_ms": 236.6,
+    "tokenizer_load_ms": 66.6,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 1.1,
+    "frozen_forward_ms": 1442.0,
+    "optimizer_steps_ms": 12.5,
+    "rehash_base_ms": 235.3,
+    "interpreter_start_ms": 20.0,
+    "module_load_ms": 26.2
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     716.1,
+     725.9
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 299397120,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2138.0,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r2-warm-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:54.536Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "warm",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824894.7150073,
+   "marks": {
+    "interp_ready": 1795824894.735017,
+    "done": 1795824896.2704573
+   },
+   "durations_ms": {
+    "import_numeric_ms": 52.5,
+    "hash_inputs_ms": 247.6,
+    "tokenizer_load_ms": 65.1,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 0.8,
+    "frozen_forward_ms": 928.2,
+    "score_ms": 0.6,
+    "rehash_base_ms": 238.4,
+    "interpreter_start_ms": 19.0,
+    "module_load_ms": 20.0
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     693.6,
+     234.6
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 293552128,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1597.7,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r2-warm-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:56.295Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 2,
+   "state": "warm",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824896.489496,
+   "import_service_ms": 25.6,
+   "validate_ms": 1.6,
+   "worker_subprocess_ms": 2335.3,
+   "publish_ms": 2.5,
+   "worker_internal_elapsed_ms": 2209,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2400.4,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0
+  },
+  {
+   "run_id": "cb614d341102-r3-warm-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:14:58.876Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "warm",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 66.2,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0
+    },
+    "fit": {
+     "wall_ms": 2142.3,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "worker_elapsed_ms": 1958,
+     "steps": 64,
+     "peak_rss_bytes": 298635264,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1783.9,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1719,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1683.4,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1602,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 84.5,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5760.3
+  },
+  {
+   "run_id": "cb614d341102-r3-warm-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:05.257Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "warm",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824905.3864558,
+   "marks": {
+    "interp_ready": 1795824905.4143293,
+    "done": 1795824907.4094272
+   },
+   "durations_ms": {
+    "import_numeric_ms": 49.0,
+    "hash_inputs_ms": 230.5,
+    "tokenizer_load_ms": 63.1,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 1.1,
+    "frozen_forward_ms": 1406.8,
+    "optimizer_steps_ms": 10.1,
+    "rehash_base_ms": 232.2,
+    "interpreter_start_ms": 15.7,
+    "module_load_ms": 27.9
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     713.6,
+     693.2
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 298549248,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2061.3,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r3-warm-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:07.434Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "warm",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824907.561026,
+   "marks": {
+    "interp_ready": 1795824907.5800328,
+    "done": 1795824909.1765454
+   },
+   "durations_ms": {
+    "import_numeric_ms": 48.5,
+    "hash_inputs_ms": 235.7,
+    "tokenizer_load_ms": 63.7,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 0.8,
+    "frozen_forward_ms": 1007.6,
+    "score_ms": 0.2,
+    "rehash_base_ms": 237.8,
+    "interpreter_start_ms": 15.2,
+    "module_load_ms": 19.0
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     741.4,
+     266.2
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 293666816,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1651.6,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r3-warm-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:09.199Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "warm",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824909.4127328,
+   "import_service_ms": 24.0,
+   "validate_ms": 1.8,
+   "worker_subprocess_ms": 2049.1,
+   "publish_ms": 2.1,
+   "worker_internal_elapsed_ms": 1939,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2112.3,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0
+  },
+  {
+   "run_id": "cb614d341102-r3-cold-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:11.512Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "cold",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 71.0,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0
+    },
+    "fit": {
+     "wall_ms": 2242.4,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "worker_elapsed_ms": 2022,
+     "steps": 64,
+     "peak_rss_bytes": 297410560,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1737.2,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1656,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1658.8,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1591,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 68.2,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5777.6
+  },
+  {
+   "run_id": "cb614d341102-r3-cold-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:17.613Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "cold",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824917.6658638,
+   "marks": {
+    "interp_ready": 1795824917.6884854,
+    "done": 1795824919.7824287
+   },
+   "durations_ms": {
+    "import_numeric_ms": 73.5,
+    "hash_inputs_ms": 245.6,
+    "tokenizer_load_ms": 69.3,
+    "model_map_ms": 1.1,
+    "tokenize_ms": 2.8,
+    "frozen_forward_ms": 1453.9,
+    "optimizer_steps_ms": 14.2,
+    "rehash_base_ms": 232.1,
+    "interpreter_start_ms": 19.9,
+    "module_load_ms": 22.6
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     743.7,
+     710.1
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 297308160,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2160.2,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r3-cold-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:19.808Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "cold",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824919.8775702,
+   "marks": {
+    "interp_ready": 1795824919.9050484,
+    "done": 1795824921.5762565
+   },
+   "durations_ms": {
+    "import_numeric_ms": 84.6,
+    "hash_inputs_ms": 265.3,
+    "tokenizer_load_ms": 68.2,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 1.6,
+    "frozen_forward_ms": 1011.3,
+    "score_ms": 0.4,
+    "rehash_base_ms": 236.8,
+    "interpreter_start_ms": 23.1,
+    "module_load_ms": 27.5
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     742.7,
+     268.6
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 294203392,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1745.2,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r3-cold-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:21.602Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 3,
+   "state": "cold",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824921.7353091,
+   "import_service_ms": 28.7,
+   "validate_ms": 1.6,
+   "worker_subprocess_ms": 2386.7,
+   "publish_ms": 1.4,
+   "worker_internal_elapsed_ms": 2241,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2459.2,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0
+  },
+  {
+   "run_id": "cb614d341102-r4-cold-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:24.178Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "cold",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 85.1,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0
+    },
+    "fit": {
+     "wall_ms": 2454.6,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "worker_elapsed_ms": 2178,
+     "steps": 64,
+     "peak_rss_bytes": 297406464,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1830.0,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1733,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1766.8,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "replay_elapsed_ms": 1690,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 90.8,
+     "exit": 0,
+     "resident_after_conditioning": 0.0,
+     "resident_at_start": 0.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 6227.3
+  },
+  {
+   "run_id": "cb614d341102-r4-cold-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:30.641Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "cold",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824930.6901875,
+   "marks": {
+    "interp_ready": 1795824930.7117214,
+    "done": 1795824932.9912536
+   },
+   "durations_ms": {
+    "import_numeric_ms": 86.8,
+    "hash_inputs_ms": 237.7,
+    "tokenizer_load_ms": 68.9,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 2.1,
+    "frozen_forward_ms": 1619.9,
+    "optimizer_steps_ms": 17.5,
+    "rehash_base_ms": 243.8,
+    "interpreter_start_ms": 17.4,
+    "module_load_ms": 21.5
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     790.8,
+     829.0
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 297148416,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2344.1,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r4-cold-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:33.019Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "cold",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824933.079672,
+   "marks": {
+    "interp_ready": 1795824933.1009605,
+    "done": 1795824934.6622345
+   },
+   "durations_ms": {
+    "import_numeric_ms": 70.5,
+    "hash_inputs_ms": 236.1,
+    "tokenizer_load_ms": 76.4,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 2.3,
+    "frozen_forward_ms": 936.9,
+    "score_ms": 0.6,
+    "rehash_base_ms": 235.6,
+    "interpreter_start_ms": 18.9,
+    "module_load_ms": 21.3
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     706.0,
+     230.9
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 292462592,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1627.3,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r4-cold-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:34.690Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "cold",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824934.804076,
+   "import_service_ms": 36.7,
+   "validate_ms": 8.6,
+   "worker_subprocess_ms": 2203.2,
+   "publish_ms": 2.7,
+   "worker_internal_elapsed_ms": 2048,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2306.0,
+   "resident_after_conditioning": 0.0,
+   "resident_at_start": 0.0
+  },
+  {
+   "run_id": "cb614d341102-r4-warm-A_product_cli",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:37.095Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "warm",
+   "kind": "A_product_cli",
+   "phases": {
+    "prepare": {
+     "wall_ms": 67.3,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0
+    },
+    "fit": {
+     "wall_ms": 2341.3,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "worker_elapsed_ms": 2164,
+     "steps": 64,
+     "peak_rss_bytes": 298582016,
+     "initial_loss": 0.716931939125061,
+     "final_loss": 6.377794306899887e-06,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    },
+    "replay-first": {
+     "wall_ms": 1597.2,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1537,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "replay-repeat": {
+     "wall_ms": 1729.6,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "replay_elapsed_ms": 1668,
+     "output_sha256": "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+    },
+    "verify": {
+     "wall_ms": 70.3,
+     "exit": 0,
+     "resident_after_conditioning": 1.0,
+     "resident_at_start": 1.0,
+     "protected_count": 5,
+     "automatic": 5,
+     "wrong_automatic": 0,
+     "observed_operating_point": "met",
+     "fallback": {
+      "status": "review"
+     },
+     "real_customer_acceptances": 0,
+     "incremental_compute_cost_cents": 0,
+     "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+    }
+   },
+   "completed": true,
+   "end_to_end_ms": 5805.7
+  },
+  {
+   "run_id": "cb614d341102-r4-warm-B_replica_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:44.058Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "warm",
+   "kind": "B_replica_fit",
+   "t0_epoch": 1795824944.1902893,
+   "marks": {
+    "interp_ready": 1795824944.2095938,
+    "done": 1795824946.2883728
+   },
+   "durations_ms": {
+    "import_numeric_ms": 49.4,
+    "hash_inputs_ms": 236.3,
+    "tokenizer_load_ms": 63.0,
+    "model_map_ms": 0.7,
+    "tokenize_ms": 1.1,
+    "frozen_forward_ms": 1485.1,
+    "optimizer_steps_ms": 10.2,
+    "rehash_base_ms": 231.5,
+    "interpreter_start_ms": 17.7,
+    "module_load_ms": 19.3
+   },
+   "tokens": {
+    "examples": 8,
+    "lengths": [
+     51,
+     50,
+     51,
+     51,
+     50,
+     51,
+     50,
+     50
+    ],
+    "useful_tokens": 404,
+    "padded_tokens": 408,
+    "padding_fraction": 0.0098,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     740.5,
+     744.6
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 298516480,
+   "final_loss": 6.377794306899887e-06,
+   "exit": 0,
+   "wall_ms": 2139.1,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r4-warm-B_replica_predict",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:46.314Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "warm",
+   "kind": "B_replica_predict",
+   "t0_epoch": 1795824946.4472523,
+   "marks": {
+    "interp_ready": 1795824946.474041,
+    "done": 1795824948.1638498
+   },
+   "durations_ms": {
+    "import_numeric_ms": 68.9,
+    "hash_inputs_ms": 284.9,
+    "tokenizer_load_ms": 83.4,
+    "model_map_ms": 0.9,
+    "tokenize_ms": 1.2,
+    "frozen_forward_ms": 1013.1,
+    "score_ms": 0.2,
+    "rehash_base_ms": 235.5,
+    "interpreter_start_ms": 21.3,
+    "module_load_ms": 26.8
+   },
+   "tokens": {
+    "examples": 5,
+    "lengths": [
+     52,
+     51,
+     50,
+     50,
+     51
+    ],
+    "useful_tokens": 254,
+    "padded_tokens": 259,
+    "padding_fraction": 0.0193,
+    "batch_size": 4,
+    "per_batch_forward_ms": [
+     777.0,
+     236.1
+    ]
+   },
+   "runtime": {
+    "python": "3.12.16",
+    "numpy": "2.5.5",
+    "tokenizers": "0.21.4"
+   },
+   "peak_rss_bytes": 293552128,
+   "decisions": [
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "billing"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    },
+    {
+     "status": "automatic",
+     "label": "technical"
+    }
+   ],
+   "exit": 0,
+   "wall_ms": 1760.5,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0,
+   "parity_with_product": true
+  },
+  {
+   "run_id": "cb614d341102-r4-warm-C_service_fit",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:48.189Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": 4,
+   "state": "warm",
+   "kind": "C_service_fit",
+   "t0_epoch": 1795824948.383557,
+   "import_service_ms": 26.0,
+   "validate_ms": 2.9,
+   "worker_subprocess_ms": 2191.3,
+   "publish_ms": 9.1,
+   "worker_internal_elapsed_ms": 2080,
+   "artifact_sha256": "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab",
+   "exit": 0,
+   "wall_ms": 2275.7,
+   "resident_after_conditioning": 1.0,
+   "resident_at_start": 1.0
+  },
+  {
+   "run_id": "cb614d341102-warm-D_batch_probe",
+   "batch_id": "cb614d341102",
+   "started_at": "2026-11-28T00:15:50.651Z",
+   "measured_git_sha": "cf074e392a96ed39cc78d1702b372ade00e0f192",
+   "git_tree_dirty": false,
+   "repeat": null,
+   "state": "warm",
+   "kind": "D_batch_probe",
+   "examples": 8,
+   "lengths": [
+    51,
+    50,
+    51,
+    51,
+    50,
+    51,
+    50,
+    50
+   ],
+   "incumbent_batches": [
+    4,
+    4
+   ],
+   "merged_batches": [
+    8
+   ],
+   "max_abs_hidden_diff": 0.0,
+   "trials": [
+    {
+     "trial": 0,
+     "order": [
+      "incumbent",
+      "merged"
+     ],
+     "incumbent_ms": 1701.8,
+     "merged_ms": 1464.8,
+     "saving_ms": 237.0
+    },
+    {
+     "trial": 1,
+     "order": [
+      "merged",
+      "incumbent"
+     ],
+     "incumbent_ms": 1531.0,
+     "merged_ms": 1396.3,
+     "saving_ms": 134.7
+    },
+    {
+     "trial": 2,
+     "order": [
+      "incumbent",
+      "merged"
+     ],
+     "incumbent_ms": 1436.9,
+     "merged_ms": 1391.1,
+     "saving_ms": 45.8
+    },
+    {
+     "trial": 3,
+     "order": [
+      "merged",
+      "incumbent"
+     ],
+     "incumbent_ms": 1419.6,
+     "merged_ms": 1329.4,
+     "saving_ms": 90.2
+    },
+    {
+     "trial": 4,
+     "order": [
+      "incumbent",
+      "merged"
+     ],
+     "incumbent_ms": 1389.9,
+     "merged_ms": 1348.6,
+     "saving_ms": 41.3
+    },
+    {
+     "trial": 5,
+     "order": [
+      "merged",
+      "incumbent"
+     ],
+     "incumbent_ms": 1471.5,
+     "merged_ms": 1322.9,
+     "saving_ms": 148.6
+    },
+    {
+     "trial": 6,
+     "order": [
+      "incumbent",
+      "merged"
+     ],
+     "incumbent_ms": 1415.1,
+     "merged_ms": 1421.0,
+     "saving_ms": -5.9
+    },
+    {
+     "trial": 7,
+     "order": [
+      "merged",
+      "incumbent"
+     ],
+     "incumbent_ms": 1467.8,
+     "merged_ms": 1357.9,
+     "saving_ms": 109.9
+    },
+    {
+     "trial": 8,
+     "order": [
+      "incumbent",
+      "merged"
+     ],
+     "incumbent_ms": 1553.5,
+     "merged_ms": 1408.5,
+     "saving_ms": 145.0
+    },
+    {
+     "trial": 9,
+     "order": [
+      "merged",
+      "incumbent"
+     ],
+     "incumbent_ms": 1540.8,
+     "merged_ms": 1361.1,
+     "saving_ms": 179.7
+    }
+   ],
+   "peak_rss_bytes": 310992896,
+   "exit": 0,
+   "wall_ms": 31968.3,
+   "resident_after_conditioning": 1.0
+  }
+ ]
+}
