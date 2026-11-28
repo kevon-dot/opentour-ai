@@ -1762,3 +1762,343 @@ def test_g5_residual_total_wrong_gate_boundary(tmp_path):
         "comparator": 2,
     }
     assert not any("total_wrong_automatic_increased" in r for r in doc["reasons"])
+
+
+# ----------------------------------------------------------------- V: correction and revocation
+
+
+def revoked_held(view, reason="claim_corrected"):
+    """A revoked key reads as stale/revoked, never as its original outcome or effects."""
+    assert view["schema_version"] == iv.HELD_VIEW
+    assert view["outcome"] == "stale" and view["state"] == "revoked"
+    assert view["verdict"] == "not_reproduced"
+    assert view["reasons"] == ["revocation_reason_" + reason, "verdict_revoked"]
+    assert view["effects"] == {
+        "improvement_alert_eligible": False,
+        "release_request_eligible": False,
+        "handoff_request_eligible": False,
+    }
+    assert "verified_gain" not in json.dumps(view)
+    assert not cp._verdict_ok(view)  # the OPE-421 packet boundary refuses it as unverified
+    return view
+
+
+def custody_files(tmp_path, sub):
+    return sorted(p.name for p in (tmp_path / "evaluator-custody" / sub).glob("*.json"))
+
+
+def test_v1_revoked_verified_gain_reads_as_stale_and_every_consumer_check_refuses(tmp_path):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    replays = s.replays()
+    v = run(tmp_path, s, ev=ev, replays=replays)
+    assert v.outcome == "verified_gain"
+    assert ev.authorize(v.document, effect="improvement_alert")["authorized"] is True
+    assert ev.read_verdict(v.verdict_key) == v.document
+    r = ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
+    assert not r.replayed and r.notice is None
+    rec = r.record
+    assert rec["schema_version"] == iv.REVOCATION and rec["verdict_key"] == v.verdict_key
+    assert rec["revoked_verdict_digests"] == [v.document["verdict_digest"]]
+    assert rec["issued_by"] == EVALUATOR and rec["issued_by_authenticated"] is False
+    assert rec["revocation_digest"] == digest(
+        {k: x for k, x in rec.items() if k != "revocation_digest"}
+    )
+    revoked_held(ev.read_verdict(v.verdict_key))
+    for effect in ("improvement_alert", "release_request", "handoff_request"):
+        out = ev.authorize(v.document, effect=effect)
+        assert out == {
+            "authorized": False,
+            "effect": effect,
+            "reason": "verdict_revoked",
+            "state": "revoked",
+        }
+    # Re-reading through evaluate returns the revoked view and never re-scores.
+    again = run(tmp_path, s, ev=ev, replays=replays)
+    assert again.replayed and again.outcome == "stale"
+    revoked_held(again.document)
+    assert len(replays["candidate"].calls) == 1
+    # A restarted evaluator over the same custody reads the same revocation.
+    revoked_held(evaluator(tmp_path).read_verdict(v.verdict_key))
+
+
+def test_v2_revoking_twice_is_idempotent_and_the_first_record_is_final(tmp_path):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    first = ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
+    second = ev.revoke_verdict(v.verdict_key, reason="scorer_defect", issued_by="generated-other")
+    assert second.replayed and second.record == first.record
+    assert second.record["reason"] == "claim_corrected"
+    assert custody_files(tmp_path, "revocations") == [v.verdict_key + ".json"]
+    revoked_held(ev.read_verdict(v.verdict_key))
+
+
+def test_v3_revoke_after_expiry_covers_live_archived_and_reissued_generations(
+    tmp_path, monkeypatch
+):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    v1 = run(tmp_path, s, ev=ev)
+    now = int(iv.time.time())
+    monkeypatch.setattr(iv.time, "time", lambda: now + 8 * 86_400)
+    expired = ev.read_verdict(v1.verdict_key)
+    assert expired["state"] == "expired" and expired["outcome"] == "stale"
+    assert ev.authorize(v1.document, effect="improvement_alert")["reason"] == "verdict_expired"
+    # Re-evaluation after expiry archives generation one and issues generation two.
+    monkeypatch.setattr(iv.time, "time", lambda: now + 8 * 86_400 + 5)
+    v2 = run(tmp_path, s, ev=ev)
+    assert not v2.replayed and v2.verdict_key == v1.verdict_key
+    assert ev.authorize(v1.document, effect="improvement_alert")["reason"] == (
+        "verdict_document_mismatch"  # an archived generation never regains authority
+    )
+    # Generation two expires too; the revocation still lands and covers both generations.
+    monkeypatch.setattr(iv.time, "time", lambda: now + 20 * 86_400)
+    r = ev.revoke_verdict(v1.verdict_key, reason="answer_key_defect", issued_by=EVALUATOR)
+    assert r.record["revoked_verdict_digests"] == sorted(
+        {v1.document["verdict_digest"], v2.document["verdict_digest"]}
+    )
+    revoked_held(ev.read_verdict(v1.verdict_key), reason="answer_key_defect")
+    replays = s.replays()
+    again = run(tmp_path, s, ev=ev, replays=replays)
+    assert again.outcome == "stale" and replays["candidate"].calls == []  # never re-issued
+    assert custody_files(tmp_path, "verdicts") == [v1.verdict_key + ".json"]
+    assert ev.read_verdict(v1.verdict_key)["state"] == "revoked"
+
+
+def test_v4_revoking_an_unknown_or_invalid_key_stores_nothing(tmp_path):
+    ev = evaluator(tmp_path)
+    run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    with pytest.raises(iv.VerdictInputError, match="revocation_target_unknown"):
+        ev.revoke_verdict(sha("never-issued"), reason="claim_corrected", issued_by=EVALUATOR)
+    for kwargs, reason in (
+        ({"key": "not-a-key"}, "invalid_verdict_key"),
+        ({"reason": "free text explaining why"}, "invalid_revocation_reason"),
+        ({"issued_by": "has spaces"}, "invalid_revocation_issuer"),
+        ({"watch_fired": 1}, "invalid_watch_fired_flag"),
+    ):
+        args = {
+            "key": sha("never-issued"),
+            "reason": "claim_corrected",
+            "issued_by": EVALUATOR,
+            **kwargs,
+        }
+        key = args.pop("key")
+        with pytest.raises(iv.VerdictInputError, match=reason):
+            ev.revoke_verdict(key, **args)
+    with pytest.raises(iv.VerdictInputError, match="verdict_not_revoked"):
+        ev.correction_notice(sha("never-issued"), watch_fired=True)
+    with pytest.raises(iv.VerdictInputError, match="verdict_unknown"):
+        ev.read_verdict(sha("never-issued"))
+    assert custody_files(tmp_path, "revocations") == []
+    assert custody_files(tmp_path, "notices") == []
+
+
+@pytest.mark.parametrize(
+    "tamper,error",
+    [
+        ("reason", "stored_revocation_tampered"),  # resealed digest without the evaluator key
+        ("key", "stored_revocation_tampered"),  # pointed at another key
+        ("seal", "stored_revocation_tampered"),  # local seal replaced
+        ("garbage", "stored_revocation_corrupt"),
+    ],
+)
+def test_v5_a_tampered_revocation_record_is_refused_everywhere(tmp_path, tamper, error):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    v = run(tmp_path, s, ev=ev)
+    ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
+    path = tmp_path / "evaluator-custody" / "revocations" / (v.verdict_key + ".json")
+    stored = json.loads(path.read_bytes())
+    rec = stored["record"]
+    if tamper == "reason":
+        rec["reason"] = "evidence_withdrawn"
+    elif tamper == "key":
+        rec["verdict_key"] = sha("other-key")
+    if tamper in ("reason", "key"):
+        body = {k: x for k, x in rec.items() if k != "revocation_digest"}
+        rec["revocation_digest"] = digest(body)
+    if tamper == "seal":
+        stored["local_seal"] = "0" * 64
+    path.write_text("{not json" if tamper == "garbage" else json.dumps(stored))
+    for call in (
+        lambda: ev.read_verdict(v.verdict_key),
+        lambda: ev.authorize(v.document, effect="improvement_alert"),
+        lambda: run(tmp_path, s, ev=ev),
+        lambda: ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR),
+        lambda: ev.correction_notice(v.verdict_key, watch_fired=True),
+    ):
+        with pytest.raises(iv.CustodyError, match=error):
+            call()
+    assert custody_files(tmp_path, "notices") == []
+
+
+def test_v6_exactly_one_correction_notice_only_when_a_watch_fired(tmp_path):
+    ev = evaluator(tmp_path)
+    quiet = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    r = ev.revoke_verdict(quiet.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
+    assert r.notice is None and ev.correction_notice(quiet.verdict_key, watch_fired=False) is None
+    assert custody_files(tmp_path, "notices") == []  # no watch fired: no notice owed
+    fired = run(tmp_path, Scenario(CLEAN_WIN, prefix="fired-"), ev=ev)
+    r = ev.revoke_verdict(
+        fired.verdict_key, reason="scorer_defect", issued_by=EVALUATOR, watch_fired=True
+    )
+    assert r.notice is not None and not r.notice.replayed
+    notice = r.notice.document
+    assert notice["schema_version"] == iv.CORRECTION_NOTICE
+    assert notice["revocation_digest"] == r.record["revocation_digest"]
+    assert notice["revoked_verdict_digests"] == [fired.document["verdict_digest"]]
+    assert notice["notice_id"].startswith("correction-")
+    retries = [
+        ev.correction_notice(fired.verdict_key, watch_fired=True),
+        ev.correction_notice(fired.verdict_key, watch_fired=False),
+        ev.revoke_verdict(
+            fired.verdict_key, reason="scorer_defect", issued_by=EVALUATOR, watch_fired=True
+        ).notice,
+    ]
+    assert all(n is not None and n.replayed and n.document == notice for n in retries)
+    assert custody_files(tmp_path, "notices") == [fired.verdict_key + ".json"]
+    assert "case-0000" not in json.dumps(notice) and A not in json.dumps(notice)
+
+
+def test_v7_restart_between_revoke_and_notice_still_yields_exactly_one_notice(tmp_path):
+    first = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=first)
+    # The process stops after the revocation is durable and before any notice is written.
+    first.revoke_verdict(v.verdict_key, reason="evidence_withdrawn", issued_by=EVALUATOR)
+    assert custody_files(tmp_path, "notices") == []
+    restarted = evaluator(tmp_path)
+    retry = restarted.revoke_verdict(
+        v.verdict_key, reason="evidence_withdrawn", issued_by=EVALUATOR, watch_fired=True
+    )
+    assert retry.replayed and retry.notice is not None and not retry.notice.replayed
+    # A second restart, and a concurrent caller over the same custody, get the same notice.
+    again = evaluator(tmp_path).correction_notice(v.verdict_key, watch_fired=True)
+    other = evaluator(tmp_path).revoke_verdict(
+        v.verdict_key, reason="evidence_withdrawn", issued_by=EVALUATOR, watch_fired=True
+    )
+    assert again is not None and again.replayed and again.document == retry.notice.document
+    assert other.notice is not None and other.notice.document == retry.notice.document
+    assert custody_files(tmp_path, "notices") == [v.verdict_key + ".json"]
+    revoked_held(restarted.read_verdict(v.verdict_key), reason="evidence_withdrawn")
+
+
+def test_v8_a_lost_write_race_returns_the_first_notice_and_revocation(tmp_path, monkeypatch):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    real = iv._write_once
+    raced: list[str] = []
+
+    def racing(path, data):
+        # Another process lands the same record first; this writer must lose and read it back.
+        sub = path.parent.name
+        if sub in ("revocations", "notices") and sub not in raced:
+            raced.append(sub)
+            monkeypatch.setattr(iv, "_write_once", real)
+            other = evaluator(tmp_path)
+            if sub == "revocations":
+                other.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by="racer-1")
+            else:
+                other.correction_notice(v.verdict_key, watch_fired=True)
+            monkeypatch.setattr(iv, "_write_once", racing)
+        return real(path, data)
+
+    monkeypatch.setattr(iv, "_write_once", racing)
+    r = ev.revoke_verdict(
+        v.verdict_key, reason="scorer_defect", issued_by=EVALUATOR, watch_fired=True
+    )
+    assert raced == ["revocations", "notices"]
+    assert r.replayed and r.record["issued_by"] == "racer-1"
+    assert r.notice is not None and r.notice.replayed
+    assert custody_files(tmp_path, "notices") == [v.verdict_key + ".json"]
+
+
+def test_v9_a_tampered_correction_notice_is_refused(tmp_path):
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    ev.revoke_verdict(
+        v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR, watch_fired=True
+    )
+    path = tmp_path / "evaluator-custody" / "notices" / (v.verdict_key + ".json")
+    stored = json.loads(path.read_bytes())
+    stored["notice"]["revocation_digest"] = sha("other-revocation")
+    body = {k: x for k, x in stored["notice"].items() if k != "notice_digest"}
+    stored["notice"]["notice_digest"] = digest(body)
+    path.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_correction_notice_tampered"):
+        ev.correction_notice(v.verdict_key, watch_fired=True)
+    path.write_text("[]")
+    with pytest.raises(iv.CustodyError, match="stored_correction_notice_corrupt"):
+        ev.correction_notice(v.verdict_key, watch_fired=False)
+
+
+def test_v11_each_seal_layer_is_checked_on_its_own(tmp_path):
+    """Mutants: each of digest, HMAC, key and revocation binding must fail closed by itself."""
+    ev = evaluator(tmp_path)
+    a = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    b = run(tmp_path, Scenario(CLEAN_WIN, prefix="other-"), ev=ev)
+    ev.revoke_verdict(
+        a.verdict_key, reason="claim_corrected", issued_by=EVALUATOR, watch_fired=True
+    )
+    root = tmp_path / "evaluator-custody"
+    rev_a = root / "revocations" / (a.verdict_key + ".json")
+    good_rev = rev_a.read_bytes()
+    # A writer holding the key but leaving a stale digest: only the digest check catches it.
+    stored = json.loads(good_rev)
+    stored["record"]["reason"] = "scorer_defect"
+    stored["local_seal"] = ev._commit({"record": stored["record"]})
+    rev_a.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_revocation_tampered"):
+        ev.read_verdict(a.verdict_key)
+    rev_a.write_bytes(good_rev)
+    # A valid revocation copied under another key: only the key binding catches it.
+    (root / "revocations" / (b.verdict_key + ".json")).write_bytes(good_rev)
+    with pytest.raises(iv.CustodyError, match="stored_revocation_tampered"):
+        ev.read_verdict(b.verdict_key)
+    (root / "revocations" / (b.verdict_key + ".json")).unlink()
+    assert ev.read_verdict(b.verdict_key) == b.document
+    notice_a = root / "notices" / (a.verdict_key + ".json")
+    good_notice = notice_a.read_bytes()
+    # Resealed digest without the evaluator key: only the HMAC catches it.
+    stored = json.loads(good_notice)
+    stored["notice"]["reason"] = "scorer_defect"
+    body = {k: x for k, x in stored["notice"].items() if k != "notice_digest"}
+    stored["notice"]["notice_digest"] = digest(body)
+    notice_a.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_correction_notice_tampered"):
+        ev.correction_notice(a.verdict_key, watch_fired=True)
+    # A fully keyed notice bound to another revocation: only the binding catches it.
+    stored["notice"]["revocation_digest"] = sha("other-revocation")
+    body = {k: x for k, x in stored["notice"].items() if k != "notice_digest"}
+    stored["notice"]["notice_digest"] = digest(body)
+    stored["local_seal"] = ev._commit({"notice": stored["notice"]})
+    notice_a.write_text(json.dumps(stored))
+    with pytest.raises(iv.CustodyError, match="stored_correction_notice_tampered"):
+        ev.correction_notice(a.verdict_key, watch_fired=True)
+    notice_a.write_bytes(good_notice)
+    assert ev.correction_notice(a.verdict_key, watch_fired=True) is not None
+
+
+def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(tmp_path):
+    ev = evaluator(tmp_path)
+    win = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    non_win = run(tmp_path, Scenario(B4, prefix="b4-"), ev=ev)
+    assert ev.authorize(non_win.document, effect="improvement_alert") == {
+        "authorized": False,
+        "effect": "improvement_alert",
+        "reason": "effect_not_eligible",
+        "state": "inconclusive",
+    }
+    assert ev.authorize(win.document, effect="release_request")["reason"] == "effect_not_eligible"
+    forged = {**win.document, "outcome": "verified_gain", "reasons": []}
+    forged["effects"] = {**forged["effects"], "release_request_eligible": True}
+    assert ev.authorize(forged, effect="release_request")["reason"] == "verdict_document_mismatch"
+    other = evaluator(tmp_path / "other")
+    assert other.authorize(win.document, effect="improvement_alert")["reason"] == "verdict_unknown"
+    view = ev.read_verdict(win.verdict_key)
+    ev.revoke_verdict(win.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
+    held_view = ev.read_verdict(win.verdict_key)
+    for doc in (held_view, {}, None, {"schema_version": iv.VERDICT, "verdict_key": "x"}):
+        assert ev.authorize(doc, effect="improvement_alert")["reason"] == "verdict_unverified"
+    assert ev.authorize(view, effect="improvement_alert")["reason"] == "verdict_revoked"
+    with pytest.raises(iv.VerdictInputError, match="unknown_consumer_effect"):
+        ev.authorize(win.document, effect="slack_post")

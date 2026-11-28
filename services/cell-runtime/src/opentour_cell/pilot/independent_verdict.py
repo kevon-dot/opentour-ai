@@ -45,6 +45,17 @@ returns the stored original after re-checking it against the current claim; a ch
 a new key and a new verdict; a verdict past its ``not_after`` is archived and re-evaluated.
 Verified non-wins (no material gain, regression, inconclusive) are first-class outcomes.
 
+Correction and revocation: ``revoke_verdict`` appends one sealed, write-once revocation per
+verdict key. From then on ``read_verdict``, ``evaluate`` and the consumer check ``authorize``
+report the key as ``stale`` (state ``revoked``) and never as its original outcome, for the live
+verdict, archived generations and any re-issue alike. When the consumer says a watch already
+fired (``watch_fired=True``), exactly one correction-notice record exists for the key, across
+retries, restarts and concurrent callers. The revocation lives in the same custody directory as
+the verdict, so whoever can delete files there can also delete a revocation; that is the same
+``locally_keyed`` limit as every other record here. ``authorize`` is the check that sees a
+revocation; a consumer that checks only a document's plain digest (``comparison_packet``) does
+not, so a consumer must call ``authorize`` before acting.
+
 The fresh-cohort register is per custody directory: any new claim (whatever ``selection_basis``
 the producer declares, since that basis is caller-asserted) is held when its cases or families
 overlap any cohort a verdict in this directory scored. Another evaluator's custody directory
@@ -133,6 +144,24 @@ _TUNED_KINDS = ("open_weight_fit",)
 _TUNED_COMPARATORS = ("incumbent", "simple_repair")
 _SELECTION = ("frozen_before_readout", "after_protected_readout")
 _PAIR_FIELDS = ("comparable", "fixes", "new_errors", "unchanged_right", "unchanged_wrong")
+REVOCATION = "opentour.pilot.independent-verdict-revocation.v1"
+CORRECTION_NOTICE = "opentour.pilot.independent-verdict-correction-notice.v1"
+HELD_VIEW = "opentour.pilot.independent-verdict-held-view.v1"
+# Closed vocabulary: a revocation never carries free text.
+REVOCATION_REASONS = (
+    "benchmark_audit_superseded",
+    "answer_key_defect",
+    "scorer_defect",
+    "artifact_identity_defect",
+    "evidence_withdrawn",
+    "claim_corrected",
+)
+_EFFECT_FLAGS = {
+    "improvement_alert": "improvement_alert_eligible",
+    "release_request": "release_request_eligible",
+    "handoff_request": "handoff_request_eligible",
+}
+_NO_EFFECTS = {flag: False for flag in _EFFECT_FLAGS.values()}
 
 
 class VerdictInputError(ValueError):
@@ -445,6 +474,23 @@ class IndependentVerdict:
     @property
     def outcome(self) -> str:
         return str(self.document["outcome"])
+
+
+@dataclass(frozen=True)
+class CorrectionNotice:
+    """The single correction notice for a revoked verdict whose watch had already fired."""
+
+    document: Json
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class Revocation:
+    """An append-only, sealed revocation of one verdict key, and its notice if one is owed."""
+
+    record: Json
+    notice: CorrectionNotice | None
+    replayed: bool
 
 
 # --------------------------------------------------------------------------- scorer
@@ -842,7 +888,7 @@ class IndependentEvaluator:
         self.scorer = scorer or DecisionScorer()
         self.signer = signer
         self._root = root
-        for sub in ("", "verdicts", "predictions", "cohorts", "expired"):
+        for sub in ("", "verdicts", "predictions", "cohorts", "expired", "revocations", "notices"):
             (root / sub).mkdir(mode=0o700, parents=True, exist_ok=True)
             mode = (root / sub).stat().st_mode
             if (root / sub).is_symlink() or mode & 0o077:
@@ -866,6 +912,9 @@ class IndependentEvaluator:
         path = self._root / "verdicts" / (key + ".json")
         if not path.exists():
             return None
+        return self._load_stored(path, key)
+
+    def _load_stored(self, path: Path, key: str) -> IndependentVerdict:
         try:
             stored = json.loads(path.read_bytes())
             document, signature = stored["document"], stored["signature"]
@@ -921,6 +970,243 @@ class IndependentEvaluator:
                 removed += 1
         return removed
 
+    # ---- correction and revocation
+
+    def _generations(self, key: str) -> list[Json]:
+        """Every sealed verdict issued under ``key``: the live one and any archived ones."""
+        documents = []
+        live = self._load_verdict(key)
+        if live is not None:
+            documents.append(live.document)
+        for path in sorted((self._root / "expired").glob(f"verdicts-{key}-*.json")):
+            documents.append(self._load_stored(path, key).document)
+        return documents
+
+    def _load_revocation(self, key: str) -> Json | None:
+        path = self._root / "revocations" / (key + ".json")
+        if not path.exists():
+            return None
+        try:
+            stored = json.loads(path.read_bytes())
+            record = stored["record"]
+            body = {k: v for k, v in record.items() if k != "revocation_digest"}
+            sealed = record["revocation_digest"] == digest(body)
+            keyed = hmac.compare_digest(stored["local_seal"], self._commit({"record": record}))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise CustodyError("stored_revocation_corrupt") from None
+        if not (
+            sealed
+            and keyed
+            and record.get("schema_version") == REVOCATION
+            and record.get("verdict_key") == key
+        ):
+            raise CustodyError("stored_revocation_tampered")
+        return dict(record)
+
+    def _load_notice(self, key: str, revocation: Json) -> Json | None:
+        path = self._root / "notices" / (key + ".json")
+        if not path.exists():
+            return None
+        try:
+            stored = json.loads(path.read_bytes())
+            notice = stored["notice"]
+            body = {k: v for k, v in notice.items() if k != "notice_digest"}
+            sealed = notice["notice_digest"] == digest(body)
+            keyed = hmac.compare_digest(stored["local_seal"], self._commit({"notice": notice}))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise CustodyError("stored_correction_notice_corrupt") from None
+        if not (
+            sealed
+            and keyed
+            and notice.get("schema_version") == CORRECTION_NOTICE
+            and notice.get("verdict_key") == key
+            and notice.get("revocation_digest") == revocation["revocation_digest"]
+        ):
+            raise CustodyError("stored_correction_notice_tampered")
+        return dict(notice)
+
+    def revoke_verdict(
+        self, key: str, *, reason: str, issued_by: str, watch_fired: bool = False
+    ) -> Revocation:
+        """Revoke every verdict issued under ``key``. Append-only, sealed and idempotent.
+
+        The first revocation of a key is final: a repeat (a retry, a restart, a second caller)
+        returns that original record unchanged, whatever reason it names. A revocation is scoped
+        to the key, not to one issued document, so an expired verdict, its archived generations
+        and any later re-issue under the same key all read as revoked; ``evaluate`` never
+        re-scores a revoked key. A corrected claim is a different claim and so a different key.
+
+        ``issued_by`` is a caller-asserted identity label, not authentication (no evaluator key
+        exists yet, OPE-566); a revocation only removes authority, so it fails closed.
+        ``watch_fired`` is the consumer's statement that a watch already fired on this verdict;
+        when true, exactly one correction notice exists for the key afterwards (see
+        ``correction_notice``).
+        """
+        if not _is_sha(key):
+            raise VerdictInputError("invalid_verdict_key")
+        if reason not in REVOCATION_REASONS:
+            raise VerdictInputError("invalid_revocation_reason")
+        if not isinstance(issued_by, str) or not _ID.fullmatch(issued_by):
+            raise VerdictInputError("invalid_revocation_issuer")
+        if type(watch_fired) is not bool:
+            raise VerdictInputError("invalid_watch_fired_flag")
+        record = self._load_revocation(key)
+        replayed = record is not None
+        if record is None:
+            generations = self._generations(key)
+            if not generations:
+                # Nothing issued here under this key: there is no authority to revoke, and a
+                # record bound to no verdict would be unverifiable. Nothing is stored.
+                raise VerdictInputError("revocation_target_unknown")
+            body: Json = {
+                "schema_version": REVOCATION,
+                "verdict_key": key,
+                "revoked_verdict_digests": sorted({d["verdict_digest"] for d in generations}),
+                "reason": reason,
+                "issued_by": issued_by,
+                "issued_by_authenticated": False,
+                "evaluator_id": self.evaluator_id,
+                "revoked_at": int(time.time()),
+                "effect": "invalidates_outstanding_authority",
+                "evidence_tier": EVIDENCE_TIER,
+            }
+            sealed = {**body, "revocation_digest": digest(body)}
+            stored = {"record": sealed, "local_seal": self._commit({"record": sealed})}
+            path = self._root / "revocations" / (key + ".json")
+            replayed = not _write_once(path, json.dumps(stored, sort_keys=True).encode())
+            record = self._load_revocation(key)  # a lost race returns the first record
+            assert record is not None
+        notice = self.correction_notice(key, watch_fired=watch_fired)
+        return Revocation(record, notice, replayed)
+
+    def correction_notice(self, key: str, *, watch_fired: bool) -> CorrectionNotice | None:
+        """The one correction notice for a revoked verdict whose watch already fired.
+
+        Exactly one notice record ever exists per revoked key: it is created write-once under a
+        deterministic id, so a retry, a restart or a concurrent caller gets the same record back
+        (``replayed``). With ``watch_fired`` false and no notice yet, nothing is created and
+        ``None`` is returned: no watch fired, so no correction is owed. Delivering the notice
+        exactly once (Slack, OPE-524) is the consumer's job, keyed by ``notice_id``.
+        """
+        if not _is_sha(key):
+            raise VerdictInputError("invalid_verdict_key")
+        if type(watch_fired) is not bool:
+            raise VerdictInputError("invalid_watch_fired_flag")
+        revocation = self._load_revocation(key)
+        if revocation is None:
+            raise VerdictInputError("verdict_not_revoked")
+        existing = self._load_notice(key, revocation)
+        if existing is not None:
+            return CorrectionNotice(existing, replayed=True)
+        if not watch_fired:
+            return None
+        body: Json = {
+            "schema_version": CORRECTION_NOTICE,
+            "notice_id": "correction-"
+            + digest([CORRECTION_NOTICE, key, revocation["revocation_digest"]])[:32],
+            "verdict_key": key,
+            "revocation_digest": revocation["revocation_digest"],
+            "revoked_verdict_digests": revocation["revoked_verdict_digests"],
+            "reason": revocation["reason"],
+            "evaluator_id": self.evaluator_id,
+            "created_at": int(time.time()),
+        }
+        sealed = {**body, "notice_digest": digest(body)}
+        stored = {"notice": sealed, "local_seal": self._commit({"notice": sealed})}
+        path = self._root / "notices" / (key + ".json")
+        created = _write_once(path, json.dumps(stored, sort_keys=True).encode())
+        notice = self._load_notice(key, revocation)
+        assert notice is not None
+        return CorrectionNotice(notice, replayed=not created)
+
+    def _held_view(self, key: str, state: str, reasons: list[str], extra: Json) -> Json:
+        """A verdict that must not be acted on. It never carries the original outcome."""
+        return {
+            "schema_version": HELD_VIEW,
+            "verdict_key": key,
+            "outcome": "stale",
+            "state": state,
+            "verdict": "not_reproduced",
+            "reasons": reasons,
+            "effects": dict(_NO_EFFECTS),
+            "verifier_id": self.evaluator_id,
+            **extra,
+        }
+
+    def _revoked_view(self, revocation: Json) -> Json:
+        return self._held_view(
+            revocation["verdict_key"],
+            "revoked",
+            ["revocation_reason_" + revocation["reason"], "verdict_revoked"],
+            {
+                "revocation_digest": revocation["revocation_digest"],
+                "revoked_verdict_digests": revocation["revoked_verdict_digests"],
+            },
+        )
+
+    def read_verdict(self, key: str) -> Json:
+        """What a consumer reads for ``key``: the issued document only while it is current.
+
+        A revoked key reads as ``stale`` with state ``revoked``; an expired one as ``stale`` with
+        state ``expired``. Neither view carries the original outcome or any eligible effect, and
+        neither has the verdict schema, so the OPE-421 packet boundary refuses it.
+        """
+        if not _is_sha(key):
+            raise VerdictInputError("invalid_verdict_key")
+        revocation = self._load_revocation(key)
+        if revocation is not None:
+            return self._revoked_view(revocation)
+        live = self._load_verdict(key)
+        if live is None:
+            raise VerdictInputError("verdict_unknown")
+        if int(time.time()) > live.document["not_after"]:
+            return self._held_view(
+                key,
+                "expired",
+                ["verdict_expired"],
+                {"verdict_digest": live.document["verdict_digest"]},
+            )
+        return live.document
+
+    def authorize(self, document: Mapping[str, Any], *, effect: str) -> Json:
+        """The consumer check: may ``effect`` act on this verdict document now?
+
+        Every consumer (eligibility, watch, report, release gate) calls this with the document it
+        holds before acting. It refuses a revoked key, an expired verdict, a document that is not
+        the one stored under its key (including an older archived generation), and an effect the
+        verdict did not make eligible. Custody tampering raises ``CustodyError``.
+        """
+        if effect not in _EFFECT_FLAGS:
+            raise VerdictInputError("unknown_consumer_effect")
+
+        def refuse(reason: str, state: str) -> Json:
+            return {"authorized": False, "effect": effect, "reason": reason, "state": state}
+
+        if (
+            not isinstance(document, Mapping)
+            or document.get("schema_version") != VERDICT
+            or not _is_sha(document.get("verdict_key"))
+        ):
+            return refuse("verdict_unverified", "unverified")
+        key = str(document["verdict_key"])
+        if self._load_revocation(key) is not None:
+            return refuse("verdict_revoked", "revoked")
+        stored = self._load_verdict(key)
+        if stored is None:
+            return refuse("verdict_unknown", "unknown")
+        if stored.document != dict(document):
+            return refuse("verdict_document_mismatch", "unverified")
+        if int(time.time()) > stored.document["not_after"]:
+            return refuse("verdict_expired", "expired")
+        if stored.document["effects"].get(_EFFECT_FLAGS[effect]) is not True:
+            return refuse("effect_not_eligible", stored.outcome)
+        return {
+            "authorized": True,
+            "effect": effect,
+            "reason": "verdict_current_and_eligible",
+            "state": stored.outcome,
+        }
+
     # ---- evaluation
 
     def verdict_key(
@@ -970,6 +1256,10 @@ class IndependentEvaluator:
         if not isinstance(audit_receipt, Mapping):
             raise VerdictInputError("invalid_audit_receipt")
         key = self.verdict_key(claim, population, policy, audit_receipt)
+        revocation = self._load_revocation(key)
+        if revocation is not None:
+            # A revoked key is final: never re-scored, never re-issued, never its original state.
+            return IndependentVerdict(self._revoked_view(revocation), None, replayed=True)
         existing = self._load_verdict(key)
         if existing is not None:
             stored = existing.document
