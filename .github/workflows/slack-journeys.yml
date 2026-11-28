@@ -55,7 +55,6 @@ jobs:
       - name: Exercise the packaged worker with generated Slack and reader fixtures
         env:
           OPENTOUR_UNIT_GUARD: '1'
-          OPENTOUR_P1_MCP_WITNESS: '1'
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
@@ -99,6 +98,28 @@ jobs:
                   raise SystemExit(f"Missing or nonpassing customer journey in {module}")
           print(f"{len(cases)} generated packaged checks passed")
           PY
+      - name: Exercise cold-start intake through independent official SDK sessions
+        run: |
+          pilot=services/cell-runtime/tests/pilot
+          # The SDK owns a new process group per stdio session. The integration runner
+          # isolates its processes and network while running as the unprivileged runner.
+          sudo unshare --net --pid --fork --kill-child --mount-proc --setgid "$(id -g)" --setuid "$(id -u)" -- \
+            env -i HOME="$HOME" PATH="$PATH" PYTHONPATH="$RUNNER_TEMP/kit/opentour-slack.pyz:$PWD/$pilot" \
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 OPENTOUR_P1_MCP_WITNESS=1 \
+            .venv/bin/python -m pytest -q -c pyproject.toml -o xfail_strict=true \
+            --junitxml="$RUNNER_TEMP/p1-mcp.xml" "$pilot/test_p1_live_after_starter.py"
+          .venv/bin/python - "$RUNNER_TEMP/p1-mcp.xml" <<'PYTHON'
+          import json
+          import sys
+          from xml.etree import ElementTree
+          suite = ElementTree.parse(sys.argv[1]).find(".//testsuite")
+          expected = {"p1_default-off", "p1_signed-observation", "p1_private-owner-recipient"}
+          receipts = {p.get("name"): json.loads(p.get("value")) for p in suite.findall("properties/property")}
+          if set(receipts) != expected or any(r["intake_transport"] != "mcp-sdk-stdio" for r in receipts.values()):
+              raise SystemExit("Missing required SDK journey evidence")
+          if suite.get("tests") != "3" or any(suite.get(k) != "0" for k in ("failures", "errors", "skipped")):
+              raise SystemExit("Incomplete SDK journey run")
+          PYTHON
       - name: Retain package and journey evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -108,4 +129,5 @@ jobs:
             ${{ runner.temp }}/candidate-sha.txt
             ${{ runner.temp }}/kit.sha256
             ${{ runner.temp }}/journeys.xml
+            ${{ runner.temp }}/p1-mcp.xml
           retention-days: 14

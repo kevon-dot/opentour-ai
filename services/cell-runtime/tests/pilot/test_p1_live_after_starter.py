@@ -506,6 +506,7 @@ def test_p1_invoice_commit_then_independent_truth(
                 ],
                 "initial_effects": initial_effects,
                 "final_effects": final_effects,
+                "starter_result_digest": score["result_digest"] if observed else None,
                 "starter_metrics": score["metrics"] if observed else None,
             },
             sort_keys=True,
