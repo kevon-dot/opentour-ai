@@ -2479,3 +2479,32 @@ def test_pdf_text_rise_moves_the_glyph_box_for_clip_image_and_paint_checks() -> 
     _eligible(b"q 0 0 612 650 re W n " + _RISEN % b"23" + b" Q")
     _eligible(_RISEN % b"23" + b" q 30 0 0 16 470 400 cm /Im1 Do Q", **_IMG)
     _eligible(_RISEN % b"23" + b" 1 g 60 600 300 12 re f")  # paint where the unrisen line was
+
+
+_WHITE_SPOT = (
+    b"[/Separation /Spot /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 1 1]"
+    b" /N 1 >>]"
+)
+
+
+@pytest.mark.parametrize(
+    ("entry", "paint"),
+    [
+        # poppler maps device colour through these and draws no ink for the text.
+        (b"/DefaultGray " + _WHITE_SPOT, b"0 g"),
+        (b"/DefaultRGB " + _WHITE_SPOT, b"0 0 0 rg"),
+        (b"/DefaultCMYK " + _WHITE_SPOT, b"0 0 0 1 k"),
+        (b"/DefaultGray [/Indexed /DeviceRGB 0 <FFFFFF>]", b"0 g"),
+        (b"/DeviceGray " + _WHITE_SPOT, b"/DeviceGray cs 0 sc"),  # a resource shadowing it
+    ],
+)
+def test_pdf_default_or_shadowed_device_colour_spaces_go_to_review(
+    entry: bytes, paint: bytes
+) -> None:
+    _flagged(paint + b" " + _SUMMARY, "text_color_space_unverified", resources=_spaces(entry))
+
+
+def test_pdf_named_device_colour_space_resources_stay_eligible() -> None:
+    # A device space under its own resource name, and other named spaces left unused.
+    _eligible(b"/CS0 cs 0 sc " + _SUMMARY, resources=_spaces(b"/CS0 /DeviceGray"))
+    _eligible(b"0 g " + _SUMMARY, resources=_spaces(b"/CS1 " + _WHITE_SPOT))

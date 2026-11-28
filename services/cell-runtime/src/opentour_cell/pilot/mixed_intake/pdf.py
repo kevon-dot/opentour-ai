@@ -2528,6 +2528,11 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             marks.add("font_widths_unavailable")
         if page_bad or doc.ambiguous():
             marks.add("pdf_object_ambiguous")
+        if _device_spaces_redefined(resources, doc):
+            # DefaultGray, DefaultRGB or DefaultCMYK remap every device colour (PDF 8.6.5.6),
+            # and a resource named like a device space shadows it for a viewer that looks
+            # resources up first: g, rg, k and cs no longer mean what they say.
+            marks.add("text_color_space_unverified")
         marks |= document_flags
         passages = _passages(_lines(fragments))
         for index, lines in enumerate(passages, start=1):
@@ -2740,6 +2745,20 @@ def _annotation_boxes(page: dict[str, object], doc: _Doc) -> tuple[list[_Box], b
             continue
         boxes.append(box)
     return boxes, unreadable
+
+
+_DEFAULT_SPACES = frozenset({"DefaultGray", "DefaultRGB", "DefaultCMYK"})
+
+
+def _device_spaces_redefined(resources: dict[str, object], doc: _Doc) -> bool:
+    """Whether the /ColorSpace resources remap or shadow a device colour space."""
+    spaces = doc.resolve(resources.get("ColorSpace"))
+    if not isinstance(spaces, dict):
+        return False
+    names = set(spaces)
+    return bool(names & _DEFAULT_SPACES) or any(
+        name.encode("latin-1") in _DEVICE_COMPONENTS for name in names
+    )
 
 
 def _colour_spaces(resources: dict[str, object], doc: _Doc) -> dict[bytes, int | None]:
