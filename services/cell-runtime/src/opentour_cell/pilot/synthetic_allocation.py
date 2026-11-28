@@ -25,13 +25,20 @@ Rules enforced:
 * Default spend is zero: an unset budget holds.
 
 Two kinds of budget (OPE-520 owner decision: caller-asserted allocations are planning records
-only; spend goes through the OPE-516 grant-bound budget).
+only; spend goes through the OPE-516 grant-bound budget). **No line on either kind is authorized
+spend yet**: OPE-516's ``Grant`` has no worker-held record, so a grant-bound budget trusts the
+first grant presented to its own ledger file, which anyone can make. Until a worker-held grant
+record exists (OPE-516 / owner decision), grant-bound lines are labelled
+``ope516_grant_unverified`` with ``grant_basis="first_presentation_unverified"``, and
+``status()`` reports ``authorized_spend=False`` for every budget.
 
 * ``open_budget`` opens a *planning* budget. It accepts caller-asserted plans, but
   ``status()`` reports ``authority="planning_record_only"`` and every ``live_lines()`` row
   carries ``authority="planning_record"``, an empty ``grant_ref`` and the plan's own unchecked
   ``verification_basis`` label, so no consumer can mistake it for authorized spend.
-* ``open_budget_for_grant`` opens a *grant-bound* budget (``authority="ope516_grant"``). It binds
+* ``open_budget_for_grant`` opens a *grant-bound* budget (``authority="ope516_grant_unverified"``,
+  ``grant_basis="first_presentation_unverified"`` in ``status()``, every ``LiveLine`` and every
+  ``reserve`` result). It binds
   to one file-backed OPE-516 ``VariantLedger``: the resolved real path plus device and inode of
   the sqlite file and of its directory, with private-custody checks modelled on
   ``LearningMandates`` (regular file, not a symlink, one link, owned by this uid, not group- or
@@ -40,7 +47,17 @@ only; spend goes through the OPE-516 grant-bound budget).
   (``ledger_identity_mismatch``), a seal whose digest does not recompute, a manifest digest
   that is not OPE-516's current one (``verification_stale``), preview mode, and any line whose
   root is not a live OPE-516 root of that family, in that scope, with its stored case sealed
-  under that family alone. ``commit`` re-derives the same root liveness from the bound ledger.
+  under that family alone. ``commit`` needs ``now`` and re-derives the same root liveness,
+  expiry (``grant_expired``) and grant headroom (``grant_headroom_exceeded``: pinned budget minus
+  current OPE-516 spend minus every live reservation on the grant, this one included). A commit
+  therefore belongs *before* its lines are generated through OPE-516.
+* Both kinds bind the run profile's ``unit_cost`` and ``cost_basis``; ``reserve`` re-derives
+  ``ranking_basis`` from the bound ``cost_basis`` (``fixed_unit`` forces ``count_based``) and
+  requires ``requests`` to be exactly what the plan's own decisions imply. The decisions
+  themselves are not re-derivable at reserve (that needs the caller's families).
+* Line uniqueness is per authority class (``planning_record`` vs ``ope516_grant_unverified``):
+  a planning reservation never blocks the matching grant-bound line, while one root/recipe
+  still cannot be reserved twice within a class.
   Where the OPE-516 ledger pins its worker mandate store (``authority_pin``, PR #225: store
   realpaths, device/inode, organization, engagement, scope and the ledger file's identity), the
   budget also binds to that pin, read-only, from the first open, reserve or commit that sees it;
@@ -76,7 +93,9 @@ OPE-516 link (read-only import of ``training_variants``; nothing here writes OPE
 * The ``Grant`` is caller-asserted in OPE-516 too: no worker record of the generation grant
   exists, and ``LearningMandates`` carries no synthetic-generation budget. This ledger pins the
   first ``Grant`` presented per ``grant_ref`` (with the bound ledger identity) and refuses any
-  other (``grant_conflict``); it cannot verify the first one.
+  other (``grant_conflict``); it cannot verify the first one. That pin is per allocation-ledger
+  file, so a new file accepts any first grant (an inflated budget, a new ``grant_ref``): hence
+  the ``_unverified`` labels above.
 * Separate allocation-ledger files on one grant cannot see each other's reservations.
 * The two modules' cost units are assumed equal ("use the same cost unit across the run") and no
   contract defines them. ``covered_from_children`` reads OPE-516 children (disposition
@@ -105,7 +124,9 @@ whitespace and invisible-character normalisation and refuses any identity that i
 after it (the repo has no confusable-folding helper, so homoglyphs are refused, not folded). It
 does not detect near-duplicate content under different digests, nor two later-time cases that
 share a template or attachment absent from the frame; the cohort is caller-built and its digest
-is self-consistent only.
+is self-consistent only. A hand-built cohort holding out one dummy ref with a recomputed digest
+is accepted: no ledger here records later-time cases (OPE-516 holds only registered training
+roots), so there is nothing to check held-out refs against.
 
 Not implemented here (recorded gaps): the confirmation and repeat-entity *estimates* (this
 module partitions the cohort; the metric needs model outcomes and belongs to OPE-517);
@@ -136,7 +157,7 @@ Json = dict[str, Any]
 PLAN_SCHEMA = "opentour.pilot.synthetic-allocation.v1"
 PROFILE_SCHEMA = "opentour.pilot.synthetic-allocation-profile.v1"
 COHORT_SCHEMA = "opentour.pilot.confirmation-cohort.v1"
-LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v2"
+LEDGER_SCHEMA = "opentour.pilot.synthetic-allocation-ledger.v3"
 SEAL_SCHEMA = "opentour.variants.split-seal.v2"  # OPE-516's own SplitSeal.from_rows digest tag
 
 VERIFIED = "verified"
@@ -145,8 +166,13 @@ SYNTHETIC_PREFIX = "var-"
 CALLER_ASSERTED = "caller_asserted"
 WORKER_RECORD = "ope516_variant_ledger"
 BINDING_MISMATCH = "plan_binding_mismatch"
-GRANT_AUTHORITY = "ope516_grant"  # a line on a grant-bound budget, re-derived from OPE-516
+# A line on a grant-bound budget: re-derived from OPE-516 at reserve and commit, but its grant is
+# only the first one presented to this ledger file, so it is not authorized spend either.
+GRANT_AUTHORITY = "ope516_grant_unverified"
 PLANNING_RECORD = "planning_record"  # a line on a planning budget: never authorized spend
+GRANT_BASIS_UNVERIFIED = "first_presentation_unverified"  # no worker-held grant record exists
+NO_GRANT = "none"
+RANKING_FOR_COST_BASIS = {"fixed_unit": "count_based", "measured": "cost_based"}
 INT64_MAX = 2**63 - 1  # sqlite INTEGER range; larger values are refused, never wrapped
 Cell = tuple[str, str]
 Stratum = tuple[str, ...]  # a cell, or a cell subdivided by model revision
@@ -377,8 +403,9 @@ class VerificationScope:
 class LiveLine(NamedTuple):
     """A live allocation line and the authority behind it.
 
-    Only ``authority == "ope516_grant"`` lines sit on a grant-bound budget and were re-derived
-    from OPE-516 at reserve; ``planning_record`` lines are planning records only.
+    ``ope516_grant_unverified`` lines sit on a grant-bound budget and were re-derived from
+    OPE-516 at reserve, but their grant is unverified (``grant_basis``); ``planning_record``
+    lines are planning records only. No line is authorized spend.
     """
 
     family_id: str
@@ -387,6 +414,7 @@ class LiveLine(NamedTuple):
     grant_ref: str
     verification_basis: str
     authority: str
+    grant_basis: str  # first_presentation_unverified on a grant-bound budget, else none
 
 
 @dataclass(frozen=True)
@@ -754,6 +782,17 @@ def _check_case(case: object) -> CohortCase:
     return case
 
 
+def _private(info: Any, uid: int, *, directory: bool) -> bool:
+    """Owned by ``uid``, not group/world-writable; a file must be regular with one link."""
+    kind = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    return bool(
+        kind
+        and info.st_uid == uid
+        and not info.st_mode & 0o022
+        and (directory or info.st_nlink == 1)
+    )
+
+
 def _ledger_identity(path: object) -> tuple[str, Json]:
     """Identify one file-backed OPE-516 ledger: real path plus device/inode of file and dir.
 
@@ -774,13 +813,8 @@ def _ledger_identity(path: object) -> tuple[str, Json]:
     uid = os.getuid()
     if (
         stat.S_ISLNK(link.st_mode)
-        or not stat.S_ISREG(info.st_mode)
-        or info.st_nlink != 1
-        or info.st_uid != uid
-        or info.st_mode & 0o022
-        or not stat.S_ISDIR(dir_info.st_mode)
-        or dir_info.st_uid != uid
-        or dir_info.st_mode & 0o022
+        or not _private(info, uid, directory=False)
+        or not _private(dir_info, uid, directory=True)
     ):
         raise AllocationError("ledger_identity_invalid", "custody")
     identity: Json = {
@@ -1429,8 +1463,8 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS budget (
         budget_ref TEXT PRIMARY KEY, cap_units INTEGER NOT NULL, cap_spend INTEGER NOT NULL,
-        unit_cost INTEGER NOT NULL, grant_ref TEXT NOT NULL, ledger_id TEXT NOT NULL,
-        grant_digest TEXT NOT NULL, row_digest TEXT NOT NULL)""",
+        unit_cost INTEGER NOT NULL, cost_basis TEXT NOT NULL, grant_ref TEXT NOT NULL,
+        ledger_id TEXT NOT NULL, grant_digest TEXT NOT NULL, row_digest TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS grant_pin (
         grant_ref TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, identity TEXT NOT NULL,
         grant_record TEXT NOT NULL, grant_digest TEXT NOT NULL, fit_pin TEXT NOT NULL,
@@ -1445,7 +1479,7 @@ _SCHEMA = (
         budget_ref TEXT NOT NULL, root_ref TEXT NOT NULL, recipe_id TEXT NOT NULL,
         family_id TEXT NOT NULL, allocation_id TEXT NOT NULL, cost INTEGER NOT NULL,
         state TEXT NOT NULL, grant_ref TEXT NOT NULL, verification_basis TEXT NOT NULL,
-        authority TEXT NOT NULL, PRIMARY KEY (root_ref, recipe_id))""",
+        authority TEXT NOT NULL, PRIMARY KEY (authority, root_ref, recipe_id))""",
     """CREATE TABLE IF NOT EXISTS retracted (
         family_id TEXT PRIMARY KEY, reason TEXT NOT NULL)""",
 )
@@ -1483,12 +1517,38 @@ def _pin_digest(*fields: object) -> str:
 
 
 def _check_budget_args(
-    budget_ref: object, cap_units: object, cap_spend: object, unit_cost: object
+    budget_ref: object,
+    cap_units: object,
+    cap_spend: object,
+    unit_cost: object,
+    cost_basis: object = "fixed_unit",
 ) -> None:
     if type(budget_ref) is not str or not budget_ref:
         raise AllocationError("budget_invalid", "budget_ref")
     if not _int64(cap_units, cap_spend, unit_cost) or unit_cost < 1:  # type: ignore[operator]
         raise AllocationError("budget_invalid")
+    if type(cost_basis) is not str or cost_basis not in RANKING_FOR_COST_BASIS:
+        raise AllocationError("budget_invalid", "cost_basis")
+
+
+def _expected_requests(plan: AllocationPlan) -> list[Json]:
+    """The requests ``allocate`` derives from a plan's own decisions.
+
+    Owner-decision requests for policy conflicts (in decision order), then one real-label
+    request per cell whose families fell below the minimum support (in cell order). The
+    decisions themselves cannot be re-derived at reserve: that needs the caller's families.
+    """
+    owner: list[Json] = [
+        {"kind": "owner_decision", "family_id": d.family_id}
+        for d in plan.decisions
+        if d.reason == "policy_conflict"
+    ]
+    low = Counter(tuple(d.cell) for d in plan.decisions if d.reason == "below_min_support")
+    labels: list[Json] = [
+        {"kind": "real_label_request", "cell": list(cell), "support": n}
+        for cell, n in sorted(low.items())
+    ]
+    return [*owner, *labels]
 
 
 @dataclass(frozen=True)
@@ -1497,6 +1557,7 @@ class _Budget:
     cap_units: int
     cap_spend: int
     unit_cost: int
+    cost_basis: str
     grant_ref: str
     ledger_id: str
     grant_digest: str
@@ -1578,16 +1639,29 @@ class AllocationLedger:
         all covered by row digests; blanking one column does not make a planning budget.
         """
         row = db.execute(
-            "SELECT cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_digest,"
-            " row_digest FROM budget WHERE budget_ref=?",
+            "SELECT cap_units, cap_spend, unit_cost, cost_basis, grant_ref, ledger_id,"
+            " grant_digest, row_digest FROM budget WHERE budget_ref=?",
             (budget_ref,),
         ).fetchone()
         if row is None:
             raise AllocationError("budget_unknown", budget_ref)
-        cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_dg, row_dg = row
-        if not _int64(cap_units, cap_spend, unit_cost) or unit_cost < 1:
+        cap_units, cap_spend, unit_cost, cost_basis, grant_ref, ledger_id, grant_dg, row_dg = row
+        if (
+            not _int64(cap_units, cap_spend, unit_cost)
+            or unit_cost < 1
+            or cost_basis not in RANKING_FOR_COST_BASIS
+        ):
             raise AllocationError("ledger_integrity_failed", f"budget {budget_ref}")
-        fields = (budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_dg)
+        fields = (
+            budget_ref,
+            cap_units,
+            cap_spend,
+            unit_cost,
+            cost_basis,
+            grant_ref,
+            ledger_id,
+            grant_dg,
+        )
         if row_dg != _budget_digest(*fields):
             raise AllocationError("ledger_integrity_failed", f"budget {budget_ref}")
         if len({bool(grant_ref), bool(ledger_id), bool(grant_dg)}) != 1:
@@ -1621,6 +1695,7 @@ class AllocationLedger:
             cap_units,
             cap_spend,
             unit_cost,
+            cost_basis,
             grant_ref,
             ledger_id,
             grant_dg,
@@ -1660,13 +1735,23 @@ class AllocationLedger:
         cap_units: int,
         cap_spend: int,
         unit_cost: int,
+        cost_basis: str,
         grant_ref: str = "",
         ledger_id: str = "",
         grant_dg: str = "",
     ) -> None:
-        fields = (budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_dg)
+        fields = (
+            budget_ref,
+            cap_units,
+            cap_spend,
+            unit_cost,
+            cost_basis,
+            grant_ref,
+            ledger_id,
+            grant_dg,
+        )
         db.execute(
-            "INSERT INTO budget VALUES (?,?,?,?,?,?,?,?)", (*fields, _budget_digest(*fields))
+            "INSERT INTO budget VALUES (?,?,?,?,?,?,?,?,?)", (*fields, _budget_digest(*fields))
         )
         if grant_ref:
             db.execute("INSERT INTO grant_budget VALUES (?,?)", (budget_ref, grant_ref))
@@ -1685,25 +1770,33 @@ class AllocationLedger:
     # -- budgets -------------------------------------------------------------------------
 
     def open_budget(
-        self, budget_ref: str, *, cap_units: int, cap_spend: int, unit_cost: int
+        self,
+        budget_ref: str,
+        *,
+        cap_units: int,
+        cap_spend: int,
+        unit_cost: int,
+        cost_basis: str = "fixed_unit",
     ) -> None:
-        """Open a *planning* budget bound to ``AllocationPolicy.unit_cost``. Immutable.
+        """Open a *planning* budget bound to the run profile's ``unit_cost`` and ``cost_basis``.
 
-        It accepts caller-asserted plans; nothing on it is authorized spend (see ``status``).
+        Immutable. It accepts caller-asserted plans; nothing on it is authorized spend (see
+        ``status``).
         """
-        _check_budget_args(budget_ref, cap_units, cap_spend, unit_cost)
+        _check_budget_args(budget_ref, cap_units, cap_spend, unit_cost, cost_basis)
         with self._tx() as db:
             if db.execute("SELECT 1 FROM budget WHERE budget_ref=?", (budget_ref,)).fetchone():
                 b = self._load_budget(db, budget_ref)
-                if (b.cap_units, b.cap_spend, b.unit_cost, b.grant_ref) != (
+                if (b.cap_units, b.cap_spend, b.unit_cost, b.cost_basis, b.grant_ref) != (
                     cap_units,
                     cap_spend,
                     unit_cost,
+                    cost_basis,
                     "",
                 ):
                     raise AllocationError("budget_conflict", budget_ref)
                 return
-            self._put_budget(db, budget_ref, cap_units, cap_spend, unit_cost)
+            self._put_budget(db, budget_ref, cap_units, cap_spend, unit_cost, cost_basis)
 
     def open_budget_for_grant(
         self,
@@ -1715,8 +1808,14 @@ class AllocationLedger:
         cap_units: int,
         unit_cost: int,
         cap_spend: int | None = None,
+        cost_basis: str = "fixed_unit",
     ) -> Json:
         """Open a budget bound to one OPE-516 ledger file and one pinned grant.
+
+        The grant is pinned on its first presentation *to this ledger file* and is unverified:
+        anyone can make that first presentation, so the budget and its lines are labelled
+        ``ope516_grant_unverified`` / ``grant_basis="first_presentation_unverified"`` and none
+        of it is authorized spend until a worker-held grant record exists (OPE-516 / owner).
 
         ``variants`` is the path of the file-backed OPE-516 ``VariantLedger``. The first grant
         presented for a ``grant_ref`` is pinned with that ledger's identity; any other grant
@@ -1728,7 +1827,7 @@ class AllocationLedger:
         _check_grant(grant)
         if not _int64(now):
             raise AllocationError("grant_link_invalid", "budget, expires_at and now must be int")
-        _check_budget_args(budget_ref, cap_units, 0, unit_cost)
+        _check_budget_args(budget_ref, cap_units, 0, unit_cost, cost_basis)
         if cap_spend is not None and not _int64(cap_spend):
             raise AllocationError("budget_invalid")
         ledger_id, identity = _ledger_identity(variants)
@@ -1772,9 +1871,10 @@ class AllocationLedger:
                 self._bind_fit_pin(db, grant.grant_ref, fit_pin)
             if db.execute("SELECT 1 FROM budget WHERE budget_ref=?", (budget_ref,)).fetchone():
                 b = self._load_budget(db, budget_ref)
-                if (b.cap_units, b.unit_cost, b.grant_ref, b.ledger_id) != (
+                if (b.cap_units, b.unit_cost, b.cost_basis, b.grant_ref, b.ledger_id) != (
                     cap_units,
                     unit_cost,
+                    cost_basis,
                     grant.grant_ref,
                     ledger_id,
                 ):
@@ -1790,6 +1890,7 @@ class AllocationLedger:
                 cap_units,
                 effective,
                 unit_cost,
+                cost_basis,
                 grant.grant_ref,
                 ledger_id,
                 grant_dg,
@@ -1864,6 +1965,14 @@ class AllocationLedger:
             unit_cost = budget.unit_cost
             if any(x.cost != unit_cost for x in plan.lines):
                 raise AllocationError(BINDING_MISMATCH, f"unit_cost {unit_cost}")
+            if plan.ranking_basis != RANKING_FOR_COST_BASIS[budget.cost_basis]:
+                raise AllocationError(BINDING_MISMATCH, f"ranking_basis for {budget.cost_basis}")
+            try:
+                requests_ok = [dict(r) for r in plan.requests] == _expected_requests(plan)
+            except (TypeError, ValueError, AttributeError):
+                requests_ok = False
+            if not requests_ok:
+                raise AllocationError("plan_invalid", "requests are not the plan's own derivation")
             grant_ref = budget.grant_ref
             if grant_ref:
                 if plan.verification_basis != WORKER_RECORD:
@@ -1966,12 +2075,7 @@ class AllocationLedger:
             why = corr.root_reason(line.family_id, line.root_ref)
             if why:
                 raise AllocationError("verification_uncorroborated", f"{line.family_id}: {why}")
-        if _record_headroom(budget.grant, 0, now) == 0:
-            raise AllocationError("grant_unavailable", f"{grant_ref} expired or unauthorized")
-        headroom = _record_headroom(budget.grant, corr.variants.spent(grant_ref), now)
-        live = self._grant_live(db, grant_ref)
-        if live + charge > headroom:
-            raise AllocationError("grant_headroom_exceeded", f"{live}+{charge}>{headroom}")
+        self._check_headroom(db, budget, corr.variants.spent(grant_ref), now, charge)
         seal = verified_by.seal
         return canonical(
             {
@@ -1986,8 +2090,35 @@ class AllocationLedger:
             }
         )
 
-    def _recheck_grant(self, db: sqlite3.Connection, budget: _Budget, allocation_id: str) -> None:
-        """At commit: every reserved line's root must still be live in the bound OPE-516 ledger."""
+    def _check_headroom(
+        self, db: sqlite3.Connection, budget: _Budget, spent: int, now: int, extra: int
+    ) -> None:
+        """Pinned grant budget - OPE-516 spent - live spend on every budget of the grant.
+
+        ``extra`` is spend not yet counted as live (the plan being reserved; 0 at commit, whose
+        own lines are already live). Expired is ``grant_expired``; unauthorized flags are
+        ``grant_unavailable``; no room is ``grant_headroom_exceeded``.
+        """
+        grant = budget.grant
+        assert grant is not None  # grant-bound: pinned by _load_budget
+        if now >= grant["expires_at"]:
+            raise AllocationError("grant_expired", budget.grant_ref)
+        if _record_headroom(grant, 0, now) == 0:
+            raise AllocationError("grant_unavailable", f"{budget.grant_ref} unauthorized")
+        headroom = _record_headroom(grant, spent, now)
+        live = self._grant_live(db, budget.grant_ref)
+        if live + extra > headroom:
+            raise AllocationError("grant_headroom_exceeded", f"{live}+{extra}>{headroom}")
+
+    def _recheck_grant(
+        self, db: sqlite3.Connection, budget: _Budget, allocation_id: str, now: int
+    ) -> None:
+        """At commit: roots still live in the bound OPE-516 ledger, and the grant still has room.
+
+        The room check counts this allocation as live and OPE-516's current spend, so a commit
+        must come *before* its lines are generated through OPE-516 (afterwards that spend would
+        be counted twice and the commit refused, which is conservative).
+        """
         row = db.execute(
             "SELECT scope FROM allocation WHERE allocation_id=? AND budget_ref=?",
             (allocation_id, budget.ref),
@@ -2023,15 +2154,24 @@ class AllocationLedger:
             why = corr.root_reason(str(fam), str(root))
             if why:
                 raise AllocationError("verification_uncorroborated", f"{fam}: {why}")
+        self._check_headroom(db, budget, corr.variants.spent(budget.grant_ref), now, 0)
 
-    def commit(self, budget_ref: str, allocation_id: str) -> Json:
-        """Mark a reservation spent. On a grant-bound budget OPE-516 is re-read first."""
+    def commit(self, budget_ref: str, allocation_id: str, *, now: int | None = None) -> Json:
+        """Commit a reservation: the selection is final and its spend is never refunded.
+
+        On a grant-bound budget ``now`` is required and OPE-516 is re-read first: roots still
+        live, grant not expired, and pinned budget minus current OPE-516 spend minus every live
+        reservation on the grant still covers this one. Commit before generating the lines.
+        """
         with self._tx() as db:
             budget = self._load_budget(db, budget_ref)
             state = self._state(db, budget_ref, allocation_id)
             if state == "reserved":
                 if budget.grant_ref:
-                    self._recheck_grant(db, budget, allocation_id)
+                    if not _int64(now):
+                        raise AllocationError("grant_link_invalid", "now")
+                    assert now is not None
+                    self._recheck_grant(db, budget, allocation_id, now)
                 db.execute(
                     "UPDATE allocation SET state='committed' "
                     "WHERE allocation_id=? AND budget_ref=?",
@@ -2082,8 +2222,9 @@ class AllocationLedger:
         """Lines usable downstream (reserved or committed), each with its authority.
 
         ``authority="planning_record"`` lines (planning budget, caller-asserted or unchecked
-        verification) are never authorized spend; only ``"ope516_grant"`` lines were re-derived
-        from OPE-516 at reserve.
+        verification) are planning records; ``"ope516_grant_unverified"`` lines were re-derived
+        from OPE-516 at reserve but rest on an unverified first-presentation grant
+        (``grant_basis``). Neither is authorized spend.
         """
         with self._tx(begin=False) as db:
             self._load_budget(db, budget_ref)
@@ -2093,7 +2234,18 @@ class AllocationLedger:
                 " ORDER BY family_id, root_ref, recipe_id",
                 (budget_ref,),
             ).fetchall()
-        return [LiveLine(*(str(v) for v in r)) for r in rows]
+        return [
+            LiveLine(
+                family_id=str(fam),
+                root_ref=str(root),
+                recipe_id=str(recipe),
+                grant_ref=str(grant_ref),
+                verification_basis=str(basis),
+                authority=str(authority),
+                grant_basis=GRANT_BASIS_UNVERIFIED if authority == GRANT_AUTHORITY else NO_GRANT,
+            )
+            for fam, root, recipe, grant_ref, basis, authority in rows
+        ]
 
     def status(self, budget_ref: str) -> Json:
         with self._tx(begin=False) as db:
@@ -2114,6 +2266,9 @@ class AllocationLedger:
             "unit_cost": b.unit_cost,
             "grant_ref": b.grant_ref,
             "authority": GRANT_AUTHORITY if b.grant_ref else "planning_record_only",
+            "grant_basis": GRANT_BASIS_UNVERIFIED if b.grant_ref else NO_GRANT,
+            "authorized_spend": False,
+            "cost_basis": b.cost_basis,
             "verification_required": WORKER_RECORD if b.grant_ref else "none",
             "ledger_id": b.ledger_id,
             "lines_by_verification_basis": {str(k): int(n) for k, n in by_basis},

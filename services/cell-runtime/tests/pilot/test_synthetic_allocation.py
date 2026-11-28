@@ -12,6 +12,7 @@ import inspect
 import os
 import shutil
 import sqlite3
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -965,7 +966,9 @@ def test_grant_link_narrows_spend_cap_to_ope516_headroom(tmp_path: Path) -> None
     led = AllocationLedger()
     opened = grant_budget(led, path)
     assert opened["cap_spend"] == 6 and opened["grant_ref"] == TV_GRANT.grant_ref
-    assert opened["authority"] == "ope516_grant"
+    assert opened["authority"] == "ope516_grant_unverified"
+    assert opened["grant_basis"] == "first_presentation_unverified"
+    assert opened["authorized_spend"] is False
     assert grant_budget(led, path, "generated-budget-2", cap_spend=3)["cap_spend"] == 3
     # Never wider than the grant.
     assert grant_budget(led, path, "generated-budget-3", cap_spend=999)["cap_spend"] == 6
@@ -1360,7 +1363,8 @@ def test_p3_copied_ledger_is_refused_and_original_retraction_binds(tmp_path: Pat
     led.reserve("generated-budget", b0, verified_by=sc, now=TV_NOW)
     tv.VariantLedger(path).retract_root("generated-root-b0", "b0", "generated-reopen")
     assert (
-        code_of(led.commit, "generated-budget", b0.allocation_id) == "verification_uncorroborated"
+        code_of(led.commit, "generated-budget", b0.allocation_id, now=TV_NOW)
+        == "verification_uncorroborated"
     )
     assert led.release("generated-budget", b0.allocation_id)["used_units"] == 0
 
@@ -1433,7 +1437,7 @@ def test_p6_reservations_across_budgets_cannot_exceed_grant_headroom(tmp_path: P
         "grant_headroom_exceeded"
     )
     assert code_of(led.reserve, "generated-budget-2", fresh, verified_by=sc, now=1000) == (
-        "grant_unavailable"
+        "grant_expired"
     )
 
 
@@ -1453,8 +1457,8 @@ def test_p8_edited_ledger_file_is_refused_or_still_bounded(tmp_path: Path) -> No
         db = sqlite3.connect(db_path)
         got = list(
             db.execute(
-                "SELECT budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id,"
-                " grant_digest FROM budget"
+                "SELECT budget_ref, cap_units, cap_spend, unit_cost, cost_basis, grant_ref,"
+                " ledger_id, grant_digest FROM budget"
             ).fetchone()
         )
         db.close()
@@ -1466,13 +1470,13 @@ def test_p8_edited_ledger_file_is_refused_or_still_bounded(tmp_path: Path) -> No
     assert code_of(AllocationLedger(db_path).reserve, "generated-budget", asserted) == (
         "ledger_integrity_failed"
     )
-    edit("UPDATE budget SET grant_ref=?", original[4])
+    edit("UPDATE budget SET grant_ref=?", original[5])
     edit("UPDATE budget SET cap_spend=?", 10**9)
     assert (
         code_of(AllocationLedger(db_path).status, "generated-budget") == "ledger_integrity_failed"
     )
     # A deliberate same-uid edit that recomputes the row digest: downgrade is still detected.
-    plain = [*original[:4], "", "", ""]
+    plain = [*original[:5], "", "", ""]
     edit(
         "UPDATE budget SET grant_ref='', ledger_id='', grant_digest='', row_digest=?",
         sa._budget_digest(*plain),
@@ -1484,9 +1488,9 @@ def test_p8_edited_ledger_file_is_refused_or_still_bounded(tmp_path: Path) -> No
     raised = [*original[:2], 10**9, *original[3:]]
     edit(
         "UPDATE budget SET grant_ref=?, ledger_id=?, grant_digest=?, cap_spend=?, row_digest=?",
-        original[4],
         original[5],
         original[6],
+        original[7],
         10**9,
         sa._budget_digest(*raised),
     )
@@ -1684,7 +1688,9 @@ def test_status_and_live_lines_expose_authority_and_verification_basis(tmp_path:
     assert plain["verification_required"] == "none"
     assert plain["lines_by_verification_basis"] == {sa.CALLER_ASSERTED: 1}
     assert led.live_lines("generated-plain") == [
-        sa.LiveLine("p0", "generated-root-p0", R1, "", sa.CALLER_ASSERTED, sa.PLANNING_RECORD)
+        sa.LiveLine(
+            "p0", "generated-root-p0", R1, "", sa.CALLER_ASSERTED, sa.PLANNING_RECORD, "none"
+        )
     ]
     grant_budget(led, path)
     sc = scope(path, seal)
@@ -1699,7 +1705,13 @@ def test_status_and_live_lines_expose_authority_and_verification_basis(tmp_path:
     assert bound["verification_required"] == sa.WORKER_RECORD and len(bound["ledger_id"]) == 64
     assert led.live_lines("generated-budget") == [
         sa.LiveLine(
-            "a0", "generated-root-a0", R1, TV_GRANT.grant_ref, sa.WORKER_RECORD, sa.GRANT_AUTHORITY
+            "a0",
+            "generated-root-a0",
+            R1,
+            TV_GRANT.grant_ref,
+            sa.WORKER_RECORD,
+            sa.GRANT_AUTHORITY,
+            sa.GRANT_BASIS_UNVERIFIED,
         )
     ]
     # A worker-record plan on a planning budget is still only a planning record.
@@ -1750,7 +1762,10 @@ def test_grant_reserve_needs_scope_and_now_and_commit_rechecks(tmp_path: Path) -
     tv_spend(path, "b0", seal, 1, "x18")
     assert led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)["replayed"] is True
     restarted = AllocationLedger(db_path)
-    assert restarted.commit("generated-budget", plan.allocation_id)["used_units"] == 1
+    assert code_of(restarted.commit, "generated-budget", plan.allocation_id) == (
+        "grant_link_invalid"
+    )
+    assert restarted.commit("generated-budget", plan.allocation_id, now=TV_NOW)["used_units"] == 1
     assert restarted.live_lines("generated-budget")[0].authority == sa.GRANT_AUTHORITY
 
 
@@ -1812,7 +1827,9 @@ def test_grant_budget_binds_to_the_ope516_mandate_store_pin(tmp_path: Path) -> N
     with pytest.raises(AllocationError) as err:
         led.reserve("generated-budget", b0, verified_by=sc, now=TV_NOW)
     assert err.value.code == "ledger_identity_mismatch" and "fit_authority_pin" in str(err.value)
-    assert code_of(led.commit, "generated-budget", a0.allocation_id) == "ledger_identity_mismatch"
+    assert code_of(led.commit, "generated-budget", a0.allocation_id, now=TV_NOW) == (
+        "ledger_identity_mismatch"
+    )
     _set_fit_pin(path, None)  # pin removed
     c0 = allocate([family("c0")], policy(), verified_by=sc)
     assert code_of(led.reserve, "generated-budget", c0, verified_by=sc, now=TV_NOW) == (
@@ -1821,7 +1838,7 @@ def test_grant_budget_binds_to_the_ope516_mandate_store_pin(tmp_path: Path) -> N
     _set_fit_pin(path, "generated-store-1")
     c0 = allocate([family("c0")], policy(), verified_by=sc)
     assert led.reserve("generated-budget", c0, verified_by=sc, now=TV_NOW)["used_units"] == 2
-    assert led.commit("generated-budget", a0.allocation_id)["used_units"] == 2
+    assert led.commit("generated-budget", a0.allocation_id, now=TV_NOW)["used_units"] == 2
     # A pin present at open is bound at open.
     fresh = AllocationLedger()
     grant_budget(fresh, path)
@@ -1838,8 +1855,8 @@ def test_grant_binding_rows_are_cross_checked(tmp_path: Path) -> None:
     db = sqlite3.connect(db_path)
     fields = list(
         db.execute(
-            "SELECT budget_ref, cap_units, cap_spend, unit_cost, grant_ref, ledger_id, grant_digest"
-            " FROM budget"
+            "SELECT budget_ref, cap_units, cap_spend, unit_cost, cost_basis, grant_ref, ledger_id,"
+            " grant_digest FROM budget"
         ).fetchone()
     )
     db.execute("DELETE FROM grant_budget")
@@ -1847,7 +1864,7 @@ def test_grant_binding_rows_are_cross_checked(tmp_path: Path) -> None:
     assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
         "ledger_integrity_failed"
     )
-    partial = [*fields[:4], "", *fields[5:]]  # grant_ref blanked, digest recomputed
+    partial = [*fields[:5], "", *fields[6:]]  # grant_ref blanked, digest recomputed
     db.execute("UPDATE budget SET grant_ref='', row_digest=?", (sa._budget_digest(*partial),))
     db.commit()
     db.close()
@@ -1890,3 +1907,224 @@ def test_family_cannot_claim_another_familys_live_root(tmp_path: Path) -> None:
     with pytest.raises(AllocationError) as err:
         led.reserve("generated-budget", relabelled, verified_by=sc, now=TV_NOW)
     assert err.value.code == "verification_uncorroborated" and "root_not_live" in str(err.value)
+
+
+# Y* (re-review of 03571f1, same reviewer). Each failed against 03571f1.
+# Y1 / A (P2d, P2): first-presentation grants are labelled unverified, never authorized.
+def test_p2d_first_presented_inflated_grant_is_labelled_unverified(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    led = AllocationLedger()  # a new ledger file accepts any first grant
+    opened = grant_budget(led, path, grant=replace(TV_GRANT, budget=10**9))
+    assert opened["cap_spend"] == 10**9  # recorded limit: the first presentation is trusted
+    assert opened["authority"] == "ope516_grant_unverified"
+    assert opened["grant_basis"] == "first_presentation_unverified"
+    assert opened["authorized_spend"] is False
+    sc = scope(path, seal)
+    got = led.reserve(
+        "generated-budget",
+        allocate([family("a0")], policy(), verified_by=sc),
+        verified_by=sc,
+        now=TV_NOW,
+    )
+    assert (
+        got["grant_basis"] == "first_presentation_unverified" and got["authorized_spend"] is False
+    )
+    (line,) = led.live_lines("generated-budget")
+    assert line.authority == "ope516_grant_unverified"
+    assert line.grant_basis == "first_presentation_unverified"
+
+
+def test_p2_fabricated_ledger_and_forged_grant_are_labelled_unverified(tmp_path: Path) -> None:
+    fake_dir = tmp_path / "fabricated"
+    fake_dir.mkdir(mode=0o700)
+    forged = replace(TV_GRANT, grant_ref="generated-grant-forged", budget=10**6)
+    seal = tv_seal("zz")
+    fake = tv_ledger(fake_dir)
+    tv_register(fake, "zz", seal, grant=forged)
+    led = AllocationLedger()
+    grant_budget(led, fake, grant=forged)
+    sc = scope(fake, seal, forged)
+    led.reserve(
+        "generated-budget",
+        allocate([family("zz")], policy(), verified_by=sc),
+        verified_by=sc,
+        now=TV_NOW,
+    )
+    assert led.status("generated-budget")["authority"] == "ope516_grant_unverified"
+    assert [(x.authority, x.grant_basis) for x in led.live_lines("generated-budget")] == [
+        ("ope516_grant_unverified", "first_presentation_unverified")
+    ]
+    plain = AllocationLedger()
+    plain.open_budget("generated-plain", cap_units=1, cap_spend=1, unit_cost=1)
+    status = plain.status("generated-plain")
+    assert status["grant_basis"] == "none" and status["authorized_spend"] is False
+
+
+# Y2 / B (P7): commit re-checks grant headroom against current OPE-516 spend, and expiry.
+def test_p7_commit_rechecks_headroom_after_ope516_spend(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    led = AllocationLedger()
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    eight = allocate(
+        [family("a0", recipes=tuple(f"simulated:r{i}" for i in range(8)))],
+        policy(per_family_cap=8, per_root_cap=8, total_units=8, spend_ceiling=8),
+        verified_by=sc,
+    )
+    assert led.reserve("generated-budget", eight, verified_by=sc, now=TV_NOW)["used_spend"] == 8
+    tv_spend(path, "b0", seal, 9, "p7")  # OPE-516 cannot see the reservation and admits 9
+    assert tv.VariantLedger(path).spent(TV_GRANT.grant_ref) == 9
+    assert code_of(led.commit, "generated-budget", eight.allocation_id, now=TV_NOW) == (
+        "grant_headroom_exceeded"
+    )
+    status = led.status("generated-budget")
+    assert status["used_spend"] == 8
+    assert led.live_lines("generated-budget")[0].authority == sa.GRANT_AUTHORITY
+
+
+def test_commit_refuses_an_expired_grant(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    led = AllocationLedger()
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    plan = allocate([family("a0")], policy(), verified_by=sc)
+    led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)
+    assert code_of(led.commit, "generated-budget", plan.allocation_id, now=1000) == "grant_expired"
+    assert code_of(led.commit, "generated-budget", plan.allocation_id, now=True) == (
+        "grant_link_invalid"
+    )
+    assert led.commit("generated-budget", plan.allocation_id, now=999)["used_units"] == 1
+
+
+# Y3 / D: ranking basis is re-derived from the bound cost basis; requests from the decisions.
+def test_ranking_basis_and_requests_cannot_be_fabricated_with_a_recomputed_id() -> None:
+    led = ledger(units=10, spend=10)
+
+    def recomputed(plan: sa.AllocationPlan, **change: object) -> sa.AllocationPlan:
+        changed = replace(plan, **change)  # type: ignore[arg-type]
+        return replace(changed, allocation_id=sa.plan_allocation_id(changed))
+
+    plan = plan_of("p", 2)
+    assert code_of(
+        led.reserve, "generated-budget", recomputed(plan, ranking_basis="cost_based")
+    ) == (sa.BINDING_MISMATCH)
+    forged = recomputed(plan, requests=({"kind": "owner_decision", "family_id": "p0"},))
+    assert code_of(led.reserve, "generated-budget", forged) == "plan_invalid"
+    dropped = allocate(
+        [
+            family("c", CELL_B, policy_conflict=True),
+            family("x0"),
+            family("x1"),
+            family("lone", CELL_B),
+        ],
+        policy(min_support=2),
+    )
+    assert {r["kind"] for r in dropped.requests} == {"owner_decision", "real_label_request"}
+    assert code_of(led.reserve, "generated-budget", recomputed(dropped, requests=())) == (
+        "plan_invalid"
+    )
+    assert led.reserve("generated-budget", dropped)["used_units"] == 2
+    measured = AllocationLedger()
+    measured.open_budget(
+        "generated-m", cap_units=5, cap_spend=5, unit_cost=1, cost_basis="measured"
+    )
+    assert measured.status("generated-m")["cost_basis"] == "measured"
+    assert code_of(measured.reserve, "generated-m", plan) == sa.BINDING_MISMATCH
+    assert (
+        measured.reserve("generated-m", plan_of("m", 1, cost_basis="measured"))["used_units"] == 1
+    )
+    assert code_of(measured.open_budget, "generated-m", cap_units=5, cap_spend=5, unit_cost=1) == (
+        "budget_conflict"
+    )
+    assert code_of(
+        led.open_budget, "generated-x", cap_units=1, cap_spend=1, unit_cost=1, cost_basis="x"
+    ) == ("budget_invalid")
+
+
+# Y4 / E: a planning reservation never blocks the matching grant-bound line.
+def test_planning_line_does_not_block_grant_bound_line(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    led = AllocationLedger()
+    led.open_budget("generated-plain", cap_units=5, cap_spend=5, unit_cost=1)
+    led.open_budget("generated-plain-2", cap_units=5, cap_spend=5, unit_cost=1)
+    grant_budget(led, path)
+    grant_budget(led, path, "generated-budget-2")
+    led.reserve("generated-plain", allocate([family("a0")], policy()))
+    sc = scope(path, seal)
+    plan = allocate([family("a0")], policy(), verified_by=sc)
+    assert led.reserve("generated-budget", plan, verified_by=sc, now=TV_NOW)["used_units"] == 1
+    # Within one authority class a root/recipe is still reserved at most once.
+    assert code_of(led.reserve, "generated-budget-2", plan, verified_by=sc, now=TV_NOW) == (
+        "line_already_allocated"
+    )
+    assert code_of(led.reserve, "generated-plain-2", allocate([family("a0")], policy())) == (
+        "line_already_allocated"
+    )
+
+
+# Y5 (mutation survivors N08, N10): file and directory custody are each checked.
+def test_custody_checks_uid_and_directory_mode(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    uid = os.getuid()
+    good_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=uid, st_nlink=1)
+    good_dir = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=uid, st_nlink=2)
+    assert sa._private(good_file, uid, directory=False)
+    assert sa._private(good_dir, uid, directory=True)
+    for bad, is_dir in (
+        (replace_ns(good_file, st_uid=uid + 1), False),
+        (replace_ns(good_dir, st_uid=uid + 1), True),
+        (replace_ns(good_dir, st_mode=stat.S_IFDIR | 0o770), True),
+        (replace_ns(good_dir, st_mode=stat.S_IFDIR | 0o702), True),
+        (replace_ns(good_file, st_nlink=2), False),
+        (good_dir, False),
+        (good_file, True),
+    ):
+        assert not sa._private(bad, uid, directory=is_dir)
+    path, seal = world(tmp_path, "a0")
+    tmp_path.chmod(0o775)
+    assert code_of(allocate, [family("a0")], policy(), verified_by=scope(path, seal)) == (
+        "ledger_identity_invalid"
+    )
+    tmp_path.chmod(0o700)
+    assert allocate([family("a0")], policy(), verified_by=scope(path, seal)).units == 1
+
+
+def replace_ns(ns: object, **kw: object) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**{**vars(ns), **kw})
+
+
+# Y6 (mutation survivor N11): a ledger replaced while it is being read is refused.
+def test_ledger_replaced_during_read_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, seal = world(tmp_path, "a0")
+    real_manifest = tv.VariantLedger.manifest
+
+    def swapping(self: tv.VariantLedger, **kw: object) -> dict:
+        body = real_manifest(self, **kw)  # type: ignore[arg-type]
+        twin = tmp_path / "twin.db"
+        shutil.copyfile(path, twin)
+        os.replace(twin, path)  # same path, new inode
+        return body
+
+    monkeypatch.setattr(tv.VariantLedger, "manifest", swapping)
+    with pytest.raises(AllocationError) as err:
+        allocate([family("a0")], policy(), verified_by=scope(path, seal))
+    assert err.value.code == "ledger_identity_mismatch" and "changed_during_read" in str(err.value)
+
+
+# Y7 (mutation survivor N21): a one-column edit of the grant pin is caught by its row digest.
+def test_grant_pin_fit_pin_edit_is_refused(tmp_path: Path) -> None:
+    path, _ = world(tmp_path, "a0")
+    db_path = tmp_path / "alloc.db"
+    grant_budget(AllocationLedger(db_path), path)
+    db = sqlite3.connect(db_path)
+    db.execute("UPDATE grant_pin SET fit_pin='generated-forged-pin'")
+    db.commit()
+    db.close()
+    assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
+        "ledger_integrity_failed"
+    )
