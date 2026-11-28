@@ -2018,19 +2018,21 @@ def _fragments(
             or right_end > page_box[2]
         ):
             marks.add("text_outside_page")
+        # The glyphs are drawn on the risen baseline (Ts), so the clip, image and paint checks
+        # use that box, not the unrisen one.
         # A clip can only exclude text that falls outside it (or whose region is unknown).
         if gs.clip_unknown or (
             gs.clip is not None
             and not (
                 gs.clip[0] <= left_end
                 and right_end <= gs.clip[2]
-                and gs.clip[1] <= py
-                and py + 0.7 * glyph <= gs.clip[3]
+                and gs.clip[1] <= ry
+                and ry + 0.7 * glyph <= gs.clip[3]
             )
         ):
             marks.add("clip_region_present")
-        text_boxes.append((left_end, py, right_end, py + glyph))
-        shown.append((order, (left_end, py, right_end, py + glyph), paints))
+        text_boxes.append((left_end, ry, right_end, ry + glyph))
+        shown.append((order, (left_end, ry, right_end, ry + glyph), paints))
         order += 1
         out.append(_Fragment(px, py, text, gs.size * abs(ctm[3] or 1.0), gs.font))
 
