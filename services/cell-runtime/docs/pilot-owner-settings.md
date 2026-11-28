@@ -60,6 +60,34 @@ packet through `save --input <packet.json>`. Use the same revision check for
 renewal, pause and revoke. If a newer revision was saved, open the current
 status before preparing a fresh claim.
 
+## Private owner consent
+
+The private same-origin setup surface supplies the current authenticated
+custodian, authorized selected workflow and displayed revision to
+`preview_consent`. It displays the returned prior settings and changes before
+the owner chooses to sign. The draft's `payload` binds the exact normalized
+policy and selected source pair, the prior settings and mandate revisions,
+the authenticated editing scope and a five-minute signing window.
+
+The customer owner and operator custodian sign the same payload off worker
+using the OPE-566 ES256 profile. The private surface passes the complete
+bounded signed envelope to `save_consent`, along with the current
+authenticated actor and selected workflow from the installation. The worker
+verifies the signed registry in the fixed private
+`pilot-issuer-registry.json` through the kit-pinned verifier. It checks the
+anchored customer key, purpose, issuer roles and signed validity, then repeats
+authority and expected revision checks under the existing settings writer.
+The returned revision identifies the verified payload. The durable record
+preserves the exact signed envelope for reconciliation.
+
+The OPE-566 verifier owner must register
+`opentour.pilot.owner-settings-consent.v1` as a two-signature consent purpose
+with `customer_owner` and `operator_custodian`. The registry must enroll an
+eligible custodian for that purpose, and the customer anchor and public root
+pin must be installed. The existing OPE-548 replacement flow governs reviewer
+changes. Positive monetary limits and settlement require their separate
+approved budget path.
+
 ## Acceptance and limits
 
 | Current native requirement | Executable evidence |
@@ -67,6 +95,7 @@ status before preparing a fresh claim.
 | Exact previous revision, candidate diff, signed CAS, stable worker receipt | `test_signed_preview_retry_roles_and_real_worker`, `test_competing_saves_and_explicit_prior_preview_atomicity` |
 | Scoped readback and explicit viewed revision, role drift, lower balance without new source reads | `test_scoped_setup_status_is_read_only_and_rechecks_roles_after_restart`, `test_preview_and_signed_save_refuse_outdated_and_cross_workflow_claims_without_io`, `test_lowered_renewal_row_cap_stops_before_content_acquisition` |
 | Owner-local reviewed revision through signed edit, renewal, pause and revoke | `test_owner_cli_uses_displayed_revision_for_signed_lifecycle` |
+| Scoped canonical claim preparation, dual-signature save and source-free refusal | `test_owner_settings_consent.py`, using generated keys and a test-only purpose registration |
 | Distinct custodian/reviewer/operator; no owner-only save | wrong-role parameter cases and `test_workflow_owner_binding_is_distinct_from_custodian_save` |
 | Live grant/field/source/pair authority, independent verifier, expiry | live-change parameter cases; forged/foreign/expired/unknown packet cases; expired-grant pause |
 | Pause/revoke/renew; stale worker/receipt denial; no source reads on denial | pause/revoke parameter cases, read-only policy test, lower-cap normal worker test |
