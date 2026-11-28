@@ -70,6 +70,12 @@ wheels pinned here.
   and no brand exceptions, so the NVIDIA container toolkit refuses to start it on an older
   driver. The image also deletes the base image's `/usr/local/cuda/compat` forward-compatibility
   `libcuda`. The operator must not set `NVIDIA_DISABLE_REQUIRE`, which skips the check.
+- **Unverified: the toolkit check may not run in CDI mode.** `NVIDIA_REQUIRE_CUDA` is checked
+  by the NVIDIA container toolkit's legacy injection path (`nvidia-container-cli`). When the
+  toolkit injects the GPU through CDI (Container Device Interface) instead, the check may not
+  run. This has not been verified for any toolkit version or on the OPE-565 host. The backstop
+  is the driver version recorded in qualification item 3: a run on a driver below 580.65.06
+  fails qualification, whatever the container toolkit allowed.
 - **GPU:** one 80 GB NVIDIA data-center GPU, Ampere (sm_80) or newer. CUDA 13 no longer
   supports Volta and older GPUs.
 - No upper driver bound is asserted. A newer driver is qualified only on the host where it was
@@ -87,7 +93,8 @@ a recorded commit. Each run records:
    `torch.cuda.get_device_properties`. Record the host ID only in redacted form.
 3. **Driver.** Driver version and the CUDA version it reports. Also record
    `torch.version.cuda` and `torch.backends.cudnn.version()`, and confirm the driver is in the
-   supported range.
+   supported range. Also record whether the container toolkit injected the GPU in legacy or
+   CDI mode. This record is the backstop if the toolkit did not enforce `NVIDIA_REQUIRE_CUDA`.
 4. **Checkpoint.** The pinned `eve-esa/EVE-Instruct` revision
    `b4965c4acbb27299078e4f97171530644fcc839f` and the `model.safetensors` SHA-256
    `150815d5b113536a83f24099528794686055675953cfcc14cdc6dbdadd86edfc`.

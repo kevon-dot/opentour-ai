@@ -987,6 +987,8 @@ def test_readme_names_the_writer_driver_range_and_evidence_limits():
         "NF4 QLoRA first",
         "bf16 LoRA",
         "Component evidence only",
+        "Unverified: the toolkit check may not run in CDI mode",
+        "whether the container toolkit injected the GPU",
     ):
         assert required in text, required
     assert (
