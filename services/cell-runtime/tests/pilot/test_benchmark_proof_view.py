@@ -55,3 +55,20 @@ def test_aggregate_member_gets_limitation_and_same_scope_return(tmp_path):
         h.action(view, action, buttons(screen(h, view))[action], actor=OTHER)
     assert "No benchmark calculation is available" in text(h, view)
     assert set(buttons(screen(h, view))) == {"ot_evidence", "ot_home"}
+
+
+def test_proof_binds_workflow_to_frozen_intake_across_selection_change(tmp_path):
+    h, _, _, _ = setup_workflow(tmp_path, "rule")
+    h.config.pop("workflow_label", None)
+    h.save()
+    view = h.launch()
+    for action in ("ot_evidence", "ot_bench_proof"):
+        h.action(view, action, buttons(screen(h, view))[action])
+    proof = text(h, view)
+    assert "Workflow · " in proof and "Workflow · unavailable" not in proof
+    ref = buttons(screen(h, view))["ot_bench_calc"]
+    h.config["live_workflow_ref"] = "unrelated-workflow"
+    h.save()
+    h.action(view, "ot_bench_calc", ref)
+    assert "Access unavailable" in text(h, view)
+    assert "unrelated-workflow" not in text(h, view)

@@ -2787,23 +2787,34 @@ class Workbench:
         assert target is not None
         rows = [(target.dataset, ctx["job"], value)]
 
-        def authorized_audit() -> Json:
+        def authorized_proof() -> tuple[Json, str]:
+            from opentour_cell.pilot.source_intake import check_current_intake
+
             current = self._authorize_question_rows(cfg, actor, rows)
             entry = current.permission(actor, "inspect", target.dataset)
+            intake = check_current_intake(
+                current.directory,
+                current.organization,
+                target.audit["engagement"],
+                target.dataset_revision,
+            )
+            _check(intake["dataset_id"] == target.dataset)
+            workflow = intake.get("workflow", "")
+            _check(not current.live_workflow_ref or current.live_workflow_ref == workflow)
             if current.reviewer == actor and "review" in entry["roles"]:
-                return target.audit
-            return {}
+                return target.audit, workflow
+            return {}, workflow
 
-        audit = authorized_audit()
+        audit, workflow = authorized_proof()
         token = self.journal.context(actor, cfg.channel, view, "bench_proof", ctx["job"], value)
         self._show(
             view,
-            self.views.benchmark_proof_modal(token, value, audit, cfg.workflow_label, action),
+            self.views.benchmark_proof_modal(token, value, audit, workflow, action),
             old_hash,
             dataset=target.dataset,
             dataset_revision=target.dataset_revision,
             audit=target.audit,
-            authorize=lambda: _check(authorized_audit() == audit),
+            authorize=lambda: _check(authorized_proof() == (audit, workflow)),
         )
 
     def _open_handoff(

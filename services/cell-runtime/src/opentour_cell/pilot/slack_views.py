@@ -1452,7 +1452,7 @@ def benchmark_proof_blocks(
     """Present only the validated aggregate supplied for this viewer and result."""
     blocks = [
         _section(
-            f"Workflow · {_display(workflow)}\nEvaluation purpose · compare the frozen "
+            f"Workflow · {_display(workflow) if workflow else 'unavailable'}\nEvaluation purpose · compare the frozen "
             "candidate and incumbent on the protected cohort."
         )
     ]
