@@ -392,14 +392,31 @@ def _parse_head(head: bytes) -> object:
 class _Doc:
     """Parsed object heads, read on demand; remembers which could not be read unambiguously."""
 
-    def __init__(self, objects: dict[int, _Object], deadline: Deadline) -> None:
+    def __init__(
+        self,
+        objects: dict[int, _Object],
+        deadline: Deadline,
+        compressed: frozenset[int] = frozenset(),
+    ) -> None:
         self.objects, self.deadline = objects, deadline
+        self.compressed = compressed  # numbers the xref places in object streams
         self.values: dict[int, object] = {}
         self.bad: set[int] = set()
         self.touched: set[int] = set()
+        self.missing: set[int] = set()  # numbers followed but not read: compressed or absent
+
+    def unread_flags(self) -> set[str]:
+        """Review flags for references followed since `touched` was cleared but not read."""
+        unread = self.touched & self.missing
+        flags = {"pdf_object_stream_unread"} if unread & self.compressed else set()
+        if unread - self.compressed:
+            flags.add("pdf_reference_unresolved")
+        return flags
 
     def value(self, number: int) -> object:
         self.touched.add(number)
+        if number not in self.objects:
+            self.missing.add(number)
         if number not in self.values:
             self.deadline.check()
             obj = self.objects.get(number)
@@ -446,7 +463,10 @@ def _parse_dict(head: bytes) -> dict[str, object] | None:
 # then every older section its trailer's /Prev chain reaches (incremental updates), each a
 # classic `xref` table (with a hybrid /XRefStm) or a cross-reference stream. The newest section
 # that lists an object number decides it: in use at an offset, free, or compressed in an
-# object stream (which this reader does not read: such an object is simply unavailable).
+# object stream. This reader does not read object streams: a reference the reader follows to a
+# compressed object goes to review as pdf_object_stream_unread, and one to an object that is
+# defined nowhere as pdf_reference_unresolved (see _Doc.unread_flags), since a viewer reads the
+# real value where this reader would read nothing.
 #
 # Objects are read from exactly the offsets so selected. Every `n g obj` in the file must be
 # accounted for: the selected definition of its number, or one an older section listed (an
@@ -676,8 +696,8 @@ def _xref_chain(
 
 def _load(
     data: bytes, deadline: Deadline, limits: Limits
-) -> tuple[dict[int, _Object], set[str], list[dict[str, object]]]:
-    """The objects a viewer resolves, document-level review flags, and the trailers."""
+) -> tuple[dict[int, _Object], set[str], list[dict[str, object]], frozenset[int]]:
+    """The objects a viewer resolves, document-level flags, trailers and compressed numbers."""
     definitions: list[tuple[int, int, int, int]] = []  # number, generation, start, body start
     for index, match in enumerate(_OBJ.finditer(data)):
         if index % 4096 == 0:
@@ -706,7 +726,7 @@ def _load(
                 raise _XrefError("entry does not point at its object")
             selected[number] = (start, found[2])
     except _XrefError:
-        return _objects(data, deadline), {"pdf_xref_unverified"} | repeated, []
+        return _objects(data, deadline), {"pdf_xref_unverified"} | repeated, [], frozenset()
     listed = {
         (number, _skip_ws(data, entry[1]) if entry[1] < len(data) else -1)
         for section in sections
@@ -735,7 +755,8 @@ def _load(
         objects[number], _, doubtful = _read_body(data, number, body, indirect_length)
         if doubtful:
             flags.add("pdf_stream_length_unverified")
-    return objects, flags, trailers
+    compressed = frozenset(number for number, entry in final.items() if entry[0] == "c")
+    return objects, flags, trailers, compressed
 
 
 def _decode(obj: _Object, head: dict[str, object] | None, doc: _Doc, limits: Limits) -> bytes:
@@ -2384,7 +2405,7 @@ def _lines(fragments: list[_Fragment]) -> list[list[_Fragment]]:
 
 def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
     """Return page/passage spans in reading order, or one specific recoverable state."""
-    objects, document_flags, trailers = _load(data, deadline, limits)
+    objects, document_flags, trailers, compressed = _load(data, deadline, limits)
     if not objects:
         raise ReaderFailure(ExtractionState.CORRUPT, "no_pdf_objects", NextActor.OWNER)
     trailer = data[data.rfind(b"trailer") :] if b"trailer" in data else b""
@@ -2394,7 +2415,7 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         or any(re.search(rb"/Encrypt\b", _decode_names(o.head)) for o in objects.values())
     ):
         raise ReaderFailure(ExtractionState.LOCKED, "encrypted_pdf", NextActor.OWNER)
-    doc = _Doc(objects, deadline)
+    doc = _Doc(objects, deadline, compressed)
     catalog: dict[str, object] | None = None
     # With resolved cross-reference data the catalog is the trailer's /Root, as a viewer takes
     # it; otherwise (the document already goes to review) the first catalog the scan finds.
@@ -2427,12 +2448,23 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         raise ReaderFailure(ExtractionState.CORRUPT, "no_page_tree", NextActor.OWNER)
 
     pages: list[
-        tuple[dict[str, object], dict[str, object], tuple[float, float, float, float] | None, bool]
+        tuple[
+            dict[str, object],
+            dict[str, object],
+            tuple[float, float, float, float] | None,
+            bool,
+            frozenset[str],
+        ]
     ] = []
     seen: set[int] = set()
 
     def walk(
-        number: int, inherited: dict[str, object], boxes: _Boxes, bad: bool, depth: int
+        number: int,
+        inherited: dict[str, object],
+        boxes: _Boxes,
+        bad: bool,
+        depth: int,
+        unread: frozenset[str],
     ) -> None:
         if number in seen or number not in objects:
             raise ReaderFailure(ExtractionState.CORRUPT, "bad_page_tree", NextActor.OWNER)
@@ -2451,25 +2483,28 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             _box(node.get("CropBox"), doc) or boxes.crop,
         )
         bad = bad or doc.ambiguous()
+        unread = unread | doc.unread_flags()  # an inherited box or resource not read
         if node.get("Type") == "Pages":
             kids = doc.resolve(node.get("Kids"))
             for kid in kids if isinstance(kids, list) else []:
                 if not isinstance(kid, _Ref):
                     raise ReaderFailure(ExtractionState.CORRUPT, "bad_page_tree", NextActor.OWNER)
-                walk(kid.number, resources, boxes, bad, depth + 1)
+                walk(kid.number, resources, boxes, bad, depth + 1, unread)
         else:
-            pages.append((node, resources, boxes.visible(), bad))
+            pages.append((node, resources, boxes.visible(), bad, unread))
             if len(pages) > limits.max_pages:
                 raise ReaderFailure(
                     ExtractionState.OVERSIZED, "page_limit", NextActor.OWNER, limit="pages"
                 )
 
-    walk(root.number, {}, _Boxes(None, None), False, 0)
+    walk(root.number, {}, _Boxes(None, None), False, 0, frozenset())
     spans: list[Span] = []
     image_pages: list[int] = []
     unresolved_pages: list[int] = []
     reading_order = 0
-    for page_number, (page, resources, page_box, page_bad) in enumerate(pages, start=1):
+    for page_number, (page, resources, page_box, page_bad, page_unread) in enumerate(
+        pages, start=1
+    ):
         deadline.check()
         doc.touched = set()
         fonts = _named(resources, "Font", doc)
@@ -2528,6 +2563,7 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
             marks.add("font_widths_unavailable")
         if page_bad or doc.ambiguous():
             marks.add("pdf_object_ambiguous")
+        marks |= page_unread | doc.unread_flags()
         if _device_spaces_redefined(resources, doc):
             # DefaultGray, DefaultRGB or DefaultCMYK remap every device colour (PDF 8.6.5.6),
             # and a resource named like a device space shadows it for a viewer that looks

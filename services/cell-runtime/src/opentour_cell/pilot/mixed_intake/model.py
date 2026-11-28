@@ -195,6 +195,8 @@ REVIEW_FLAGS = frozenset(
         "text_operand_malformed",
         "content_operand_mismatch",
         "graphics_state_unbalanced",
+        "pdf_object_stream_unread",
+        "pdf_reference_unresolved",
         "content_operand_non_finite",
     }
 )

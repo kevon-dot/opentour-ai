@@ -2098,7 +2098,9 @@ def test_pdf_extgstate_this_reader_does_not_model_goes_to_review() -> None:
     ):
         _flagged(b"/GS0 gs" + _SHOUT, flag, resources=_states(entry))
     _flagged(b"/Nope gs" + _SHOUT, flag)  # a name with no resource
-    _eligible(b"q /GS0 gs Q" + _SHOUT, resources=_states(b"/GS0 99 0 R"))  # Q restores it
+    _eligible(
+        b"q /GS0 gs Q" + _SHOUT, resources=_states(b"/GS0 << /BM /Screen >>")
+    )  # Q restores it
     _eligible(b"/GS0 gs" + _SHOUT, resources=_states(b"/GS0 << /TR /Identity /TR2 /Default >>"))
 
 
@@ -2508,3 +2510,73 @@ def test_pdf_named_device_colour_space_resources_stay_eligible() -> None:
     # A device space under its own resource name, and other named spaces left unused.
     _eligible(b"/CS0 cs 0 sc " + _SUMMARY, resources=_spaces(b"/CS0 /DeviceGray"))
     _eligible(b"0 g " + _SUMMARY, resources=_spaces(b"/CS1 " + _WHITE_SPOT))
+
+
+def _object_stream_pdf(page_extra: bytes, inner: bytes, font: bytes = _R1_FONT,
+                       media: bytes = b"/MediaBox [0 0 612 792] ",
+                       content: bytes = _SUMMARY) -> bytes:  # fmt: skip
+    """Object 9 (`inner`) compressed in object stream 20, found through xref stream 21."""
+    out = bytearray(b"%PDF-1.5\n")
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R " + media + page_extra
+        + b" /Contents 5 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+        5: fx._stream(content),
+        7: font,
+    }  # fmt: skip
+    data = b"9 0 " + inner
+    packed = zlib.compress(data)
+    objects[20] = (
+        b"<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length %d >>\nstream\n" % len(packed)
+        + packed
+        + b"\nendstream"
+    )
+    offsets: dict[int, int] = {}
+    for number in sorted(objects):
+        offsets[number] = len(out)
+        out += b"%d 0 obj\n" % number + objects[number] + b"\nendobj\n"
+    at = len(out)
+    rows = {0: b"\x00\x00\x00\x00\x00\xff\xff", 9: b"\x02" + (20).to_bytes(4, "big") + b"\x00\x00"}
+    rows |= {n: b"\x01" + o.to_bytes(4, "big") + b"\x00\x00" for n, o in offsets.items()}
+    rows[21] = b"\x01" + at.to_bytes(4, "big") + b"\x00\x00"
+    payload = zlib.compress(b"".join(rows[n] for n in sorted(rows)))
+    index = b" ".join(b"%d 1" % n for n in sorted(rows))
+    out += (
+        b"21 0 obj\n<< /Type /XRef /Size 22 /W [1 4 2] /Index [%s] /Root 1 0 R /Filter /FlateDecode"
+        b" /Length %d >>\nstream\n"
+        % (index, len(payload))
+        + payload
+        + b"\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n" % at
+    )
+    return bytes(out)
+
+
+def test_pdf_reference_into_an_object_stream_goes_to_review() -> None:
+    # poppler reads object 9 from the object stream: a 1x1 pt CropBox (no ink), zero /Widths
+    # piling the glyphs up. f2b356a never read type-2 entries and returned ELIGIBLE.
+    zeros = b"[" + b"0 " * 95 + b"]"
+    widths = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding"
+    widths += b" /FirstChar 32 /LastChar 126 /Widths 9 0 R >>"
+    for data in (
+        _object_stream_pdf(b"/CropBox 9 0 R", b"[0 0 1 1]"),
+        _object_stream_pdf(b"/MediaBox 9 0 R", b"[0 0 1 1]", media=b""),
+        _object_stream_pdf(b"", zeros, font=widths),
+    ):
+        result = read(data, "x.pdf")[1]
+        assert "pdf_object_stream_unread" in result.reason, result.reason
+    # An object stream nothing the reader follows points into: poppler draws the line.
+    result = read(_object_stream_pdf(b"", b"[0 0 1 1]"), "x.pdf")[1]
+    assert result.state is ExtractionState.ELIGIBLE, result.reason
+
+
+def test_pdf_reference_to_an_object_defined_nowhere_goes_to_review() -> None:
+    for page_extra in (b"/CropBox 99 0 R", b"/Rotate 0 /CropBox [0 0 612 792]"):
+        page = _R1_PAGE.replace(b"/Contents", page_extra + b" /Contents")
+        objects = [*_R1_BASE[:2], (3, page), (7, _R1_FONT), (5, fx._stream(_SUMMARY))]
+        result = read(_revisions([objects]), "x.pdf")[1]
+        if b"99" in page_extra:
+            assert "pdf_reference_unresolved" in result.reason, result.reason
+        else:
+            assert result.state is ExtractionState.ELIGIBLE, result.reason
+    _flagged(_SUMMARY, "pdf_reference_unresolved", resources=b"/Font << /F1 99 0 R >>")
