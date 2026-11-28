@@ -1,15 +1,39 @@
 """Recompute only the affected mind-map families and prove parity with a clean rebuild.
 
 Simulated: a SQLite-backed local store, generated sentinel families and in-process workers.
-Not proven: provider behavior, the OPE-544 consumption manifest, million-scale fixtures, any
-speed claim beyond the registered local scenario, or authorization of a fit.
+Not proven: provider behavior, use of the OPE-544 consumption manifest, million-scale
+fixtures, any speed claim beyond the registered local scenario, or authorization of a fit.
 
-Scope (OPE-525). The tenant-local consumption manifest and reverse lookup (OPE-544) and
-write-time consumption capture (OPE-416) are not on ``main``. This module therefore takes
-declared consumption (``Family.consumes``) as typed input and builds its own reverse index
-from it; swap the index source once OPE-544 lands. Nothing here authorizes a fit: plans and
-manifests always carry ``fit_authorized = False`` and rows are never exposed, only digests,
-so protected per-case answers cannot leak through a manifest.
+Scope (OPE-525). OPE-544's consumed-field manifest reader and reverse lookup are on ``main``
+(``opentour_cell.pilot.consumption_lineage``), but this module does not consume them yet.
+Write-time consumption capture (OPE-416), the writer those manifests depend on, is not on
+``main``. This module therefore takes declared consumption (``Family.consumes``) as typed
+input and builds its own reverse index from it; swap the index source for the OPE-544 reader
+once OPE-416 writes real manifests. Nothing here authorizes a fit: plans and manifests always
+carry ``fit_authorized = False`` and rows are never exposed, only digests, so protected
+per-case answers cannot leak through a manifest.
+
+A synthetic child's artifact derives from its ancestors, so the cache key binds the full
+ancestor chain in order, each entry ``(ancestor_id, family_revision, tenant, purpose, split)``:
+a parent revision bump, a re-parent or an ancestor's scope move is a cache miss for every
+descendant even when the inherited inputs are unchanged. That changed the key shape, so
+``TOOL_VERSION`` is v2; any further key-shape change must bump it again (a golden test pins
+the key). The registry refuses self-parenting, cycles and parent edges that cross tenant,
+purpose or split.
+
+The cache key binds ``TOOL_VERSION``, ``VERIFIER_VERSION`` (the verifier/finality rule a
+built artifact was checked under) and ``ARTIFACT_SCHEMA_VERSION``. The same versions are in
+the stored registry fingerprint, so bumping any of them forces a bounded full rebuild with no
+reuse of earlier jobs or snapshot results.
+
+Source state rewritten outside the event log (another writer, a restore) is caught twice.
+At publish, the state must still equal the state the run planned against, or the publish is
+refused (``SOURCE_STATE_MOVED``; a moved grant on a published built result is refused first as
+``AUTHORITY_MOVED``). On the next run, the current state must equal the last published state
+with the pending events replayed onto it; otherwise the run is a bounded full rebuild
+(``source_state_rewritten``), so a rewrite cannot leave stale reused results in place.
+Residual: a writer that rewrites ``state`` and ``published_state`` together, consistently, is
+not detectable here; the store trusts its own published-state row.
 """
 
 from __future__ import annotations
@@ -24,8 +48,10 @@ from typing import Any
 
 from opentour_cell.pilot.operating_point import canonical, digest
 
-TOOL_VERSION = "opentour.recompute.v1"
+TOOL_VERSION = "opentour.recompute.v2"  # v2: ancestor chain in the cache key
 MANIFEST_VERSION = "opentour.recompute.manifest.v1"
+VERIFIER_VERSION = "opentour.recompute.verifier-finality.v1"
+ARTIFACT_SCHEMA_VERSION = "opentour.recompute.family-artifact.v1"
 DEVELOPMENT = "development"
 PROTECTED = "protected"
 BUILT, HELD, BLOCKED = "built", "held", "blocked"
@@ -43,7 +69,7 @@ class RecomputeError(Exception):
 
 
 class PublishConflict(RecomputeError):
-    """The parent snapshot, change cursor or authority moved before publish."""
+    """The parent snapshot, change cursor, authority or source state moved before publish."""
 
 
 class LeaseLost(RecomputeError):
@@ -134,6 +160,37 @@ class SourceState:
         )
 
 
+def _is_state_json(raw: object) -> bool:
+    """Exactly the shape ``SourceState.to_json`` writes; anything else is a corrupt row."""
+    if not isinstance(raw, dict) or set(raw) != {"values", "withdrawn", "merges", "grants"}:
+        return False
+    values, withdrawn, merges, grants = (
+        raw[k] for k in ("values", "withdrawn", "merges", "grants")
+    )
+
+    def is_str_list(items: object) -> bool:
+        return isinstance(items, list) and all(isinstance(i, str) for i in items)
+
+    def is_revision(rev: object) -> bool:
+        return isinstance(rev, int) and not isinstance(rev, bool)
+
+    return (
+        isinstance(values, dict)
+        and all(isinstance(v, list) and len(v) == 2 and is_revision(v[0]) for v in values.values())
+        and is_str_list(withdrawn)
+        and isinstance(merges, list)
+        and all(is_str_list(m) for m in merges)
+        and isinstance(grants, list)
+        and all(
+            isinstance(g, list)
+            and len(g) == 3
+            and is_str_list(g[:2])
+            and (g[2] is None or is_revision(g[2]))
+            for g in grants
+        )
+    )
+
+
 def apply_event(state: SourceState, event: ChangeEvent) -> SourceState:
     """Pure transition. A lower revision of the same field never overwrites a newer one."""
     values = dict(state.values)
@@ -195,6 +252,7 @@ class Registry:
                 if fam.parent_id not in self.families:
                     raise RecomputeError("UNKNOWN_PARENT")
                 self.children[fam.parent_id].append(fam.family_id)
+        self._validate_lineage()
         # Development and protected indexes are separate: development roots are queried alone.
         self.by_field: dict[str, dict[str, set[str]]] = {s: {} for s in SPLITS}
         self.by_source: dict[str, dict[str, set[str]]] = {s: {} for s in SPLITS}
@@ -205,11 +263,57 @@ class Registry:
                 self.by_field[fam.split].setdefault(ref.key(), set()).add(fam.family_id)
                 self.by_source[fam.split].setdefault(ref.source_ref, set()).add(fam.family_id)
 
+    def _validate_lineage(self) -> None:
+        """Refuse self-parenting, cycles and any parent edge that crosses tenant, purpose or split.
+
+        A child inherits its parent's consumption and fences, so a cross-scope edge would let
+        content from another tenant, purpose or split (a protected parent under a development
+        child) flow into the child. The OPE-525 contract forbids sharing authority across
+        tenants or purposes, and a cross-split merge invalidates the split.
+        """
+        for fam in self.families.values():
+            if fam.parent_id is None:
+                continue
+            if fam.parent_id == fam.family_id:
+                raise RecomputeError("SELF_PARENT")
+            parent = self.families[fam.parent_id]
+            if parent.tenant != fam.tenant:
+                raise RecomputeError("LINEAGE_CROSS_TENANT")
+            if parent.purpose != fam.purpose:
+                raise RecomputeError("LINEAGE_CROSS_PURPOSE")
+            if parent.split != fam.split:
+                raise RecomputeError("LINEAGE_CROSS_SPLIT")
+        for fam_id in self.families:
+            seen = {fam_id}
+            cursor = self.families[fam_id].parent_id
+            while cursor is not None:
+                if cursor in seen:
+                    raise RecomputeError("LINEAGE_CYCLE")
+                seen.add(cursor)
+                cursor = self.families[cursor].parent_id
+
     def ancestry(self, family_id: str) -> set[str]:
         chain: set[str] = set()
         cursor: str | None = family_id
         while cursor is not None and cursor not in chain:
             chain.add(cursor)
+            cursor = self.families[cursor].parent_id
+        return chain
+
+    def lineage(self, family_id: str) -> list[list[str]]:
+        """Ancestors nearest parent first, self excluded, as ordered entries of
+        ``[ancestor_id, family_revision, tenant, purpose, split]``.
+
+        The scope fields duplicate the child's own (the registry refuses cross-scope edges) and
+        are bound anyway, so a later move of any ancestor changes every descendant's key.
+        """
+        chain: list[list[str]] = []
+        seen = {family_id}
+        cursor = self.families[family_id].parent_id
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            anc = self.families[cursor]
+            chain.append([cursor, anc.revision, anc.tenant, anc.purpose, anc.split])
             cursor = self.families[cursor].parent_id
         return chain
 
@@ -276,8 +380,10 @@ def evaluate_family(registry: Registry, family_id: str, state: SourceState) -> F
         )
     key = digest({
         "tenant": fam.tenant, "purpose": fam.purpose, "epoch": epoch, "inputs": inputs,
-        "family": fam.family_id, "family_revision": fam.revision, "parent": fam.parent_id,
-        "split": fam.split, "tool": TOOL_VERSION,
+        "family": fam.family_id, "family_revision": fam.revision,
+        "ancestors": registry.lineage(family_id),
+        "split": fam.split, "tool": TOOL_VERSION, "verifier": VERIFIER_VERSION,
+        "artifact_schema": ARTIFACT_SCHEMA_VERSION,
     })  # fmt: skip
     content = digest({"cache_key": key, "kind": "family-artifact"})
     return FamilyResult(family_id, fam.tenant, fam.split, BUILT, (), content, key, epoch)
@@ -316,6 +422,7 @@ def make_plan(
     max_fanout: int | None = None,
     lookup: IndexLookup | None = None,
     registry_changed: bool = False,
+    state_rewritten: bool = False,
 ) -> Plan:
     find = lookup or registry.lookup
     reasons: dict[str, set[str]] = defaultdict(set)
@@ -336,11 +443,15 @@ def make_plan(
         if fam_id not in prior:
             reasons[fam_id].add("no_prior_result")
     mode = "incremental"
-    if registry_changed:  # family set, revision or consumption moved: no prior result is safe
+    if registry_changed:  # family set, revision, consumption or a build version moved
         mode = "bounded_full_rebuild"
         for fam_id in registry.families:
             reasons[fam_id].add("registry_changed")
-    elif max_fanout is not None and len(reasons) > max_fanout:
+    if state_rewritten:  # state moved without an event: no reused result is known to be current
+        mode = "bounded_full_rebuild"
+        for fam_id in registry.families:
+            reasons[fam_id].add("source_state_rewritten")
+    if mode == "incremental" and max_fanout is not None and len(reasons) > max_fanout:
         mode = "bounded_full_rebuild"  # excessive fan-out: rebuild the full authorized scope
         for fam_id in registry.families:
             reasons[fam_id].add("fanout_fallback")
@@ -427,14 +538,21 @@ class _Tx:
 
 
 def registry_fingerprint(registry: Registry) -> str:
-    """Digest of every family field that feeds a result (revision, split, lineage, consumption)."""
-    return digest([
-        [
-            f.family_id, f.tenant, f.purpose, f.split, f.parent_id, f.lineage_complete,
-            f.revision, [ref.key() for ref in f.consumes],
-        ]
-        for f in (registry.families[k] for k in sorted(registry.families))
-    ])  # fmt: skip
+    """Digest of every input that feeds a result besides source state.
+
+    Family fields (revision, split, lineage, consumption) plus the tool, verifier/finality and
+    artifact-schema versions: a version bump invalidates every prior result, not just new jobs.
+    """
+    return digest({
+        "versions": [TOOL_VERSION, VERIFIER_VERSION, ARTIFACT_SCHEMA_VERSION],
+        "families": [
+            [
+                f.family_id, f.tenant, f.purpose, f.split, f.parent_id, f.lineage_complete,
+                f.revision, [ref.key() for ref in f.consumes],
+            ]
+            for f in (registry.families[k] for k in sorted(registry.families))
+        ],
+    })  # fmt: skip
 
 
 class RecomputeService:
@@ -464,6 +582,35 @@ class RecomputeService:
         self.db.execute(
             "insert or replace into meta values('state',?)", (canonical(state.to_json()),)
         )
+
+    def _put_published_state(self, state: SourceState) -> None:
+        self.db.execute(
+            "insert or replace into meta values('published_state',?)",
+            (canonical(state.to_json()),),
+        )
+
+    def _state_rewritten(self, state: SourceState, pending: Iterable[ChangeEvent]) -> bool:
+        """True unless ``state`` is the last published state with ``pending`` replayed onto it.
+
+        ``submit`` is the only writer that advances state, and it always appends the event, so
+        a mismatch means the state was rewritten outside the event log. A missing row (a store
+        written before this check existed) or a corrupt one counts as rewritten: the safe
+        direction, and the bounded rebuild's publish writes a fresh row.
+        """
+        row = self.db.execute("select v from meta where k='published_state'").fetchone()
+        if row is None:
+            return True
+        try:  # parse, shape check and replay: any failure means the row cannot vouch for reuse
+            raw = json.loads(row[0])
+            if not _is_state_json(raw):
+                return True
+            expected = SourceState.from_json(raw)
+            for event in pending:
+                expected = apply_event(expected, event)
+            replayed = canonical(expected.to_json())
+        except Exception:  # corrupt row (incl. RecursionError): rebuild, publish rewrites it
+            return True
+        return replayed != canonical(state.to_json())
 
     def _put_registry(self) -> None:
         self.db.execute(
@@ -522,6 +669,7 @@ class RecomputeService:
             manifest = Manifest(1, None, None, results)
             self._save_snapshot(manifest)
             self._put_state(state)
+            self._put_published_state(state)
             self._put_registry()
             return manifest
 
@@ -640,11 +788,12 @@ class RecomputeService:
         snap = self.snapshot()
         if snap is None:
             raise RecomputeError("NOT_BOOTSTRAPPED")
-        state, cursor = self.source_state(), self.cursor()
+        with self._tx():  # one consistent read: a concurrent submit cannot split state/events
+            state, cursor, pending = self.source_state(), self.cursor(), self.pending_events()
         changed = self._registry_changed()
         plan = make_plan(
-            self.registry, snap.results, snap.revision, self.pending_events(), state, cursor,
-            self.max_fanout, lookup, changed,
+            self.registry, snap.results, snap.revision, pending, state, cursor,
+            self.max_fanout, lookup, changed, self._state_rewritten(state, pending),
         )  # fmt: skip
         built: dict[str, FamilyResult] = {}
         started = hits = 0
@@ -670,11 +819,17 @@ class RecomputeService:
                 raise SimulatedCrash
         if before_publish:
             before_publish()
-        return RunReport(plan, started, hits, self._publish(plan, snap, built, token, changed))
+        manifest = self._publish(plan, snap, built, token, changed, state)
+        return RunReport(plan, started, hits, manifest)
 
     def _publish(
-        self, plan: Plan, parent: Manifest, built: Mapping[str, FamilyResult], token: int,
+        self,
+        plan: Plan,
+        parent: Manifest,
+        built: Mapping[str, FamilyResult],
+        token: int,
         registry_changed: bool,
+        planned: SourceState,
     ) -> Manifest:
         with self._tx():
             self._check_lease(token)  # inside the publish transaction: no check-then-act window
@@ -692,8 +847,12 @@ class RecomputeService:
                     and state.grants.get((fam.tenant, fam.purpose)) != res.grant_epoch
                 ):
                     raise PublishConflict("AUTHORITY_MOVED")
+            if canonical(state.to_json()) != canonical(planned.to_json()):
+                # Same cursor, different state: rewritten outside the event log mid-run.
+                raise PublishConflict("SOURCE_STATE_MOVED")
             manifest = Manifest(parent.revision + 1, parent.revision, parent.semantic, results)
             self._save_snapshot(manifest)
+            self._put_published_state(state)
             self._put_registry()
             self.db.execute(
                 "update events set state='done' where state='pending' and cursor<=?", (plan.cursor,)
