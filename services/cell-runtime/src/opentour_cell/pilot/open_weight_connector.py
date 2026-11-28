@@ -6,6 +6,19 @@ lost acknowledgement recoverable through ``lookup``, and records cancellation an
 any process is stopped. A job that is not provably complete after a restart is FAILED, never
 silently re-run: a retry needs a new fit intent and therefore a new reservation owned by the caller.
 
+Usage-vs-cap hold (OPE-508 decision, shared with the managed and customer-trainer routes through
+``connector_ext.usage_hold``): the accepted event journals the intent's currency and all four
+maxima, and the completed event journals the measured usage (wall seconds rounded up, so any
+fraction over the cap is over it; rows; steps; and zero incremental cost in the journaled currency,
+as before). A COMPLETED job is released only when that
+journaled usage is verifiably within that journaled cap; usage exactly at a maximum is accepted.
+Otherwise it is held as ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``: ``collect``
+builds no candidate, and ``predict_for_replay``, ``promote`` and ``serve`` refuse its artifact
+(this route has no ``handoff_reference``; those are the places its result is released).
+``hold_reason`` reports the reason and is ``None`` unless the job is COMPLETED; the receipt keeps
+the job's own state, and ``usage().settleable`` is False for a held job. An intent bound whose
+maxima are not exactly ``int`` is refused before dispatch and in every receipt (``intent_digest``).
+
 Simulated: tests drive the connector with generated toy model families through a real subprocess.
 Not proven: no real checkpoint is loaded here and no GPU is used. The connector never reserves or
 settles money; it enforces the bound it is given and reports measured usage.
@@ -16,6 +29,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -27,7 +41,19 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from opentour_cell.pilot import model_connector as mc
-from opentour_cell.pilot.connector_ext import FenceReceipt, Usage, UsageSource
+from opentour_cell.pilot.connector_ext import (
+    USAGE_FIELDS,
+    FenceReceipt,
+    JournaledCap,
+    Usage,
+    UsageFigures,
+    UsageSource,
+    capped_usage,
+    journal_bound,
+    require_exact_bound,
+    usage_hold,
+    usage_valid,
+)
 from opentour_cell.pilot.model_family import (
     FamilyError,
     ModelFamilyProfile,
@@ -103,7 +129,9 @@ def development_digest(rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def intent_digest(intent: mc.FitIntent) -> str:
+    """The journal's binding to one intent. Refuses a bound whose maxima are not exactly ``int``."""
     binding = intent.binding
+    require_exact_bound(intent.bound)
     return _sha(
         _canonical(
             [
@@ -158,6 +186,11 @@ def _events(path: Path) -> list[dict[str, Any]]:
             raise ValueError("journal_corrupt")
         events.append(event)
     return events
+
+
+def _measured_usage(event: Mapping[str, Any]) -> UsageFigures | None:
+    """The usage a completed event journaled; ``None`` when any figure is absent."""
+    return UsageFigures.from_document({name: event[name] for name in USAGE_FIELDS if name in event})
 
 
 def _marker(path: Path, payload: Mapping[str, Any]) -> None:
@@ -357,6 +390,7 @@ class OpenWeightConnector:
 
     def submit(self, intent: mc.FitIntent, development: bytes) -> mc.JobReceipt:
         self._refuse_if_fenced()
+        require_exact_bound(intent.bound)
         key = self._key(intent)
         job_dir = self._job_dir(key)
         with _SubmitLock(self.root):
@@ -369,7 +403,12 @@ class OpenWeightConnector:
             lock.acquire()
             _append(
                 job_dir / "journal.jsonl",
-                {"event": "accepted", "intent_sha256": intent_digest(intent), "rows": len(rows)},
+                {
+                    "event": "accepted",
+                    "intent_sha256": intent_digest(intent),
+                    "rows": len(rows),
+                    **journal_bound(intent.bound),  # the cap compared at release
+                },
             )
         try:
             self._execute(intent, rows, job_dir)
@@ -443,7 +482,10 @@ class OpenWeightConnector:
             {
                 "event": "completed",
                 "artifact_sha256": artifact,
-                "seconds": max(0, int(self.clock() - started)),
+                "currency": intent.bound.currency,
+                "minor_units": 0,  # measured zero incremental cost on the owner's machine
+                # Rounded up: any fraction of a second over the cap is over the cap.
+                "seconds": max(0, math.ceil(self.clock() - started)),
                 "rows": len(rows),
                 "steps": self.profile.resource.max_steps,
             },
@@ -545,6 +587,7 @@ class OpenWeightConnector:
         current = self._receipt(job.intent, job_dir, key)
         if current != job or job.state is not mc.JobState.COMPLETED:
             raise ValueError("CANDIDATE_LINEAGE_UNVERIFIED")
+        self._refuse_if_held(job_dir)  # a held job builds no candidate
         manifest = self._manifest(job_dir)
         if manifest["parent_revision"] != job.intent.binding.immutable_revision:
             raise ValueError("CANDIDATE_LINEAGE_UNVERIFIED")
@@ -556,6 +599,31 @@ class OpenWeightConnector:
             "simulated:manifest:"
             + _sha((job_dir / "artifact/connector-receipt.json").read_bytes())[:32],
         )
+
+    def _hold(self, job_dir: Path) -> str | None:
+        """The fixed hold reason of a COMPLETED job, from its journal alone; else ``None``."""
+        events = _events(job_dir / "journal.jsonl")
+        if not events or events[0]["event"] != "accepted":
+            raise ValueError("journal_corrupt")
+        if events[-1]["event"] != "completed":
+            return None  # only a COMPLETED job has a result to hold
+        return usage_hold(_measured_usage(events[-1]), JournaledCap.from_document(events[0]))
+
+    def _refuse_if_held(self, job_dir: Path) -> None:
+        hold = self._hold(job_dir)
+        if hold is not None:
+            raise ValueError(hold)  # a held job's artifact is never used or released
+
+    def hold_reason(self, job: mc.JobReceipt) -> str | None:
+        """The fixed reason a COMPLETED job's result is held, else ``None``.
+
+        One of ``over_cap``, ``usage_unverifiable`` or ``cap_unverifiable``. A job whose receipt
+        does not read COMPLETED reports ``None``: it yields no result to hold.
+        """
+        key = self._key_from_ref(job.job_ref)
+        if self.status(job).state is not mc.JobState.COMPLETED:
+            return None
+        return self._hold(self._job_dir(key))
 
     def _manifest(self, job_dir: Path) -> dict[str, Any]:
         artifact = job_dir / "artifact"
@@ -586,6 +654,7 @@ class OpenWeightConnector:
             or self.runner.installed_revision() != candidate.parent_revision
         ):
             raise ValueError("CANDIDATE_LINEAGE_UNVERIFIED")
+        self._refuse_if_held(job_dir)
         return self.runner.predict(job_dir / "artifact", tuple(dict(item) for item in inputs))
 
     def evidence(self, job: mc.JobReceipt) -> Mapping[str, Any]:
@@ -613,6 +682,7 @@ class OpenWeightConnector:
         job_dir = self._job_dir(self._key_from_ref(candidate.job_ref))
         if self._manifest(job_dir)["artifact_sha256"] != candidate.artifact_or_serving_revision:
             raise ConnectorRefusal("CANDIDATE_LINEAGE_UNVERIFIED")
+        self._refuse_if_held(job_dir)
         _append(
             self.root / "serving.jsonl",
             {
@@ -645,6 +715,7 @@ class OpenWeightConnector:
             if event["event"] == "promote" and event["artifact_sha256"] == current:
                 job_dir = self._job_dir(self._key_from_ref(str(event["job_ref"])))
                 self._manifest(job_dir)
+                self._refuse_if_held(job_dir)
                 return self.runner.predict(job_dir / "artifact", inputs)
         raise ConnectorRefusal("SERVING_TARGET_UNAVAILABLE")
 
@@ -655,6 +726,9 @@ class OpenWeightConnector:
         The journal records wall time, rows and steps only on completion. A FAILED or CANCELED job
         therefore has no measurement, and reporting a zero as ``MEASURED`` (settleable) would let a
         caller settle a job whose real cost is unknown. A corrupt journal is also unknown.
+
+        The figures are the journaled ones, compared to the journaled cap: ``cap_status`` and
+        ``settleable`` match the release rule (a held job is never settleable).
         """
         try:
             current = self.status(job)
@@ -664,14 +738,13 @@ class OpenWeightConnector:
             done = next((e for e in events if e["event"] == "completed"), None)
             if done is None:
                 return None
-            counts = (done["seconds"], done["rows"], done["steps"])
-            if any(type(count) is not int or count < 0 for count in counts):
+            measured = _measured_usage(done)
+            if measured is None or not usage_valid(measured):
                 return None
-            return Usage(
+            return capped_usage(
                 job.job_ref,
-                job.intent.bound.currency,
-                0,
-                *counts,
+                measured,
+                JournaledCap.from_document(events[0]),
                 UsageSource.MEASURED,
             )
         except (OSError, ValueError, LookupError, KeyError, TypeError):

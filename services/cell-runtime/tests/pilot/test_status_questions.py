@@ -503,6 +503,8 @@ def test_native_release_status_observes_independent_decision(
     before = counts(h)
 
     def assert_decision(view: str, current: str) -> None:
+        scope = f"Workflow {intake['workflow']} · Dataset"
+        assert (scope in current) == bool(h.config.get("live_workflow_ref"))
         assert expected in current and finding in current and "unconfirmed" in current
         assert recorded["presentation_id"] in current
         if legacy:

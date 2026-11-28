@@ -16,20 +16,21 @@ from typing import Any
 import pytest
 from opentour_cell.pilot import release_gate, repair_workflow, source_intake
 from opentour_cell.pilot import repair_bundle as bundle
+from opentour_cell.pilot.local_handoff_permissions import handoff_outbox
 from opentour_cell.pilot.managed_run import ManagedSelection, plan_revision
 from opentour_cell.pilot.operating_point import canonical, digest
 from opentour_cell.pilot.recipient_delivery import LocalRecipientDelivery, dispatch_local_release
 from opentour_cell.pilot.release_authority import (
     HandoffPermission,
-    RecordedReleaseAuthority,
     approval_ref,
 )
-from opentour_cell.pilot.release_outbox import ApprovedRelease, ReleaseOutbox, ReleaseSelection
+from opentour_cell.pilot.release_outbox import ApprovedRelease, ReleaseSelection
 from opentour_cell.pilot.simple_repair import declared_rule, predict_rule
+from test_local_handoff_permissions import KEY, signed_permission
 from test_managed_slack import prepared_workflow
-from test_recorded_release_authority import DestinationPermissions
 from test_repair_bundle import cli, transfer, write
 from test_reviewer_workflow import buttons, screen
+from test_slack_adapter import Harness
 
 Json = dict[str, Any]
 TARGET = "test-target-generated-recipient"
@@ -39,6 +40,11 @@ QUERY = {"features": {"event_type": "refund", "description": "generated decision
 
 @dataclass(frozen=True)
 class GeneratedTarget:
+    harness: Harness
+    permission: HandoffPermission
+    permission_path: Path
+    cohort_revision: str
+    evidence_revision: str
     config: Path
     key: bytes
     release: ApprovedRelease
@@ -158,11 +164,21 @@ def generated_target(tmp_path: Path) -> GeneratedTarget:
         "generated-rollback-delivery-permission",
         cutoff,
     )
-    authority = RecordedReleaseAuthority(owner, organization, DestinationPermissions(permission))
+    write(owner / "handoff-permission-key.json", {"key": KEY.hex()})
+    permission_path = signed_permission(
+        owner,
+        permission,
+        actors={
+            h.config["reviewer"]: ["inspect"],
+            "dispatcher": ["reserve", "claim", "reconcile"],
+        },
+    )
+    h.config["live_workflow_ref"] = permission.workflow_ref
+    h.save()
     release_selection = ReleaseSelection(intake["workflow"], run, approval_ref(receipt))
-    outbox = ReleaseOutbox(h.store, authority)
+    outbox = handoff_outbox(h.store)
     with h.store._db() as db:
-        release = authority.resolve(db, release_selection, "dispatcher", "claim")
+        release = outbox.authority.resolve(db, release_selection, "dispatcher", "claim")
     assert release is not None and release.artifact_sha256 != prior_rule["revision"]
     assert receiver.lookup(release, "before-generated-delivery").state == "absent"
     reserved = outbox.reserve(release_selection, "dispatcher", "generated-rollback-delivery")
@@ -231,6 +247,11 @@ def generated_target(tmp_path: Path) -> GeneratedTarget:
         },
     )
     return GeneratedTarget(
+        h,
+        permission,
+        permission_path,
+        audit["cohort_revision"],
+        prepared["evidence_revision"],
         config,
         key,
         release,

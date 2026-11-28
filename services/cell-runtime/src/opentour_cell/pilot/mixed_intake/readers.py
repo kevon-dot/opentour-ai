@@ -561,7 +561,9 @@ def read_xlsx(
                 if raw is None:
                     continue
                 if kind == "s":
-                    index = int(raw)
+                    # ASCII decimal digits only: int() also takes "+1", " 1" and other scripts'
+                    # digits ("١"), which no spreadsheet writes as a shared-string index.
+                    index = int(raw) if raw.isascii() and raw.isdigit() else -1
                     if not 0 <= index < len(strings):
                         # A negative index would silently select the wrong string from the end.
                         raise ReaderFailure(
