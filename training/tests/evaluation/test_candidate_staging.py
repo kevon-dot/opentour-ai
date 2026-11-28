@@ -1282,3 +1282,55 @@ def test_m3_unknown_selection_seq_holds_every_packet(selection: object) -> None:
     out = evaluate(confirmed)
     assert out.outcome == "hold"
     assert out.reasons == ("fresh_confirmation_required", "selection_seq_unrecorded")
+
+
+# ------------------------------------------------------------ N: documented in-process limits
+# Review of PR #231 (LOW 1 and LOW 2): the docstrings now state these limits instead of
+# overstating them. These tests pin the limits as documented, so the wording stays honest.
+
+
+def _rogue_issuers() -> dict[str, tuple[str, bytes]]:
+    return {**ISSUERS, "generated-rogue-confirmer": ("confirmation_issuer", b"generated-key-9")}
+
+
+def _rogue_attested(changed: CandidateRecord, p: StagingPacket) -> FreshConfirmation:
+    rogue = _confirmation(changed, p, actor_id="generated-rogue-confirmer")
+    body = confirmation_body(rogue)
+    return replace(rogue, attestation=HmacVerdictAuthority.mac(b"generated-key-9", body))
+
+
+def test_n1_sentinel_registry_is_only_shallowly_read_only() -> None:
+    from types import MappingProxyType
+
+    auth = HmacVerdictAuthority(ISSUERS)
+    p = packet()
+    changed = _changed(p)
+    rogue = _rogue_attested(changed, p)
+    assert not auth.verify_confirmation(rogue)
+    with pytest.raises(TypeError):  # item assignment is refused...
+        auth._issuers["generated-rogue-confirmer"] = (  # type: ignore[index]
+            "confirmation_issuer",
+            b"generated-key-9",
+        )
+    # ...but in-process code can replace the proxy itself (documented limit).
+    vars(auth)["_issuers"] = MappingProxyType(_rogue_issuers())
+    assert auth.verify_confirmation(rogue)
+    assert _evaluate(replace(p, candidate=changed, fresh_confirmation=rogue), auth).outcome == (
+        "eligible"
+    )
+
+
+def test_n2_a_ledger_file_is_not_bound_to_one_authority(tmp_path: Path) -> None:
+    p = packet()
+    changed = _changed(p)
+    rogue_packet = replace(p, candidate=changed, fresh_confirmation=_rogue_attested(changed, p))
+    path = tmp_path / "staging.json"
+    first = _Ledger(path, authority=AUTH)
+    assert first.stage(rogue_packet).status == "not_staged"
+    # Documented limit: a second ledger on the same file with another authority stages.
+    second = _Ledger(path, authority=HmacVerdictAuthority(_rogue_issuers()))
+    assert second.stage(rogue_packet).status == "staged"
+    # And swapping the authority after construction is not prevented either.
+    third = _Ledger(tmp_path / "other.json", authority=AUTH)
+    third._authority = HmacVerdictAuthority(_rogue_issuers())
+    assert third.stage(rogue_packet).status == "staged"

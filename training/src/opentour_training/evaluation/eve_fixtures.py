@@ -31,6 +31,7 @@ from opentour_training.evaluation.eve_benchmark import (
     HeldoutInputs,
     ReferenceJudgment,
     assess_development,
+    check_copy_destination,
     freeze_manifest,
     manifest_from_json,
     manifest_to_json,
@@ -304,8 +305,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )  # fmt: skip
         else:
             configured = DispositionRegistry.from_environment() if args.disposition else None
-            result = run_fixture_benchmark(include_repair=not args.baseline_only)
             out: Path = args.out
+            if configured is not None:  # --out receives a copy; refuse before writing anything
+                check_copy_destination(configured, out)
+            result = run_fixture_benchmark(include_repair=not args.baseline_only)
             write_once(out / "manifest.json", manifest_to_json(result.manifest))
             write_once(out / "scorecard.json", result.scorecard.to_json())
             if result.finding is not None:

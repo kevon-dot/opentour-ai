@@ -25,11 +25,19 @@ named id is labelled ``named_not_authenticated`` and an id with no named owner i
 
 One disposition per scorecard. ``DispositionRegistry`` is a write-once store keyed by the
 scorecard digest. Its root is a private worker directory pinned by realpath and
-(st_dev, st_ino), and only a record it accepted is ``registration: worker_registry``. Copies
-written elsewhere are just copies. The claim is one disposition per scorecard per registry:
-the training package has no installed worker root of its own, so whoever configures the
-worker (``OPENTOUR_EVE_DISPOSITION_REGISTRY`` for the CLI) chooses the registry, and someone
-able to configure a second registry can record a second disposition there.
+(st_dev, st_ino), and only a record it accepted is ``registration: worker_registry``. That
+label says only that this registry accepted the record as the scorecard's one disposition. It
+attests nothing about the scorecard beyond the per-process seal checked when it was recorded,
+so a scorecard forged in-process with ``_seal`` registers under the same label. An entry
+already at a scorecard's name that is not a well-formed record of this registry for that
+scorecard is ``registry_entry_invalid``: it still blocks that scorecard (fail closed) but is
+never read as a disposition. Planting a well-formed record needs the registry's own uid, the
+same limit as the seal. Copies are written elsewhere and are just copies: a copy destination
+may not overlap the registry root (be it, contain it, or lie inside it). The claim is one
+disposition per scorecard per registry: the training package has no installed worker root of
+its own, so whoever configures the worker (``OPENTOUR_EVE_DISPOSITION_REGISTRY`` for the CLI)
+chooses the registry, and someone able to configure a second registry can record a second
+disposition there.
 """
 
 from __future__ import annotations
@@ -1063,6 +1071,31 @@ class DispositionRegistry:
             )
             return fh.read(_REGISTRY_RECORD_MAX + 1)
 
+    @staticmethod
+    def _entry(raw: bytes, scorecard_digest: str) -> dict[str, Any]:
+        """The stored record, only if it is exactly what ``record`` writes for this scorecard.
+
+        Junk, a non-canonical spelling, another scorecard's record, a draft or a record whose
+        ``record_digest`` does not match is ``registry_entry_invalid``, never a disposition.
+        """
+        try:
+            record = json.loads(raw)
+        except (ValueError, RecursionError):  # includes JSONDecodeError and UnicodeDecodeError
+            record = None
+        ok = (
+            type(record) is dict
+            and canonical(record) == raw
+            and record.get("schema") == DISPOSITION_SCHEMA
+            and record.get("registration") == "worker_registry"
+            and record.get("scorecard_digest") == scorecard_digest
+            and record.get("disposition") in DISPOSITIONS
+            and record.get("record_digest")
+            == digest({k: v for k, v in record.items() if k != "record_digest"})
+        )
+        _need(ok, "registry_entry_invalid", scorecard_digest)
+        assert isinstance(record, dict)
+        return record
+
     def lookup(self, scorecard_digest: str) -> dict[str, Any] | None:
         """The registered disposition for a scorecard digest, or ``None`` if there is none."""
         name = self._name(scorecard_digest)
@@ -1073,8 +1106,7 @@ class DispositionRegistry:
             os.close(fd)
         if raw is None:
             return None
-        record: dict[str, Any] = json.loads(raw)
-        return record
+        return self._entry(raw, scorecard_digest)
 
     def record(
         self,
@@ -1089,7 +1121,10 @@ class DispositionRegistry:
 
         An identical retry returns the stored record with ``created=False``. Any different
         record for an already-dispositioned scorecard digest, including a later
-        ``recorded_at``, is refused with ``disposition_already_recorded``.
+        ``recorded_at``, is refused with ``disposition_already_recorded``; an entry at that
+        name that is not a well-formed record is refused with ``registry_entry_invalid``.
+        ``registration: worker_registry`` means this registry accepted the record; it does not
+        attest the scorecard beyond the per-process seal (see the module doc).
         """
         record = _finish(
             _disposition_fields(
@@ -1126,8 +1161,56 @@ class DispositionRegistry:
                     os.unlink(tmp, dir_fd=fd)
         finally:
             os.close(fd)
+        if existing is not None and existing != data:
+            self._entry(existing, card)  # an entry that is not a record is not a disposition
         _need(existing == data, "disposition_already_recorded", card)
         return record, False
+
+
+def check_copy_destination(registry: DispositionRegistry, destination: Path) -> None:
+    """Refuse a copy destination that overlaps the registry root in either direction.
+
+    Copies are just copies. A destination at or above the root would put them in the registry,
+    and one inside the root could be mistaken for, or collide with, registry state, so the root,
+    any ancestor of it and any path under it are all refused. The destination is resolved
+    (symlinks followed, need not exist yet) before comparing.
+
+    Path strings are only a cheap first pass: a bind mount or a case-insensitive filesystem
+    gives the same directory a second spelling. So overlap is then decided by directory
+    identity ``(st_dev, st_ino)``. Inside: no directory from the destination's nearest
+    existing ancestor up to ``/`` may be the pinned root. Ancestor: when the destination
+    exists, no directory from the root up to ``/`` may be the destination. (A destination
+    that does not exist yet cannot be an existing ancestor of the root.) A directory in either
+    chain whose identity cannot be read is refused too, since overlap cannot be ruled out.
+    """
+    resolved = Path(destination).resolve()
+    root = registry.root
+    code, detail = "copy_destination_overlaps_registry", str(destination)
+    _need(
+        resolved != root and resolved not in root.parents and root not in resolved.parents,
+        code,
+        detail,
+    )
+    root_id = registry._pin[1:]
+    chain = (resolved, *resolved.parents)
+    try:
+        nearest = 0
+        while True:  # the nearest existing ancestor (``/`` always exists)
+            try:
+                dest_info = os.stat(chain[nearest])
+                break
+            except (FileNotFoundError, NotADirectoryError):
+                nearest += 1
+        dest_id = (dest_info.st_dev, dest_info.st_ino)
+        for path in chain[nearest:]:
+            info = os.stat(path)
+            _need((info.st_dev, info.st_ino) != root_id, code, detail)
+        if nearest == 0:  # the destination itself exists
+            for path in (root, *root.parents):
+                info = os.stat(path)
+                _need((info.st_dev, info.st_ino) != dest_id, code, detail)
+    except OSError:
+        raise BenchmarkError(code, f"{detail}: identity unreadable") from None
 
 
 def record_one_disposition(
@@ -1144,8 +1227,12 @@ def record_one_disposition(
 
     The registry decides; ``copy_to`` only receives a copy of a record the registry accepted
     (or already holds identically), so a second ``copy_to`` cannot host a second disposition.
+    ``copy_to`` may not overlap the registry root in either direction (checked before
+    registering).
     """
     _need(type(registry) is DispositionRegistry, "disposition_registry_invalid")
+    if copy_to is not None:
+        check_copy_destination(registry, copy_to)
     record, created = registry.record(
         scorecard, finding, disposition=disposition, recorded_at=recorded_at, owner_id=owner_id
     )

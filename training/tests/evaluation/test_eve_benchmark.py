@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -1299,3 +1300,365 @@ def test_case_lower_bound_alone_withholds_the_improvement_claim() -> None:
     assert p["family_interval"]["lower"] > 0  # the family bound alone would support a claim
     assert p["interval"]["lower"] <= 0
     assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+
+
+# ---- review of PR #233 at 2adf0d8 (LOW 1-4)
+
+
+def _entry_name(card: eb.Scorecard) -> str:
+    return "disposition-" + card.scorecard_digest.removeprefix("sha256:") + ".json"
+
+
+def _registered(registry: eb.DispositionRegistry, card: eb.Scorecard, name: str) -> bytes:
+    registry.record(card, None, disposition=name, owner_id="generated-owner-1",
+                    recorded_at="2026-01-01")  # fmt: skip
+    return (registry.root / _entry_name(card)).read_bytes()
+
+
+def test_worker_registry_label_attests_registration_not_provenance(tmp_path: Path) -> None:
+    """LOW 1: the label says the registry accepted the record, nothing more, and the doc says so.
+
+    Pins the documented limit: a scorecard forged in-process with ``_seal`` registers under
+    the same label, because the seal is a code-path marker and not a trust root.
+    """
+    doc = " ".join((eb.__doc__ or "").split())
+    assert "attests nothing about the scorecard beyond the per-process seal" in doc
+    card = _score()
+    upgraded = {**card.body, "improvement_claim": "improvement_supported_by_interval"}
+    forged_digest = eb.digest(upgraded)
+    forged = eb.Scorecard(
+        body=upgraded, scorecard_digest=forged_digest, seal=eb._seal("scorecard", forged_digest)
+    )
+    registry = eb.DispositionRegistry(_registry_root(tmp_path))
+    record, created = registry.record(
+        forged, None, disposition="adopt_test_simple_fix", owner_id="generated-owner-1",
+        recorded_at="2026-01-01",
+    )  # fmt: skip
+    assert created and record["registration"] == "worker_registry"
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        b"",
+        b"junk",
+        b"\xff\xfe",
+        b"{}",
+        b"[]",
+        b"null",
+        b"[" * 60000,
+    ],
+    ids=["empty", "junk", "not-utf8", "empty-object", "list", "null", "deep-nesting"],
+)
+def test_a_planted_non_record_is_not_read_as_a_disposition(tmp_path: Path, planted: bytes) -> None:
+    """LOW 2: junk at the digest's name is ``registry_entry_invalid``, never a recorded
+    disposition. It still blocks registration for that scorecard (fail closed)."""
+    card = _score()
+    registry = eb.DispositionRegistry(_registry_root(tmp_path))
+    (registry.root / _entry_name(card)).write_bytes(planted)
+    assert _code(lambda: registry.lookup(card.scorecard_digest)) == "registry_entry_invalid"
+    attempt = functools.partial(
+        registry.record, card, None, disposition="benchmark_only",
+        owner_id="generated-owner-1", recorded_at="2026-01-01",
+    )  # fmt: skip
+    assert _code(attempt) == "registry_entry_invalid"
+    assert (registry.root / _entry_name(card)).read_bytes() == planted  # never overwritten
+
+
+def _tampered_entries(honest: bytes, other_card: str) -> dict[str, bytes]:
+    rec = json.loads(honest)
+    body = {k: v for k, v in rec.items() if k != "record_digest"}
+
+    def sealed(fields: dict[str, Any]) -> bytes:
+        return eb.canonical({**fields, "record_digest": eb.digest(fields)})
+
+    return {
+        "pretty-printed": json.dumps(rec, indent=2).encode(),
+        "stale-record-digest": eb.canonical({**rec, "disposition": "gather_more_evidence"}),
+        "other-scorecard": sealed({**body, "scorecard_digest": other_card}),
+        "draft-registration": sealed({**body, "registration": "unregistered_draft"}),
+        "other-schema": sealed({**body, "schema": "opentour.other.v1"}),
+        "unknown-disposition": sealed({**body, "disposition": "generated-unknown"}),
+        "no-record-digest": eb.canonical(body),
+    }
+
+
+def test_a_planted_ill_formed_record_is_not_read_as_a_disposition(tmp_path: Path) -> None:
+    card = _score()
+    other = _score(include_repair=False).scorecard_digest
+    (tmp_path / "ref").mkdir()
+    reference = eb.DispositionRegistry(_registry_root(tmp_path / "ref"))
+    honest = _registered(reference, card, "benchmark_only")
+    for label, planted in _tampered_entries(honest, other).items():
+        root = tmp_path / label
+        root.mkdir()
+        registry = eb.DispositionRegistry(_registry_root(root))
+        (registry.root / _entry_name(card)).write_bytes(planted)
+        lookup = functools.partial(registry.lookup, card.scorecard_digest)
+        assert _code(lookup) == "registry_entry_invalid", label
+        attempt = functools.partial(
+            registry.record, card, None, disposition="gather_more_evidence",
+            owner_id="generated-owner-1", recorded_at="2026-01-01",
+        )  # fmt: skip
+        assert _code(attempt) == "registry_entry_invalid", label
+
+
+def test_a_genuine_record_still_reads_back_and_still_blocks_a_second(tmp_path: Path) -> None:
+    card = _score()
+    registry = eb.DispositionRegistry(_registry_root(tmp_path))
+    honest = _registered(registry, card, "benchmark_only")
+    stored = registry.lookup(card.scorecard_digest)
+    assert stored is not None and eb.canonical(stored) == honest
+    second = functools.partial(
+        registry.record, card, None, disposition="gather_more_evidence",
+        owner_id="generated-owner-1", recorded_at="2026-01-01",
+    )  # fmt: skip
+    assert _code(second) == "disposition_already_recorded"
+
+
+def test_copy_destination_may_not_be_or_contain_the_registry(tmp_path: Path) -> None:
+    """LOW 3 at the worker step: a copy may not land in, or above, the registry root."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    (tmp_path / "alias").symlink_to(tmp_path)
+    for dest in (root, tmp_path, tmp_path / "alias", root / ".." / "registry"):
+        attempt = functools.partial(
+            eb.record_one_disposition, registry, card, None, disposition="benchmark_only",
+            owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=dest,
+        )  # fmt: skip
+        assert _code(attempt) == "copy_destination_overlaps_registry", dest
+    assert registry.lookup(card.scorecard_digest) is None  # refused before registering
+    beside = tmp_path / "copies"
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=beside,
+    )  # fmt: skip
+    assert len(list(beside.glob("disposition-*.json"))) == 1
+
+
+def test_cli_refuses_a_registry_equal_to_or_inside_out(tmp_path: Path) -> None:
+    """LOW 3: the CLI refuses before writing anything to --out or the registry."""
+    same = _registry_root(tmp_path)
+    run = _cli_run(_env(same), "run-generated", "--out", str(same), "--disposition",
+                   "benchmark_only")  # fmt: skip
+    assert run.returncode == 2 and "copy_destination_overlaps_registry" in run.stderr
+    assert not list(same.iterdir())
+    out = tmp_path / "out"
+    out.mkdir()
+    inner = _registry_root(out)
+    run = _cli_run(_env(inner), "run-generated", "--out", str(out), "--disposition",
+                   "benchmark_only")  # fmt: skip
+    assert run.returncode == 2 and "copy_destination_overlaps_registry" in run.stderr
+    assert sorted(p.name for p in out.iterdir()) == ["registry"]
+    assert not list(inner.iterdir())
+    # --copy-to of dispose-generated gets the same check.
+    src = tmp_path / "src"
+    assert _cli_run(_env(inner), "run-generated", "--out", str(src)).returncode == 0
+    for dest in (inner, out):
+        later = _cli_run(_env(inner), "dispose-generated", "--from", str(src), "--disposition",
+                         "benchmark_only", "--copy-to", str(dest))  # fmt: skip
+        assert later.returncode == 2 and "copy_destination_overlaps_registry" in later.stderr
+    assert not list(inner.iterdir())
+
+
+def test_copy_destination_inside_the_registry_is_refused(tmp_path: Path) -> None:
+    """Owner-delegate decision on the reverse nesting: a copy written inside the registry root
+    could be mistaken for, or collide with, registry state, so any overlap fails closed."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    (tmp_path / "into").symlink_to(root)  # a path outside that resolves inside the root
+    for dest in (root / "copies", root / "a" / "b", tmp_path / "into" / "copies"):
+        attempt = functools.partial(
+            eb.record_one_disposition, registry, card, None, disposition="benchmark_only",
+            owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=dest,
+        )  # fmt: skip
+        assert _code(attempt) == "copy_destination_overlaps_registry", dest
+    assert sorted(p.name for p in root.iterdir()) == []  # nothing registered, nothing copied
+    assert registry.lookup(card.scorecard_digest) is None
+    # A sibling whose name only shares the root's prefix is not inside it.
+    sibling = tmp_path / "registry-copies"
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=sibling,
+    )  # fmt: skip
+    assert len(list(sibling.glob("disposition-*.json"))) == 1
+
+
+def test_cli_refuses_out_or_copy_to_inside_the_registry(tmp_path: Path) -> None:
+    root = _registry_root(tmp_path)
+    env = _env(root)
+    inside = root / "out"
+    run = _cli_run(env, "run-generated", "--out", str(inside), "--disposition", "benchmark_only")
+    assert run.returncode == 2 and "copy_destination_overlaps_registry" in run.stderr
+    assert not list(root.iterdir())  # refused before --out was created
+    src = tmp_path / "src"
+    assert _cli_run(env, "run-generated", "--out", str(src)).returncode == 0
+    later = _cli_run(env, "dispose-generated", "--from", str(src), "--disposition",
+                     "benchmark_only", "--copy-to", str(root / "copies"))  # fmt: skip
+    assert later.returncode == 2 and "copy_destination_overlaps_registry" in later.stderr
+    assert not list(root.iterdir())
+
+
+# ---- review of #270 at 76881dd: overlap is decided by directory identity, not path strings
+
+
+def _stat_alias(monkeypatch: pytest.MonkeyPatch, aliases: dict[Path, Any]) -> None:
+    """``os.stat`` of an alias path answers for its target: a Path, a ready stat_result, or an
+    exception to raise. Every other path, and every fd, is stat'ed for real."""
+    real = os.stat
+
+    def fake(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if not isinstance(path, int):
+            target = aliases.get(Path(os.fsdecode(path)))
+            if isinstance(target, BaseException):
+                raise target
+            if isinstance(target, os.stat_result):
+                return target
+            if target is not None:
+                return real(target, *args, **kwargs)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fake)
+
+
+def _second_path_to(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> tuple[Path, str]:
+    """A second, symlink-free path to the registry root. A real bind mount where ``mount`` is
+    permitted (root in the dev container); elsewhere a plain directory whose ``os.stat``
+    answers as the root, which is what a bind mount looks like to the check. Never a skip."""
+    alias = tmp_path / "bind"
+    alias.mkdir()
+    try:
+        done = subprocess.run(
+            ["mount", "--bind", str(root), str(alias)], capture_output=True, check=False
+        )
+    except OSError:
+        done = None
+    if done is not None and done.returncode == 0:
+
+        def unmount() -> None:
+            if subprocess.run(["umount", str(alias)], check=False).returncode != 0:
+                subprocess.run(["umount", "-l", str(alias)], check=False)
+
+        request.addfinalizer(unmount)
+        assert os.stat(alias).st_ino == os.stat(root).st_ino
+        return alias, "bind_mount"
+    _stat_alias(monkeypatch, {alias: root})
+    return alias, "simulated_bind_mount"
+
+
+def _copy_attempt(registry: eb.DispositionRegistry, card: eb.Scorecard, dest: Path) -> Any:
+    return functools.partial(
+        eb.record_one_disposition, registry, card, None, disposition="benchmark_only",
+        owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=dest,
+    )  # fmt: skip
+
+
+def test_copy_destination_through_a_second_path_to_the_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Reviewer repro: ``mount --bind registry bind`` let ``bind`` and ``bind/sub`` through."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    alias, mode = _second_path_to(root, tmp_path, monkeypatch, request)
+    assert mode in {"bind_mount", "simulated_bind_mount"}
+    assert alias.resolve() != root  # the string checks alone would accept every case below
+    (alias / "sub").mkdir()
+    for dest in (alias, alias / "sub", alias / "new" / "deeper"):
+        assert _code(_copy_attempt(registry, card, dest)) == (
+            "copy_destination_overlaps_registry"
+        ), (mode, dest)
+    assert registry.lookup(card.scorecard_digest) is None
+    assert not list(root.rglob("disposition-*.json")) and not list(alias.rglob("disposition-*"))
+
+
+def test_copy_destination_case_variant_alias_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A case-insensitive filesystem (e.g. APFS) gives the root, and its parent, a second
+    spelling that stats as the same directory; both directions are refused."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    root_variant = tmp_path / "REGISTRY"
+    parent_variant = tmp_path.with_name(tmp_path.name.swapcase())
+    assert parent_variant != tmp_path and not parent_variant.exists()
+    real_root = os.stat(root)
+    same_ino_other_dev = os.stat_result(
+        (real_root.st_mode, real_root.st_ino, real_root.st_dev + 1, *tuple(real_root)[3:10])
+    )
+    other_dev = tmp_path / "other-dev"
+    other_dev.mkdir()
+    _stat_alias(
+        monkeypatch,
+        {root_variant: root, parent_variant: tmp_path, other_dev: same_ino_other_dev},
+    )
+    for dest in (root_variant, root_variant / "sub", root_variant / "a" / "b", parent_variant):
+        assert _code(_copy_attempt(registry, card, dest)) == (
+            "copy_destination_overlaps_registry"
+        ), dest
+    assert registry.lookup(card.scorecard_digest) is None
+    # Identity is (st_dev, st_ino): the same inode number on another device is not the root.
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=other_dev,
+    )  # fmt: skip
+    assert len(list(other_dev.glob("disposition-*.json"))) == 1
+
+
+def test_existing_sibling_and_parent_side_destinations_are_still_accepted(tmp_path: Path) -> None:
+    """The identity walk must not refuse a destination that merely shares an ancestor."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    existing = tmp_path / "copies"
+    existing.mkdir()
+    for dest in (existing, tmp_path / "fresh" / "deeper"):
+        eb.check_copy_destination(registry, dest)
+    assert eb.record_one_disposition(
+        registry, card, None, disposition="benchmark_only", owner_id="generated-owner-1",
+        recorded_at="2026-01-01", copy_to=existing,
+    )  # fmt: skip
+
+
+def test_copy_destination_whose_identity_cannot_be_read_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    locked = tmp_path / "locked"
+    _stat_alias(monkeypatch, {locked: PermissionError(13, "generated-denied")})
+    assert _code(_copy_attempt(registry, card, locked / "x")) == (
+        "copy_destination_overlaps_registry"
+    )
+    assert registry.lookup(card.scorecard_digest) is None
+
+
+class _RegistrySubclass(eb.DispositionRegistry):
+    pass
+
+
+class _DuckRegistry:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def record(self, *_: object, **__: object) -> tuple[dict[str, Any], bool]:
+        return {"registration": "worker_registry"}, True
+
+
+def test_record_one_disposition_accepts_only_the_exact_registry_type(tmp_path: Path) -> None:
+    """LOW 4: pins ``type(registry) is DispositionRegistry`` in record_one_disposition."""
+    card = _score()
+    root = _registry_root(tmp_path)
+    for fake in (_RegistrySubclass(root), _DuckRegistry(root), None, str(root)):
+        attempt = functools.partial(
+            eb.record_one_disposition, fake, card, None, disposition="benchmark_only",  # type: ignore[arg-type]
+            owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=tmp_path / "c",
+        )  # fmt: skip
+        assert _code(attempt) == "disposition_registry_invalid"
+    assert not list(root.iterdir()) and not (tmp_path / "c").exists()
