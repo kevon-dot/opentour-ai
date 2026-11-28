@@ -174,7 +174,14 @@ REVIEW_FLAGS = frozenset(
         "content_stream_unresolved",
         "font_widths_unavailable",
         "glyph_overprint_suspected",
+        "glyph_overprint_unchecked",
         "pdf_object_ambiguous",
+        "pdf_xref_unverified",
+        "pdf_stream_length_unverified",
+        "optional_content_present",
+        "xobject_unclassified",
+        "text_render_clip_unverified",
+        "text_color_space_unverified",
         "content_operand_non_finite",
     }
 )
