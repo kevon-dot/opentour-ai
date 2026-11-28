@@ -63,15 +63,15 @@ jobs:
           source_counts = {
               "test_customer_journey": 3,
               "test_slack_customers": 17,
-              "test_p1_starter_journey": 4,
-              "test_p1_live_after_starter": 1,
+              "test_p1_starter_journey": 2,
+              "test_p1_live_after_starter": 3,
               "qualified_slack_checks": 2,
               "qualified_workflow_index_checks": 1,
               "test_lifecycle_status_home": 1,
           }
           for module, minimum in source_counts.items():
               selected = [c for c in cases if c.get("classname", "").split(".")[-1] == module]
-              if len(selected) < minimum or any(list(c) for c in selected):
+              if len(selected) < minimum or any(c.find(tag) is not None for c in selected for tag in ("skipped", "error", "failure")):
                   raise SystemExit(f"Missing or nonpassing customer journey in {module}")
           print(f"{len(cases)} generated packaged checks passed")
           PY
