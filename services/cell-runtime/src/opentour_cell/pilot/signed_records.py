@@ -11,7 +11,12 @@ cannot drift. A record is ``{"payload": {...}, "signatures": [...]}``: one signa
 required signer role, every signature over the same transcript. Low-S is not enforced:
 hardware-token issuers may emit high-S signatures, and normalisation is an OPE-217
 decision. Every de-duplication below is therefore keyed on the payload digest, never on
-signature bytes.
+signature bytes, and consumers of verified records must likewise de-duplicate on the
+payload digest, never on signature bytes.
+
+Refusal contract: every public entry point either returns or raises ``PilotRecordRefused``
+with a reason code. It never raises anything else and never treats an unexpected error as
+acceptance: any unexpected internal exception becomes ``verifier_internal_error``.
 
 Trust chain:
 
@@ -105,8 +110,10 @@ Recovery:
   operator to delete the file, which then behaves as a missing floor.
 * A deleted anchor revision floor after a rotation fails closed with
   ``customer_anchor_inconsistent``, and so does an anchor whose custodian key was dropped.
-  Recovery is a supervised re-enrolment: delete both anchor records and pin a new
-  enrolment, with the customer confirming the key fingerprint out of band per OPE-583.
+  Re-presenting the original enrolment does not restore it: any stored chain longer than
+  the enrolment blocks a fresh pin, whatever its pending tail derives to. Recovery is a
+  supervised re-enrolment: delete both anchor records and pin a new enrolment, with the
+  customer confirming the key fingerprint out of band per OPE-583.
 * An interrupted rotation (chain written, floor write lost) counts while inside its window,
   and the next locked operation on that engagement rolls the floor forward. Remaining risk:
   if nothing touches the engagement's anchor under the lock before the rotation expires, the
@@ -133,10 +140,11 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
 
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from opentour_journal.crypto import canonical, raw_to_der, sha256, transcript
@@ -248,6 +256,21 @@ class PilotRecordRefused(Exception):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def _refusing[**P, R](function: Callable[P, R]) -> Callable[P, R]:
+    """Public entry points refuse with a code; they never raise anything else."""
+
+    @wraps(function)
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return function(*args, **kwargs)
+        except PilotRecordRefused:
+            raise
+        except Exception:
+            raise PilotRecordRefused("verifier_internal_error") from None
+
+    return guarded
 
 
 class _KeyEntry(WireModel):
@@ -371,8 +394,10 @@ def _public_key(key_id: str, der_b64: str, pinned_sha256: str) -> ec.EllipticCur
         raise PilotRecordRefused("trust_key_digest_mismatch")
     try:
         key = serialization.load_der_public_key(der)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, UnsupportedAlgorithm):
+        # Unsupported or unknown curves (brainpool, prime192v2, SM2 ...) refuse, never raise.
         raise PilotRecordRefused("trust_key_curve_invalid") from None
+    # Only P-256, checked explicitly.
     if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
         raise PilotRecordRefused("trust_key_curve_invalid")
     return key
@@ -714,6 +739,7 @@ class TrustStateStore:
     the signed documents that justify them.
     """
 
+    @_refusing
     def __init__(self) -> None:
         location = ANTI_ROLLBACK_DIRECTORY
         if location is None:
@@ -742,6 +768,7 @@ class TrustStateStore:
             self._held = False
             os.close(lock)
 
+    @_refusing
     def read(self, key: str) -> MonotonicRecord | None:
         _require_record_key(key)
         path = self._directory / RECORDS_NAME / _record_name(key)
@@ -764,6 +791,7 @@ class TrustStateStore:
             raise PilotRecordRefused("trust_state_unreadable") from None
         return MonotonicRecord(state.key, int(state.sequence), state.value)
 
+    @_refusing
     def advance(self, record: MonotonicRecord, rule: TransitionRule) -> bool:
         """Requires ``locked``. Return False when an identical record is already held."""
         if not self._held:
@@ -859,6 +887,7 @@ class PilotVerifier:
     root nor the anti-rollback location is a caller argument.
     """
 
+    @_refusing
     def __init__(self, registry_document: bytes) -> None:
         self._store = TrustStateStore()
         pin, roots = _load_root_pin()
@@ -905,9 +934,10 @@ class PilotVerifier:
     def registry_revision(self) -> int:
         return self._registry.revision
 
+    @_refusing
     def verify(self, record: bytes, purpose: str) -> dict[str, object]:
         """Return the verified payload of ``record`` for ``purpose`` or refuse with a code."""
-        if purpose not in RECORD_PURPOSES:
+        if type(purpose) is not str or purpose not in RECORD_PURPOSES:
             raise PilotRecordRefused("purpose_unknown")
         self._registry_current()
         payload, signatures = _open(record, "record")
@@ -925,6 +955,7 @@ class PilotVerifier:
         _authenticate(payload, signatures, purpose, resolvers, "record")
         return payload
 
+    @_refusing
     def pin_customer_anchor(self, enrolment: bytes) -> CustomerAnchor:
         """Pin an engagement's customer key at engagement start. Never replaces an anchor.
 
@@ -945,8 +976,11 @@ class PilotVerifier:
                 raise PilotRecordRefused("customer_anchor_already_pinned")
             if record is not None:
                 # Keyed on the payload digest, so a re-signed enrolment is the same one.
-                _, digests, chain = self._replay(engagement, record, 1)
-                if digests[0] != digest or len(chain) != 1:
+                # The raw stored length counts, not what the chain derives to: an expired
+                # pending rotation must not let the original enrolment re-pin the old key.
+                stored = self._chain_entries(record)
+                _, digests, _ = self._replay(engagement, record, 1)
+                if digests[0] != digest or len(stored) != 1:
                     raise PilotRecordRefused(
                         "customer_anchor_already_pinned"
                         if floor is not None
@@ -961,6 +995,7 @@ class PilotVerifier:
             )
         return anchor
 
+    @_refusing
     def rotate_customer_key(self, rotation: bytes) -> CustomerAnchor:
         """Replace an anchor only on a rotation signed by the anchored key and the new key.
 
@@ -1118,6 +1153,13 @@ class PilotVerifier:
             raise PilotRecordRefused("customer_key_not_distinct")
         return body, successor, _payload_sha256(payload)
 
+    @staticmethod
+    def _chain_entries(record: MonotonicRecord) -> list[dict[str, Any]]:
+        try:
+            return _ChainValue.model_validate(dict(record.value)).chain
+        except ValidationError:
+            raise PilotRecordRefused("trust_state_unreadable") from None
+
     def _replay(
         self, engagement_id: str, record: MonotonicRecord, accepted: int
     ) -> tuple[PilotTrustedKey, list[str], list[dict[str, Any]]]:
@@ -1128,10 +1170,7 @@ class PilotVerifier:
         pass the time check now; otherwise the whole pending tail is ignored. Returns the
         current key, the payload digests and the entries it was derived from.
         """
-        try:
-            chain = _ChainValue.model_validate(dict(record.value)).chain
-        except ValidationError:
-            raise PilotRecordRefused("trust_state_unreadable") from None
+        chain = self._chain_entries(record)
         if len(chain) < accepted:
             # An older copy of the chain is shorter than the revision this worker has seen.
             raise PilotRecordRefused("customer_anchor_rolled_back")

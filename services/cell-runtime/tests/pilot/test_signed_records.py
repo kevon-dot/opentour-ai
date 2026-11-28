@@ -1383,6 +1383,147 @@ def test_binding_a_rotation_for_another_engagement_is_refused(kit: Kit) -> None:
     refused("customer_anchor_unverifiable", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
 
 
+# --- Cross-session review (refuse, never raise; stale re-pin) --------------------------
+
+
+def _tlv(tag: int, body: bytes) -> bytes:
+    size = len(body)
+    if size < 128:
+        length = bytes([size])
+    elif size < 256:
+        length = bytes([0x81, size])
+    else:
+        length = bytes([0x82, size >> 8, size & 0xFF])
+    return bytes([tag]) + length + body
+
+
+def _oid(dotted: str) -> bytes:
+    parts = [int(part) for part in dotted.split(".")]
+    out = bytes([40 * parts[0] + parts[1]])
+    for value in parts[2:]:
+        encoded = [value & 0x7F]
+        value >>= 7
+        while value:
+            encoded.insert(0, (value & 0x7F) | 0x80)
+            value >>= 7
+        out += bytes(encoded)
+    return _tlv(0x06, out)
+
+
+UNSUPPORTED_CURVES = {
+    "brainpoolP160r1": ("1.3.36.3.3.2.8.1.1.1", 20),
+    "prime192v2": ("1.2.840.10045.3.1.2", 24),
+    "sm2": ("1.2.156.10197.1.301", 32),
+}
+
+
+def unsupported_curve_key(curve: str) -> Json:
+    """An EC SubjectPublicKeyInfo on a curve the cryptography backend cannot load."""
+    oid, size = UNSUPPORTED_CURVES[curve]
+    algorithm = _tlv(0x30, _oid("1.2.840.10045.2.1") + _oid(oid))
+    der = _tlv(0x30, algorithm + _tlv(0x03, b"\x00\x04" + b"\x01" * (2 * size)))
+    return {
+        "key_id": f"customer-{curve.lower()}-0001",
+        "public_key_der": base64.b64encode(der).decode("ascii"),
+        "public_key_sha256": hashlib.sha256(der).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize("curve", sorted(UNSUPPORTED_CURVES))
+def test_review_unsupported_curves_refuse_on_pin_and_rotate(kit: Kit, curve: str) -> None:
+    odd = unsupported_curve_key(curve)
+    verifier = kit.verifier()
+    payload = {**kit.enrolment_payload(), "customer_key": odd}
+    enrolment = sign(payload, sr.ENROLMENT_PURPOSE, kit.customer, kit.operator)
+    refused("trust_key_curve_invalid", partial(verifier.pin_customer_anchor, enrolment))
+    verifier.pin_customer_anchor(kit.enrolment())
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    rotation_payload = {**kit.rotation_payload(kit.customer, successor), "customer_key": odd}
+    rotation = sign(rotation_payload, sr.ROTATION_PURPOSE, kit.customer)
+    refused("trust_key_curve_invalid", partial(verifier.rotate_customer_key, rotation))
+    entry = {**kit.evaluator.entry(), **odd, "key_id": "evaluator-odd-curve-0001"}
+    refused("trust_key_curve_invalid", partial(kit.verifier, kit.registry("2", keys=[entry])))
+
+
+@pytest.mark.parametrize("curve", sorted(UNSUPPORTED_CURVES))
+def test_review_unsupported_curve_in_the_chain(kit: Kit, curve: str) -> None:
+    verifier = kit.enrolled()
+    enrolment = stored(kit, ANCHOR_KEY)["value"]["chain"][0]
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    payload = {
+        **kit.rotation_payload(kit.customer, successor),
+        "customer_key": unsupported_curve_key(curve),
+    }
+    planted = sign(payload, sr.ROTATION_PURPOSE, kit.customer)
+    genuine = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    # Pending tail: ignored like an out-of-window entry; the floor anchor still verifies.
+    write_record(kit, ANCHOR_KEY, 2, {"chain": [enrolment, json.loads(planted)]})
+    assert verifier.verify(genuine, sr.GRANT_PURPOSE)
+    # Accepted chain (floor covers it): refused, never raised.
+    write_record(kit, REVISION_KEY, 2, {"head_payload_sha256": payload_digest(planted)})
+    refused("customer_anchor_unverifiable", partial(verifier.verify, genuine, sr.GRANT_PURPOSE))
+
+
+def test_review_purpose_must_be_an_exact_string(kit: Kit) -> None:
+    verifier = kit.verifier()
+    record = sign(consent(), sr.VERDICT_PURPOSE, kit.evaluator)
+    weird: list[Any] = [["x"], {"a": 1}, None, 3, b"opentour.pilot.independent-verdict.v1"]
+    for purpose in weird:
+        refused("purpose_unknown", partial(verifier.verify, record, purpose))
+
+
+def test_review_unexpected_internal_errors_map_to_one_refusal(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.enrolled()
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    rotation = kit.rotation(kit.customer, successor)
+    enrolment = kit.enrolment()
+    registry = kit.registry()
+
+    def boom(*args: object, **kwargs: object) -> Any:
+        raise RuntimeError("injected")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sr, "_open", boom)
+        refused("verifier_internal_error", partial(verifier.verify, grant, sr.GRANT_PURPOSE))
+        refused("verifier_internal_error", partial(verifier.pin_customer_anchor, enrolment))
+        refused("verifier_internal_error", partial(verifier.rotate_customer_key, rotation))
+    with monkeypatch.context() as patch:
+        patch.setattr(sr, "_load_root_pin", boom)
+        refused("verifier_internal_error", partial(sr.PilotVerifier, registry))
+    with monkeypatch.context() as patch:
+        patch.setattr(sr, "strict_json", boom)
+        store = sr.TrustStateStore()
+        refused("verifier_internal_error", partial(store.read, ANCHOR_KEY))
+    # Nothing was accepted, and the genuine state still verifies afterwards.
+    assert verifier.verify(grant, sr.GRANT_PURPOSE)
+    # A caller-side misuse, such as an unknown keyword, is refused the same way.
+    refused(
+        "verifier_internal_error",
+        partial(verifier.verify, grant, sr.GRANT_PURPOSE, now="later"),  # type: ignore[call-arg]
+    )
+
+
+def test_review_deleting_the_floor_after_an_expired_rotation_does_not_re_pin(
+    kit: Kit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = kit.verifier()
+    enrolment = kit.enrolment(not_after=stamp(20000))
+    verifier.pin_customer_anchor(enrolment)
+    successor = Signer(sr.CUSTOMER_OWNER, registry_revision="2")
+    verifier.rotate_customer_key(kit.rotation(kit.customer, successor))
+    record_path(kit, REVISION_KEY).unlink()
+    real_now = sr._utc_now
+    monkeypatch.setattr(sr, "_utc_now", lambda: real_now() + timedelta(seconds=7200))
+    # The rotation is now expired and the enrolment still in its window.
+    refused("customer_anchor_inconsistent", partial(verifier.pin_customer_anchor, enrolment))
+    assert not record_path(kit, REVISION_KEY).exists()
+    old_grant = sign(consent(not_after=stamp(80000)), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("customer_anchor_inconsistent", partial(verifier.verify, old_grant, sr.GRANT_PURPOSE))
+
+
 # --- Encoding and canonical form -----------------------------------------------------
 
 
@@ -1648,10 +1789,13 @@ def test_caller_cannot_extend_validity(kit: Kit) -> None:
     expired = consent(issued_at=stamp(-7200), not_after=stamp(-1))
     record = sign(expired, sr.VERDICT_PURPOSE, kit.evaluator)
     later = stamp(86400)
-    # No time or validity argument exists on the verification path.
+    # No time or validity argument exists on the verification path; passing one is
+    # refused (never accepted, never raised as anything but a refusal).
     for keyword in ("now", "not_after", "clock", "at"):
-        with pytest.raises(TypeError):
-            verifier.verify(record, sr.VERDICT_PURPOSE, **{keyword: later})
+        refused(
+            "verifier_internal_error",
+            partial(verifier.verify, record, sr.VERDICT_PURPOSE, **{keyword: later}),
+        )
     # An unsigned later not_after is a forbidden field, wherever it is placed.
     value = json.loads(record)
     value["not_after"] = later
