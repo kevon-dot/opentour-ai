@@ -44,6 +44,7 @@ class GeneratedLedger:
         self.settled: dict[str, int] = {}
         self.reserve_calls = self.lookup_calls = self.settle_calls = 0
         self.available = True
+        self.terminal_result = "candidate"
         self.lock = threading.Lock()
 
     def lookup(self, intent: lr.FitIntent) -> lr.FitReservation | None:
@@ -78,7 +79,9 @@ class GeneratedLedger:
             )
             # Settle once; a replay returns the original settlement. No refunds below it.
             charged = self.settled.setdefault(reservation_ref, max(consumed_units, 0))
-            return lr.FitReservation(reservation_ref, reserved.reserved_units, charged)
+            return lr.FitReservation(
+                reservation_ref, reserved.reserved_units, charged, self.terminal_result
+            )
 
 
 class GeneratedTrainer:
@@ -646,6 +649,7 @@ def test_cancellation_is_idempotent_and_confirms_only_after_settlement(site):
     assert service.status(slack, second)["state"] == "cancellation_pending"
     site.ledger.available = True
     # The lease was released before the ledger call; the cancel retry settles once.
+    site.ledger.terminal_result = "canceled"
     confirmed = service.cancel(slack, second, "cancel-3")
     assert (confirmed["cancellation"], confirmed["state"]) == ("confirmed", "canceled")
     status = service.status(slack, second)
@@ -653,6 +657,7 @@ def test_cancellation_is_idempotent_and_confirms_only_after_settlement(site):
     assert list(site.ledger.settled.values()) == [7]
     assert site.trainer.submissions == 0
     # Cancellation never reaches into finished work or release.
+    site.ledger.terminal_result = "candidate"
     done = submit(service, slack, site.publish(site.plan("source-v3")), "click-3")["run_ref"]
     drive_to_review(site, worker, scheduler)
     late = service.cancel(slack, done, "cancel-4")
@@ -1076,6 +1081,7 @@ def test_stopped_trainer_job_settles_after_a_ledger_outage(site):
         worker.confirm_cancel(scheduler, claim, consumed_units=11)
     assert service.status(slack, run)["state"] == "cancellation_pending"
     site.ledger.available = True
+    site.ledger.terminal_result = "canceled"
     # No worker is needed any more: the schedule tick (or a cancel retry) settles it.
     tick = worker.schedule_tick(scheduler)
     assert tick["tick"] == "no_change"

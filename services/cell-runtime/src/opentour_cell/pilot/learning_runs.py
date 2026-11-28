@@ -276,6 +276,7 @@ class FitReservation:
     reservation_ref: str
     reserved_units: int
     consumed_units: int | None = None
+    terminal_result: str | None = None
 
 
 class LedgerHold(Exception):
@@ -1007,6 +1008,7 @@ class LearningRuns:
             measured = int(row["measured_units"] or 0)
         try:
             settled = self._settle(reservation, measured)
+            _need(settled.terminal_result == "canceled", "fit_outcome_mismatch")
         except LearningRunError:
             return
         self._confirm_cancel(tenant, run, reservation, settled)
@@ -1014,6 +1016,7 @@ class LearningRuns:
     def _confirm_cancel(
         self, tenant: str, run: str, reservation: str | None, settled: FitReservation | None
     ) -> None:
+        _need(settled is None or settled.terminal_result == "canceled", "fit_outcome_mismatch")
         consumed = None if settled is None else settled.consumed_units
         _need(
             settled is None
@@ -1523,6 +1526,8 @@ class LearningRuns:
         if reservation is not None:
             assert consumed_units is not None
             settled = self._settle(reservation, consumed_units)
+            if outcome in {"completed", "review_ready"}:
+                _need(settled.terminal_result == "candidate", "fit_outcome_mismatch")
         with self._leased(principal, claim, allow_cancel=True) as (db, row):
             row = self._set(
                 db,

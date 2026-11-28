@@ -137,15 +137,17 @@ def test_learning_fit_port_never_sends_on_reserve_or_settles_unverified_usage(tm
     )
 
 
-def test_signed_learning_plan_scheduler_and_slack_share_one_dispatch(tmp_path):
+@pytest.mark.parametrize("terminal", ["candidate", "invalid_output", "cancel_before_submit"])
+def test_signed_learning_plan_scheduler_and_slack_share_one_dispatch(tmp_path, terminal):
     from dataclasses import replace
 
+    from fit_dispatch_doubles import BackendConfig
     from opentour_cell.pilot import fit_dispatch as fd
     from opentour_cell.pilot import learning_runs as lr
     from opentour_cell.pilot.learning_fit_dispatch import LearningFitLedger
     from test_fit_dispatch import OWNER
 
-    world = World(tmp_path)
+    world = World(tmp_path, config=BackendConfig(invalid_output=terminal == "invalid_output"))
     run, receipt = world.admit()
     request = world.request(run, receipt)
     tenant = world.store.organization
@@ -228,14 +230,31 @@ def test_signed_learning_plan_scheduler_and_slack_share_one_dispatch(tmp_path):
     assert worker.reserve_fit(scheduler, claim, **fit) == reserved
     execution = reserved["reservation_ref"]
     assert dispatcher.status(execution, actor=DELEGATE).submissions == 0
+    if terminal == "cancel_before_submit":
+        assert service.cancel(slack, claim.run_ref, "cancel")["cancellation"] == "pending"
+        canceled = dispatcher.cancel(execution, actor=DELEGATE)
+        assert canceled.stage == "settled" and canceled.usage["source"] == "not_submitted"
+        assert (
+            worker.confirm_cancel(scheduler, claim, consumed_units=0)["cancellation"] == "confirmed"
+        )
+        assert service.status(slack, claim.run_ref)["usage"]["consumed_units"] == 0
+        assert world.backend.jobs_created() == 0
+        return
     worker.begin_submission(scheduler, claim)
     started = dispatcher.advance(execution, actor=DELEGATE)
     assert started.submissions == 1 and started.job_ref
     worker.record_submission(scheduler, claim, execution_ref=started.job_ref)
     final = world.finish(dispatcher, execution)
-    worker.finish(scheduler, claim, "completed", consumed_units=final.usage["seconds"])
+    outcome = "completed"
+    if terminal == "invalid_output":
+        assert final.candidate_ref is None and final.reason == "invalid_output"
+        for unwanted in ("review_ready", "completed"):
+            with pytest.raises(lr.LearningRunError, match="fit_outcome_mismatch"):
+                worker.finish(scheduler, claim, unwanted, consumed_units=final.usage["seconds"])
+        outcome = "failed"
+    worker.finish(scheduler, claim, outcome, consumed_units=final.usage["seconds"])
     current = service.status(slack, claim.run_ref)
-    assert current["state"] == "completed"
+    assert current["state"] == outcome
     assert current["usage"] == {
         "fit_reservations": 1,
         "reserved_units": request.bound.maximum_seconds,

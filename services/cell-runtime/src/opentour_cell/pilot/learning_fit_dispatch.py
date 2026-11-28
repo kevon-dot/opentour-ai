@@ -95,4 +95,10 @@ class LearningFitLedger:
             or status.usage["seconds"] != consumed_units
         ):
             raise lr.LedgerHold("fit_intent_requires_reconciliation")
-        return lr.FitReservation(reservation_ref, status.charged["seconds"], consumed_units)
+        if status.candidate_ref and status.learning_run_state == "review_ready":
+            result = "candidate"
+        elif status.learning_run_state == "canceled":
+            result = "canceled"
+        else:
+            result = "unsuccessful"
+        return lr.FitReservation(reservation_ref, status.charged["seconds"], consumed_units, result)
