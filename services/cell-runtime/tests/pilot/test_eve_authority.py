@@ -151,6 +151,17 @@ def test_signed_native_claim_and_installed_worker_renewal(approved, monkeypatch)
     prior = exchange.get(grant.reservation_ref)["permit_until"]
     ea.renew_host_permit(site.directory, site.tenant)
     assert exchange.get(grant.reservation_ref)["permit_until"] == prior
+    (site.directory / ea.SELECTION_FILE).unlink()
+    for scheduled in (True, False):
+        if not scheduled:
+            (site.directory / lr.SCHEDULE_SELECTION).unlink()
+        assert (
+            cycle_worker.run(
+                site.directory, site.tenant, config, 300, once=True, stopped=threading.Event()
+            )
+            == 0
+        )
+        assert exchange.get(grant.reservation_ref)["permit_until"] == prior
 
 
 @pytest.mark.parametrize(
