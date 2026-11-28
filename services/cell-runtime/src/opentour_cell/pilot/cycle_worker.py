@@ -104,7 +104,10 @@ def run(
     next_scan = 0.0
     try:
         while not stopped.is_set():
-            if keeper is None and os.path.lexists(directory / SELECTION_FILE):
+            if keeper is None and (
+                os.path.lexists(directory / SELECTION_FILE)
+                or os.path.lexists(directory / "eve-exchange" / "controls.sqlite3")
+            ):
                 renew_host_permit(directory, organization)
                 if not once:
                     keeper = threading.Thread(target=permits, name="eve-permit", daemon=True)

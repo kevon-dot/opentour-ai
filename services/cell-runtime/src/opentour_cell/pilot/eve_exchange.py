@@ -188,13 +188,13 @@ class Exchange:
             ).fetchone()
             return self._row(db, row[0]) if row else None
 
-    def unreported(self) -> dict[str, Any] | None:
+    def unreported(self) -> list[dict[str, Any]]:
         with self.transaction() as db:
-            row = db.execute(
+            refs = db.execute(
                 "SELECT reservation_ref FROM eve_jobs WHERE reported=0 AND state IN "
-                "('completed','stopped','expired','failed') ORDER BY rowid LIMIT 1"
-            ).fetchone()
-            return self._row(db, row[0]) if row else None
+                "('completed','stopped','expired','failed') ORDER BY rowid"
+            ).fetchall()
+            return [row for ref in refs if (row := self._row(db, ref[0])) is not None]
 
     def mark_reported(self, row: dict[str, Any]) -> None:
         with self.transaction() as db:

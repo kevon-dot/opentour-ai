@@ -312,32 +312,55 @@ def scope_from(spec: dict[str, Any]) -> LearningScope:
 
 
 def renew_host_permit(directory: Path, organization: str) -> None:
-    """Only the installed worker can renew an admitted fit after rereading its live authorities."""
-    if not os.path.lexists(directory / SELECTION_FILE):
+    """Reconcile admitted terminal receipts and renew only a currently authorized live fit."""
+    selected = os.path.lexists(directory / SELECTION_FILE)
+    if not selected and not os.path.lexists(directory / "eve-exchange" / "controls.sqlite3"):
         return
     from opentour_cell.pilot.eve_learning_service import EveLearningService
     from opentour_cell.pilot.signed_records import PilotRecordRefused
 
     try:
-        # The untrusted candidate only selects a binding to verify; it cannot start a job.
-        ex = Exchange(directory / "eve-exchange")
-        for job, finished in ((ex.active(), False), (ex.unreported(), True)):
-            if job is None:
+        exchange = Exchange(directory / "eve-exchange")
+        finished = exchange.unreported()
+    except (OSError, ValueError, sqlite3.Error):
+        return
+    for row in finished:
+        # Closure can only retain an existing charge and hold its exact previously claimed job.
+        # It must remain possible after withdrawal, expiry or deletion of the grant selection.
+        try:
+            spec = row["spec"]
+            if spec["tenant"] != organization or row["spec_digest"] != digest(spec):
                 continue
-            spec = job["spec"]
+            grant = Grant(
+                spec["plan_ref"],
+                spec["reservation_ref"],
+                spec["benchmark_ref"],
+                spec["reviewer"],
+                spec["max_cents"],
+                spec,
+            )
             authority = EveAuthority(directory, organization, spec["workspace"], spec["channel"])
-            scope = scope_from(spec)
-            with authority.current(scope, write=not finished) as grant:
-                if digest(grant.spec) != job["spec_digest"]:
-                    continue
-                EveLearningService(authority, ex, directory, spec["channel"]).verify_start(
-                    scope, grant.plan_ref, job["approval_key"], digest(grant.spec)
-                )
-                authority.acknowledge(grant, job, finished=finished)
-                if finished:
-                    ex.mark_reported(job)
-                else:
-                    ex.renew(grant.reservation_ref, digest(grant.spec))
-    except (OSError, ValueError, sqlite3.Error, PilotRecordRefused):
-        # The offline supervisor stops when the last independently refreshed permit expires.
+            authority.acknowledge(grant, row, finished=True)
+            exchange.mark_reported(row)
+        except (KeyError, TypeError, OSError, ValueError, sqlite3.Error):
+            continue
+    if not selected:
+        return
+    try:
+        job = exchange.active()
+        if job is None:
+            return
+        spec = job["spec"]
+        authority = EveAuthority(directory, organization, spec["workspace"], spec["channel"])
+        scope = scope_from(spec)
+        with authority.current(scope, write=True) as grant:
+            if digest(grant.spec) != job["spec_digest"]:
+                return
+            EveLearningService(authority, exchange, directory, spec["channel"]).verify_start(
+                scope, grant.plan_ref, job["approval_key"], digest(grant.spec)
+            )
+            authority.acknowledge(grant, job, finished=False)
+            exchange.renew(grant.reservation_ref, digest(grant.spec))
+    except (KeyError, TypeError, OSError, ValueError, sqlite3.Error, PilotRecordRefused):
+        # The last permit expires without reauthorizing an uncertain fit.
         return

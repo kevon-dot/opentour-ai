@@ -236,7 +236,8 @@ def test_expired_window_allows_enrolled_read_and_never_allows_a_fit(approved, mo
             pytest.fail("expired window admitted an effect")
 
 
-def test_running_and_terminal_observations_keep_actual_provider_cost_open(approved):
+@pytest.mark.parametrize("withdrawn", [False, True])
+def test_running_and_terminal_observations_keep_actual_provider_cost_open(approved, withdrawn):
     site, _, ledger, authority, payload = approved
     spec = payload["reservation"]
     scope = ea.scope_from(spec)
@@ -254,12 +255,15 @@ def test_running_and_terminal_observations_keep_actual_provider_cost_open(approv
     ex.observe(job, "running", trainer_id="generated-trainer", step=2, seconds=3)
     ea.renew_host_permit(site.directory, site.tenant)
     assert ledger.get(grant.reservation_ref).execution.stage == fd.Stage.RUNNING
+    if withdrawn:
+        site.registry.withdraw(spec["mandate_id"], actor=OWNER)
+        (site.directory / ea.SELECTION_FILE).unlink()
     ex.observe(ex.get(grant.reservation_ref), "stopped", step=3, seconds=5)
     ea.renew_host_permit(site.directory, site.tenant)
     terminal = ledger.get(grant.reservation_ref).execution
     assert terminal.stage == fd.Stage.HELD and terminal.hold_reason == "usage_unverifiable"
     assert terminal.charged_minor_units == 25 and terminal.settlement is None
-    assert ex.unreported() is None
+    assert ex.unreported() == []
 
 
 def test_expiry_does_not_free_the_gpu_while_the_real_worker_lease_is_held(tmp_path, monkeypatch):
