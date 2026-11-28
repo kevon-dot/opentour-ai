@@ -17,11 +17,13 @@ nothing that showed one had existed. Two kinds of record are therefore kept outs
 snapshot, in the anti-rollback location (`ANTI_ROLLBACK_DIRECTORY`, the worker-host state
 directory `/var/lib/opentour-antirollback`; `OPENTOUR_ANTI_ROLLBACK_DIRECTORY` overrides it):
 
-* the ledger marker, written atomically when the directory's first grant is ingested
-  (`record_engagement` on a ledger with no history) and before that ingest commits. It binds
-  the store identity: the directory's real path, its device and inode, and the random store
-  id kept in the ledger database. A marker with no ledger, or one that does not match the
-  ledger beside it, is a hold;
+* the ledger marker, written atomically at sequence 1 when the directory's first grant is
+  ingested (`record_engagement` on a ledger with no history) and before that ingest commits,
+  then advanced to sequence 2 once the ingest is durable. It binds the store identity. The
+  real binding is the random store id kept in the ledger database; the directory's real path
+  is the key, and its device and inode are also checked, but a filesystem may reuse an inode
+  for a recreated directory, so they are not relied on alone. A marker with no ledger, or one
+  that does not match the ledger beside it, is a hold;
 * per organization, the highest revocation epoch and the engagement epoch it terminated, as a
   forward-only record. It is written under the record lock after the fence journal entry and
   before the database fence commits; a slot is released only once it is durable. A volume
@@ -30,7 +32,18 @@ directory `/var/lib/opentour-antirollback`; `OPENTOUR_ANTI_ROLLBACK_DIRECTORY` o
 Both use the `opentour.pilot.trust-state.v1` record format of OPE-566's `TrustStateStore`
 (one canonical JSON file per key under `records/`, named by the key's SHA-256), with their
 own namespaces, so no format change is needed. They are written here with the standard
-library only, which keeps the packaged worker's import closure unchanged.
+library only, which keeps the packaged worker's import closure unchanged. Writers take the
+lock file `pilot-trust-state.lock` in the location. They serialize with `TrustStateStore`
+only when both use the same directory: at the default location they do, since both modules
+default to `/var/lib/opentour-antirollback`. `TrustStateStore` has no override, so under
+`OPENTOUR_ANTI_ROLLBACK_DIRECTORY` these records are kept apart from its records and lock.
+
+The location must be on a different filesystem device from the ledger directory
+(`anti_rollback_same_volume` otherwise), because one snapshot or backup of a volume carries
+everything on it, and restoring it would roll these records back with the ledger. On the
+worker host the volume is its own mount, so the default location qualifies. A run elsewhere
+must point the override at a separate volume that no snapshot or backup of the ledger's
+volume includes. If there is none, the run fails closed.
 
 What these records protect against, and what they do not. They defend against a snapshot
 restore or an accidental rollback of `/var/lib/opentour-worker`: they are worker-attested at
@@ -42,16 +55,19 @@ writer or an external anchor (OPE-566/OPE-583), which this module does not provi
 
 Fail-closed rules:
 * an unusable location (unset, missing, a link, not a private directory owned by this uid,
-  or inside the ledger directory) holds every ledger operation and refuses the first-grant
-  ingest before any state changes;
+  inside the ledger directory, or on the ledger's filesystem device) holds every ledger
+  operation and refuses the first-grant ingest before any state changes;
 * a marker that cannot be parsed exactly holds (`anti_rollback_marker_corrupt`);
 * a marker with the ledger database missing holds and creates nothing;
 * a ledger with history but no marker holds (`anti_rollback_marker_missing`). The marker is
   never re-derived from the volume it protects: it is written before the first ingest
   commits, so no crash produces this state; it means the anti-rollback state was lost or
   reset, and re-baselining it needs a supervised decision this module does not make;
-* a marker with an empty ledger of the same store is the crash window between the marker
-  write and the first commit, and the ingest may proceed.
+* a sequence-1 marker with an empty ledger of the same store is the crash window between
+  the marker write and the first commit, and the ingest may proceed. A sequence-2 marker
+  with an empty ledger is a restore from before the first grant and holds
+  (`anti_rollback_ledger_rewound`). A sequence-1 marker beside a ledger with history is
+  promoted to 2 by the next ledger operation, or that operation holds.
 Times recorded are the worker's own clock, never a caller's.
 """
 
@@ -104,6 +120,10 @@ _REVOCATION_FIELDS = frozenset(
     | {"protects_against"}
 )
 _MARKER_CORRUPT = "anti_rollback_marker_corrupt"
+# Marker sequence: 1 is written before the first ingest commits (the crash window); 2 once
+# that ingest is durable. An empty ledger beside a sequence-2 marker is a rewound volume.
+_MARKER_WRITTEN = 1
+_MARKER_COMMITTED = 2
 _RECORD_CORRUPT = "anti_rollback_record_corrupt"
 BINDING_KINDS = ("queue", "session", "grant", "callback", "receipt", "storage")
 EFFECT_KINDS = ("decision", "read", "fit", "export")
@@ -294,6 +314,11 @@ def _write_record(records: Path, name: str, body: bytes) -> None:
         raise EngagementHold("anti_rollback_unavailable") from None
 
 
+def _device_of(path: str) -> int:
+    """The filesystem device holding `path`. Private; no flag or caller can replace it."""
+    return os.stat(path).st_dev
+
+
 class _AntiRollback:
     """Records kept outside the worker snapshot. Worker-attested at most; not tamper-proof."""
 
@@ -306,6 +331,14 @@ class _AntiRollback:
         if os.path.commonpath([real, ledger]) in {real, ledger}:
             # Inside the ledger directory (or containing it), a snapshot would carry it along.
             raise EngagementHold("anti_rollback_inside_snapshot")
+        try:
+            shared = _device_of(real) == _device_of(ledger)
+        except OSError:
+            raise EngagementHold("anti_rollback_unavailable") from None
+        if shared:
+            # On the ledger's own filesystem, one volume snapshot or backup can carry both,
+            # and restoring it would roll the records back with the ledger.
+            raise EngagementHold("anti_rollback_same_volume")
         self.location = location
 
     @contextmanager
@@ -602,11 +635,19 @@ class EngagementLedger:
             if self._history(db):
                 raise EngagementHold("anti_rollback_marker_missing")
             return
-        if marker[0] != 1:
+        if marker[0] not in {_MARKER_WRITTEN, _MARKER_COMMITTED}:
             raise EngagementHold(_MARKER_CORRUPT)
         store_id = self._store_id(db)
         if store_id is None or _bound(marker[1]) != (*_identity(self.directory), store_id):
             raise EngagementHold("anti_rollback_store_mismatch")
+        if not self._history(db):
+            if marker[0] == _MARKER_COMMITTED:
+                # The first ingest committed, yet the ledger is empty: a restored snapshot or
+                # backup from before the first grant. Only sequence 1 is the crash window.
+                raise EngagementHold("anti_rollback_ledger_rewound")
+        elif marker[0] == _MARKER_WRITTEN and not self._promote_marker(store, store_id):
+            # History proves the first ingest is durable; its promotion could not be written.
+            raise EngagementHold("anti_rollback_unavailable")
         journaled: dict[str, dict[int, str]] = {}
         for entry in entries:
             journaled.setdefault(entry["org"], {})[entry["revocation_epoch"]] = entry["epoch"]
@@ -637,12 +678,17 @@ class EngagementLedger:
             directory, device, inode = _identity(self.directory)
             if current is not None:
                 # The crash window between a marker write and the first commit: same store.
-                if current[0] != 1 or _bound(current[1]) != (directory, device, inode, store_id):
+                if current[0] != _MARKER_WRITTEN or _bound(current[1]) != (
+                    directory,
+                    device,
+                    inode,
+                    store_id,
+                ):
                     raise EngagementHold("anti_rollback_store_mismatch")
                 return
             store.write(
                 key,
-                1,
+                _MARKER_WRITTEN,
                 {
                     "kind": MARKER_NAMESPACE,
                     "store_id": store_id,
@@ -654,6 +700,24 @@ class EngagementLedger:
                     "protects_against": ANTI_ROLLBACK_SCOPE,
                 },
             )
+
+    def _promote_marker(self, store: _AntiRollback, store_id: str) -> bool:
+        """Advance the marker to sequence 2 once the first ingest is durable in the ledger.
+
+        Same value, higher sequence (forward only). False when it cannot be written: the
+        verifier then holds, and `record_engagement` leaves it to the next ledger operation.
+        """
+        key = marker_key(self.directory)
+        try:
+            with store.locked():
+                current = store.read(key, _MARKER_CORRUPT)
+                if current is None or _bound(current[1]) != (*_identity(self.directory), store_id):
+                    return False
+                if current[0] == _MARKER_WRITTEN:
+                    store.write(key, _MARKER_COMMITTED, current[1])
+                return True
+        except EngagementHold:
+            return False
 
     def _record_revocation(
         self, store: _AntiRollback, store_id: str, org: str, epoch: str, revocation: int
@@ -867,7 +931,8 @@ class EngagementLedger:
                 # Re-binding the same resource must start strictly after what was seen.
                 raise EngagementHold("checkpoint_not_after_prior_rows")
             ordinal = len(prior) + 1
-            if not self._history(db):
+            first = not self._history(db)
+            if first:
                 # The directory's first grant: the marker is durable before this commits.
                 self._mark_first_grant(db)
             db.execute(
@@ -889,11 +954,21 @@ class EngagementLedger:
                     label[:64],
                 ),
             )
-            return self._row(
+            recorded = self._row(
                 db.execute(
                     "SELECT * FROM engagement WHERE org=? AND epoch=?", (org, epoch)
                 ).fetchone()
             )
+            store_id = self._store_id(db)
+        if first and store_id is not None:
+            # Committed: advance the marker to sequence 2. Not a refusal if this write fails,
+            # since the ingest is already durable; the next ledger operation promotes the
+            # marker or holds (`anti_rollback_unavailable`) until it can.
+            try:
+                self._promote_marker(_AntiRollback(self.directory), store_id)
+            except EngagementHold:
+                pass
+        return recorded
 
     def migrate_single_engagement(
         self,

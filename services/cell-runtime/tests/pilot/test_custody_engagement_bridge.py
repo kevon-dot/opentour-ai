@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -581,7 +582,11 @@ def test_older_ledger_backup_without_the_seen_row_holds_the_closeout(tmp_path: P
     crash_withdrawal(directory, "before_fence")  # the closeout opened and saw the row
     assert closeout_ledger_state(directory) == "row_seen"
 
-    EngagementLedger(directory).restore_backup(older)
+    # The ledger refuses to restore a backup older than its first grant (OPE-543 review F2);
+    # a volume restore puts the same bytes back out of band, and custody still holds.
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        EngagementLedger(directory).restore_backup(older)
+    shutil.copyfile(older, directory / "engagement-epochs.sqlite3")
     assert fences(directory) == []
     with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
         Closeout(directory, ORG).reconcile()
@@ -691,7 +696,10 @@ def test_older_backup_restored_before_the_closeout_opens_holds(tmp_path: Path) -
     ledger.backup(older)
     enroll(ledger, ORG, epoch, "lease-a", 10)
     ledger.activate(ORG, epoch)
-    ledger.restore_backup(older)
+    # Refused by the ledger (OPE-543 review F2); the same bytes restored out of band still hold.
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        ledger.restore_backup(older)
+    shutil.copyfile(older, directory / "engagement-epochs.sqlite3")
     with pytest.raises(CustodyError, match="engagement_ledger_unavailable"):
         Closeout(directory, ORG).withdraw(**START)
     assert Closeout(directory, ORG).status()["reconciled"] is False

@@ -350,8 +350,8 @@ def test_revocation_records_cover_an_organization_missing_from_the_volume(
 ) -> None:
     directory = private(tmp_path / "owner")
     ledger = EngagementLedger(directory)
-    empty = snapshot(directory)  # before either organization existed
     enroll(ledger, "epoch-1", "lease-o", org=OTHER_ORG)
+    empty = snapshot(directory)  # before this organization existed
     enroll(ledger, "epoch-1")
     ledger.activate(ORG, "epoch-1")
     ledger.retire(ORG, "epoch-1")
@@ -377,7 +377,7 @@ def test_marker_is_written_at_first_grant_ingest_and_binds_the_store(
     value = stored["value"]
     assert stored["format"] == "opentour.pilot.trust-state.v1"
     assert stored["key"] == epochs.marker_key(directory)
-    assert stored["sequence"] == "1"
+    assert stored["sequence"] == "2"  # 1 while the first ingest is in flight, 2 once committed
     assert value["directory"] == os.path.realpath(directory)
     assert (value["device"], value["inode"]) == (str(status.st_dev), str(status.st_ino))
     with closing(sqlite3.connect(directory / DATABASE)) as db:
@@ -506,11 +506,11 @@ def test_atomic_marker_write_leaves_no_partial_record(
     def interrupted(*_args):
         raise OSError("generated interruption before rename")
 
+    replace = os.replace
     monkeypatch.setattr(epochs.os, "replace", interrupted)
     with pytest.raises(EngagementHold, match="anti_rollback_unavailable"):
         enroll(ledger, "epoch-1")
-    monkeypatch.undo()
-    monkeypatch.setenv(epochs.ANTI_ROLLBACK_ENV, str(anti_rollback_directory))
+    monkeypatch.setattr(epochs.os, "replace", replace)
     assert not marker_file(anti_rollback_directory, directory).exists()
     assert not list(anti_rollback_directory.rglob("*.tmp"))
     assert rows(directory) == []
@@ -562,7 +562,7 @@ def test_crash_after_marker_before_ledger_commit_recovers_on_retry(
         timeout=120,
     )
     assert child.returncode == CRASH, child.stderr
-    assert marker_file(anti_rollback_directory, directory).exists()
+    assert read_record(marker_file(anti_rollback_directory, directory))["sequence"] == "1"
     assert rows(directory) == []
     ledger = EngagementLedger(directory)
     engagement = ledger.record_engagement(
@@ -576,11 +576,20 @@ def test_crash_after_marker_before_ledger_commit_recovers_on_retry(
         budget_limit=100,
     )
     assert engagement.state == "recorded"
+    assert read_record(marker_file(anti_rollback_directory, directory))["sequence"] == "2"
 
 
 @pytest.mark.parametrize(
     "damage",
-    ["garbage", "not_canonical", "wrong_key", "wrong_label", "extra_field", "bad_sequence"],
+    [
+        "garbage",
+        "not_canonical",
+        "wrong_key",
+        "wrong_label",
+        "extra_field",
+        "bad_sequence",
+        "sequence_three",
+    ],
 )
 def test_corrupt_marker_fails_closed(
     tmp_path: Path, anti_rollback_directory: Path, damage: str
@@ -599,8 +608,10 @@ def test_corrupt_marker_fails_closed(
             stored["value"]["assurance"] = "tamper_proof"
         elif damage == "extra_field":
             stored["value"]["note"] = "generated"
-        else:
+        elif damage == "bad_sequence":
             stored["sequence"] = "0"
+        else:
+            stored["sequence"] = "3"
         data = epochs._canonical(stored)
     path.write_bytes(data)
     with pytest.raises(EngagementHold, match="anti_rollback_marker_corrupt"):
@@ -720,3 +731,153 @@ def test_ledger_module_import_closure_stays_inside_the_packaged_worker() -> None
     }
     project = {name for name in imported if name.startswith("opentour")}
     assert project == {"opentour_cell.pilot.text_classifier", "opentour_cell.pilot.training"}
+
+
+# -- review findings on f11c2cb (F1, F2, F3) ----------------------------------------------------
+
+
+def test_location_on_the_same_volume_as_the_ledger_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F1, the reviewer's repro: a sibling directory on the ledger's own filesystem would be
+    # snapshotted and restored together with the ledger, so it protects nothing.
+    directory = private(tmp_path / "vol" / "ledger")
+    sibling = private(tmp_path / "vol" / "ar")
+    assert os.stat(sibling).st_dev == os.stat(directory).st_dev
+    ledger = EngagementLedger(directory)
+    monkeypatch.setenv(epochs.ANTI_ROLLBACK_ENV, str(sibling))
+    database = (directory / DATABASE).read_bytes()
+    with pytest.raises(EngagementHold, match="anti_rollback_same_volume"):
+        enroll(ledger, "epoch-1")
+    assert (directory / DATABASE).read_bytes() == database
+    assert not list(sibling.rglob("*.json"))
+    with pytest.raises(EngagementHold, match="anti_rollback_same_volume"):
+        EngagementLedger(private(tmp_path / "vol" / "fresh"))  # every open holds
+    assert epochs.ledger_marker_present(directory) is True  # custody fails closed too
+
+
+def test_same_volume_check_is_applied_at_every_open_after_ingest(
+    tmp_path: Path, anti_rollback_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory, epoch = engaged(tmp_path)
+    # The same records, moved onto the ledger's own filesystem after the ingest.
+    moved = tmp_path / "ar-on-ledger-volume"
+    shutil.copytree(anti_rollback_directory, moved, symlinks=True)
+    moved.chmod(0o700)
+    assert os.stat(moved).st_dev == os.stat(directory).st_dev
+    monkeypatch.setenv(epochs.ANTI_ROLLBACK_ENV, str(moved))
+    with pytest.raises(EngagementHold, match="anti_rollback_same_volume"):
+        EngagementLedger(directory)
+    with pytest.raises(EngagementHold, match="anti_rollback_same_volume"):
+        EngagementLedger(directory, existing_only=True).live_gate(
+            ORG, epoch, "decisions", "lease-a"
+        )
+    (directory / DATABASE).unlink()
+    with pytest.raises(CustodyError, match=HOLD):
+        Closeout(directory, ORG).withdraw(**START)
+
+
+def test_no_flag_can_relax_the_same_volume_check(
+    tmp_path: Path, anti_rollback_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Path(epochs.__file__).read_text()
+    environ_reads = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute) and node.attr == "environ"
+    ]
+    assert len(environ_reads) == 1  # OPENTOUR_ANTI_ROLLBACK_DIRECTORY, the location itself
+    assert "os.environ.get(ANTI_ROLLBACK_ENV)" in source
+    # The test location really is another filesystem: no seam stands in for production.
+    assert os.stat(anti_rollback_directory).st_dev != os.stat(tmp_path).st_dev
+
+    def unreadable(_path: str) -> int:
+        raise OSError("generated device lookup failure")
+
+    monkeypatch.setattr(epochs, "_device_of", unreadable)
+    with pytest.raises(EngagementHold, match="anti_rollback_unavailable"):
+        EngagementLedger(private(tmp_path / ORG))
+
+
+def test_record_lock_and_layout_match_the_trust_state_store() -> None:
+    from opentour_cell.pilot import signed_records
+
+    # The default location, record directory and writer lock are the TrustStateStore's own,
+    # so on the worker host both writers serialize on one lock file.
+    assert epochs.ANTI_ROLLBACK_DIRECTORY == signed_records.ANTI_ROLLBACK_DIRECTORY
+    assert epochs._RECORDS == signed_records.RECORDS_NAME
+    assert epochs._RECORD_LOCK == signed_records.LOCK_NAME
+    assert epochs.TRUST_STATE_FORMAT == signed_records.TRUST_STATE_FORMAT
+
+
+def test_restored_pre_first_grant_snapshot_is_refused(tmp_path: Path) -> None:
+    # F2, the reviewer's repro: an empty ledger of the same store, restored after a grant,
+    # a budget reservation and an effect, would let the budget be spent twice.
+    directory = private(tmp_path / ORG)
+    ledger = EngagementLedger(directory)
+    empty = snapshot(directory)
+    enroll(ledger, "epoch-1")
+    ledger.activate(ORG, "epoch-1")
+    assert ledger.reserve_budget(ORG, "epoch-1", "spend-1", 60) is True
+    assert ledger.record_effect(ORG, "epoch-1", "decision", "d-1") is True
+    restore(directory, empty)
+    assert rows(directory) == []
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        EngagementLedger(directory)
+    reopened = EngagementLedger(directory, existing_only=True)
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        enroll(reopened, "epoch-1")  # the same grant cannot be re-ingested over it
+    with pytest.raises(EngagementHold, match="anti_rollback_ledger_rewound"):
+        reopened.reserve_budget(ORG, "epoch-1", "spend-1", 60)
+    assert rows(directory) == []
+
+
+def test_first_grant_marker_reaches_sequence_two_after_a_lost_promotion(
+    tmp_path: Path, anti_rollback_directory: Path
+) -> None:
+    directory, _ = engaged(tmp_path)
+    path = marker_file(anti_rollback_directory, directory)
+    stored = read_record(path)
+    stored["sequence"] = "1"  # as if the post-commit promotion had been lost
+    path.write_bytes(epochs._canonical(stored))
+    lock = anti_rollback_directory / "pilot-trust-state.lock"
+    lock.unlink()
+    private(lock)  # the promotion cannot be written now
+    with pytest.raises(EngagementHold, match="anti_rollback_unavailable"):
+        EngagementLedger(directory, existing_only=True).organizations()
+    assert read_record(path)["sequence"] == "1"
+    lock.rmdir()
+    assert EngagementLedger(directory, existing_only=True).organizations() == (ORG,)
+    assert read_record(path)["sequence"] == "2"  # promoted by the next ledger operation
+
+
+def test_location_owned_by_another_uid_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F3: a location (and its records) owned by any other uid is not this worker's.
+    directory = private(tmp_path / ORG)
+    ledger = EngagementLedger(directory)
+    database = (directory / DATABASE).read_bytes()
+    real = os.geteuid()
+    monkeypatch.setattr(epochs.os, "geteuid", lambda: real + 1)
+    with pytest.raises(EngagementHold, match="anti_rollback_unavailable"):
+        enroll(ledger, "epoch-1")
+    with pytest.raises(EngagementHold, match="anti_rollback_unavailable"):
+        EngagementLedger(private(tmp_path / "other"))
+    monkeypatch.setattr(epochs.os, "geteuid", lambda: real)
+    assert (directory / DATABASE).read_bytes() == database
+    assert enroll(ledger, "epoch-1").state == "recorded"
+
+
+def test_location_inside_the_ledger_directory_is_refused_even_on_its_own_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A separate filesystem mounted inside the ledger directory still travels with it.
+    directory = private(tmp_path / ORG)
+    ledger = EngagementLedger(directory)
+    inside = private(directory / "antirollback-mount")
+    monkeypatch.setattr(epochs, "_device_of", lambda path: -1 if path == str(inside) else 1)
+    monkeypatch.setenv(epochs.ANTI_ROLLBACK_ENV, str(inside))
+    with pytest.raises(EngagementHold, match="anti_rollback_inside_snapshot"):
+        enroll(ledger, "epoch-1")
+    assert rows(directory) == []
