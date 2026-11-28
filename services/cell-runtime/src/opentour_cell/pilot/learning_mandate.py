@@ -553,6 +553,70 @@ class LearningMandates:
             self._active(row, spec, actor)
             return self._source_receipt(run, row, spec)
 
+    def _lineage_root(self, db: sqlite3.Connection, mandate_id: str) -> str:
+        """The first mandate of a renewal chain. Renewal never reuses an identifier."""
+        seen = {mandate_id}
+        current = mandate_id
+        while True:
+            prior = db.execute(
+                "SELECT prior FROM renewals WHERE scope=? AND successor=?", (self.scope, current)
+            ).fetchone()
+            if prior is None:
+                return current
+            current = str(prior[0])
+            require(current not in seen and len(seen) < 1024, "mandate_lineage_unverified")
+            seen.add(current)
+
+    def dispatch_authority(self, mandate_id: str, run_id: str, *, actor: str) -> Json:
+        """Current standing authority for one fit dispatch (OPE-418). Writes nothing.
+
+        Read under the engagement guard, like ``check_run``. Refuses a withdrawn, expired or
+        manual mandate, another delegate, a mandate without the ``train`` use and a run admitted
+        under a different mandate. ``budget_scope`` names the renewal lineage, so every renewal
+        shares one budget; the ``cumulative_*`` figures are this lineage's direct ``reserve``
+        usage, which a dispatcher with its own ledger must add to its ledger's usage.
+        """
+        with self._authorized_db(write=False) as db:
+            row, spec = self._mandate(db, mandate_id)
+            self._active(row, spec, actor)
+            require("train" in spec["uses"], "model_outside_prospective_scope")
+            run = self._run_row(db, run_id)
+            require(run["mandate"] == mandate_id, "delegated_run_unavailable")
+            root = self._lineage_root(db, mandate_id)
+            open_fits = db.execute(
+                """
+                WITH RECURSIVE lineage(id) AS (
+                  VALUES (?)
+                  UNION SELECT r.prior FROM renewals r JOIN lineage l ON r.successor=l.id
+                        WHERE r.scope=?
+                  UNION SELECT r.successor FROM renewals r JOIN lineage l ON r.prior=l.id
+                        WHERE r.scope=?)
+                SELECT count(*) FROM reservations
+                WHERE scope=? AND state!='settled' AND mandate IN (SELECT id FROM lineage)
+                """,
+                (mandate_id, self.scope, self.scope, self.scope),
+            ).fetchone()[0]
+            return {
+                "schema_version": AUTHORITY,
+                "authority_kind": KIND,
+                "organization": self.organization,
+                "engagement": self.engagement,
+                "mandate_id": row["id"],
+                "mandate_revision": row["revision"],
+                "budget_scope": "budget-" + digest([self.scope, root])[:40],
+                "owner_id": spec["owner_id"],
+                "delegate": spec["delegate"],
+                "payer": spec["payer"],
+                "trainer": spec["trainer"],
+                "profile": spec["profile"],
+                "uses": list(spec["uses"]),
+                "expires_at": spec["expires_at"],
+                "caps": {key: spec[key] for key in sorted(CAPS)},
+                "run": {"run_id": run["id"], "source_revision": run["source"], "rows": run["rows"]},
+                "open_reserved_fits": open_fits,
+                **self._usage(db, mandate_id),
+            }
+
     def confirm_class(
         self,
         run_id: str,
