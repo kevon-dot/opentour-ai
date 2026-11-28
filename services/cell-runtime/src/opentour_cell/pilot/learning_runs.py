@@ -750,7 +750,10 @@ class LearningRuns:
         parse_submit(asdict(request))
         with self.authority.guard(principal, write=True) as scope:
             self._permit(principal, scope, "start")
-            return self._submit(principal, scope, request, self._mandate(scope, principal))
+            mandate = self._mandate(scope, principal)
+            if mandate is None:
+                return self._hold("standing_mandate_unavailable")
+            return self._submit(principal, scope, request, mandate)
 
     def _known(
         self,
@@ -874,6 +877,7 @@ class LearningRuns:
         with self.authority.guard(principal, write=False) as scope:
             self._permit(principal, scope, "read")
             mandate = self._mandate(scope, principal)
+            _need(mandate is not None)
             with self._db(write=False) as db:
                 return self._view(
                     db, self._run(db, principal, scope, run_ref), mandate, principal, scope
@@ -886,6 +890,7 @@ class LearningRuns:
         with self.authority.guard(principal, write=True) as scope:
             self._permit(principal, scope, "cancel")
             mandate = self._mandate(scope, principal)
+            _need(mandate is not None)
             with self._db() as db:
                 key = db.execute(
                     "SELECT target FROM lr_keys WHERE tenant=? AND client=? AND kind='cancel' "

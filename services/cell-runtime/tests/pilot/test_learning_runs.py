@@ -1133,3 +1133,34 @@ def test_read_only_preview_resolves_exact_plan_and_latest_authorized_run(site):
     _, restarted = site.open(path, ledger=None)
     assert restarted.preview(owner)["current_run"] == run["run_ref"]
     assert site.counts()["lr_runs"] == 1
+
+
+def test_missing_mandate_after_admission_denies_disclosure_cancellation_and_replay(site):
+    owner, service = site.open(site.authorize("private-owner"))
+    ref = site.publish()
+    run = submit(service, owner, ref, "first")["run_ref"]
+
+    def counts():
+        with sqlite3.connect(site.directory / lr.DATABASE) as db:
+            return tuple(
+                db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "lr_runs",
+                    "lr_keys",
+                    "lr_triggers",
+                    "lr_events",
+                    "lr_cancellations",
+                )
+            )
+
+    before = counts()
+    site.registry.path.rename(site.directory / "unavailable-mandate.sqlite3")
+    for operation in (
+        lambda: service.status(owner, run),
+        lambda: service.cancel(owner, run, "cancel"),
+    ):
+        with pytest.raises(lr.LearningRunError, match="learning_run_unavailable"):
+            operation()
+    held = submit(service, owner, ref, "retry")
+    assert held["reason_code"] == "standing_mandate_unavailable" and "run_ref" not in held
+    assert counts() == before
