@@ -207,6 +207,34 @@ def test_current_browser_identity_and_form_controls_deny_without_catalog_disclos
     assert page.setup.service.inspect(actor=page.setup.owner)["current"] is None
 
 
+def test_current_private_page_renews_and_can_withdraw_when_catalog_is_held(page):
+    def apply(operation, base):
+        status, _, current = page.request()
+        assert status == 200
+        form = page.form(current, operation=operation, base=base)
+        status, _, preview = page.request(form=form)
+        assert status == 200
+        body = page.submission(form, preview, page.kit.customer, page.kit.operator)
+        status, _, receipt = page.request(form=body)
+        assert status == 200 and "Saved settings" in receipt
+        return page.setup.service.inspect(actor=page.setup.owner)["current"]
+
+    initial = apply("save", "initial")
+    page.setup.policy["mandate"].update(mandate_id="generated-renewed-settings", max_runs=1)
+    renewed = apply("renew", initial["revision"])
+    assert renewed["prior_revision"] == initial["revision"] and renewed["state"] == "active"
+    assert renewed["policy"]["mandate"]["max_runs"] == 1
+
+    save(page.binding, {**page.config, "connection_file": None, "connection_revision": None})
+    before = page.setup.protocol()
+    assert 'name="source_pair" required' not in page.request()[2]
+    paused = apply("pause", renewed["revision"])
+    assert paused["prior_revision"] == renewed["revision"] and paused["state"] == "pause"
+    revoked = apply("revoke", paused["revision"])
+    assert revoked["prior_revision"] == paused["revision"] and revoked["state"] == "revoke"
+    assert page.setup.protocol() == before
+
+
 def test_gateway_binding_change_before_commit_rolls_back_settings(page, monkeypatch):
     form = page.form(page.request()[2])
     _, _, preview = page.request(form=form)
