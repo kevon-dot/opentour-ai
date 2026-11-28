@@ -67,19 +67,36 @@ fields the caller supplied, not a verification of any run.
 What a record above `FIXTURE` does enforce, at construction (`EVIDENCE_TIER_UNSUPPORTED` otherwise):
 
 * `fixture_kind` is `INSTALLED_MODEL`, and no `profile_pin_missing:*` gate is listed.
-* The family id is not a generated fixture. The check folds NFKC, invisible format characters, case and surrounding
-  whitespace, and treats `generated` followed by any separator (`-`, `_`, a space) as generated, so `Generated-x`,
-  ` generated-x` and `generated_x` are refused. `generatedx` is a different id and is not collapsed.
-* `revision` is a 40-hex string.
+* The family id is an exact `str` (a subclass is refused) and not a fixture name (`is_fixture_family_id`, the same rule
+  as the OPE-509 trainer downgrade). The id is NFKC-normalised and casefolded. An id with invisible, control or non-ASCII
+  characters is a fixture. So is an id that CONTAINS a `generated`, `simulated`, `reference`, `fixture` or `sentinel`
+  token, or names a `.invalid` host, so `Generated-x`, `generatedx`, `regenerated-x` and `acme-reference-linear` are all
+  refused. The rule can only lower a tier: a real customer family whose id contains a token must be renamed.
+* `revision` is an exact 40-hex `str`.
 * `results` holds exactly one boolean outcome for every check the record's role requires, with no duplicates and no
   unknown names. An empty or partial result set is refused and can never read as qualified; `passed` and `qualified`
   re-check coverage.
-* The witnessed tiers carry a `witness_ref`: one token of letters, digits and `._:/#@-`, at most 256 characters, starting
-  with a letter or digit.
+* A witnessed-tier claim carries a `witness_ref`: one exact `str` token of letters, digits and `._:/#@-`, at most 256
+  characters, starting with a letter or digit. A missing or malformed one gives `EVIDENCE_TIER_UNSUPPORTED`.
+* Both witnessed tiers are unreachable, so a record is `SOFTWARE_QUALIFIED` at most. These checks run after every
+  consistency check above, so an inconsistent claim still gets `EVIDENCE_TIER_UNSUPPORTED`.
+  * `CUSTOMER_WITNESSED`: under the owner ruling recorded on OPE-566 it needs an `opentour.pilot.customer-witness.v1`
+    record that only the OPE-566 `PilotVerifier` may check, and that verifier has not landed. An otherwise consistent
+    claim is refused with `CUSTOMER_WITNESS_UNSTRUCTURED` whatever `witness_ref` says.
+  * `PROVIDER_WITNESSED`: under the owner-delegate decision recorded on OPE-507 (following the #218 fail-closed
+    precedent), a caller-supplied string never stands in for provider attestation, and no provider-attestation
+    verifier exists. An otherwise consistent claim is refused with `PROVIDER_WITNESS_UNSTRUCTURED` whatever
+    `witness_ref` says.
+* `qualified` is true only for a record that passed at `SOFTWARE_QUALIFIED`. It re-checks the tier, so a record that
+  skipped construction (built with `object.__new__`, altered with `object.__setattr__`, or unpickled) never reports a
+  witnessed tier as qualified.
 
 What it does not establish:
 
 * `witness_ref` is an unverified opaque string. Its shape is checked; nobody confirms that a witness exists or what it saw.
+  However well formed, a `witness_ref` cannot lift a record above `SOFTWARE_QUALIFIED`.
+* What a model-family customer or provider witness would bind (its subject) is not decided. Both tiers stay unreachable
+  until their verifiers and subjects exist.
 * Check outcomes, the revision and the digest are asserted by the caller. A record proves internal consistency, not that
   a run happened.
 * Frozen dataclasses are not tamper-proof. `object.__setattr__(record, "tier", ...)` changes a frozen record, and the same
@@ -130,7 +147,9 @@ Besides the connector's own refusal codes, these are raised by the shared value 
 | --- | --- | --- |
 | `INVALID_USAGE` | `Usage` (`ValueError`) | Unknown `source`, empty or non-string `job_ref` or `currency`, a negative or non-`int` count, or a non-`bool` `irreversible`. |
 | `INVALID_EVIDENCE_TIER` | `QualificationRecord` (`FamilyError`) | `tier` is not an `EvidenceTier` member (a plain string is refused). |
-| `EVIDENCE_TIER_UNSUPPORTED` | `QualificationRecord` (`FamilyError`) | The record claims a tier above `FIXTURE` that its own fields cannot support: wrong fixture kind, generated family, non-40-hex revision, missing or partial check coverage, a missing-pin gate, or a missing or malformed `witness_ref`. |
+| `EVIDENCE_TIER_UNSUPPORTED` | `QualificationRecord` (`FamilyError`) | The record claims a tier above `FIXTURE` that its own fields cannot support: wrong fixture kind, a fixture-named or non-`str` family id, a non-40-hex or non-`str` revision, missing or partial check coverage, a missing-pin gate, or a missing or malformed `witness_ref`. |
+| `CUSTOMER_WITNESS_UNSTRUCTURED` | `QualificationRecord` (`FamilyError`) | An otherwise consistent record claims `CUSTOMER_WITNESSED` with a `witness_ref` string. A string is never an `opentour.pilot.customer-witness.v1` record, and only the OPE-566 `PilotVerifier` (not landed) may accept one. Mirrors `customer_witness_unstructured` in `custom_trainer_connector`. |
+| `PROVIDER_WITNESS_UNSTRUCTURED` | `QualificationRecord` (`FamilyError`) | An otherwise consistent record claims `PROVIDER_WITNESSED`. A caller-supplied `witness_ref` string never stands in for provider attestation, and no provider-attestation verifier exists (owner-delegate decision recorded on OPE-507). |
 
 ## Open items (recorded, not fixed here)
 

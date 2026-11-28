@@ -41,9 +41,11 @@ python3.12 -m venv pilot-venv
 pilot-venv/bin/python -m pip install --only-binary=:all: --require-hashes -r integrations/slack/requirements.txt
 ```
 
-On a machine with a preapproved wheelhouse, add `--no-index --find-links /approved/wheels` to the pip command. The package needs the pinned Slack SDK for the live worker. Offline enrollment and scoring use the standard library. In a source checkout, the installation files are in `services/cell-runtime/integrations/slack/`. The ZIP retains `integrations/slack/`. The following commands use the ZIP entry point.
+On a machine with a preapproved wheelhouse, add `--no-index --find-links /approved/wheels` to the pip command. The venv supplies the pinned Slack SDK and the authority journal's ES256 verification dependencies. Offline enrollment and scoring use the standard library. In a source checkout, the installation files are in `services/cell-runtime/integrations/slack/`. The ZIP retains `integrations/slack/`. The following commands use the ZIP entry point.
 
 Edit the copied configuration privately. Use the actual `organization`, `directory`, Slack `team`, `app`, `channel`, `reviewer` and `recipient`. In `users`, key each actor by their Slack member ID. Grant only their named dataset IDs and a future owner-approved Unix `expires_at`. The template's past or zero expiry keeps access closed.
+
+To enable the personal workflow queue, set `workflow_index_publication_file` to the basename of the private owner-approved, custodian-published workflow index in the worker directory. The launch reads its issuer registry from `pilot-issuer-registry.json` in that directory. The approved kit root and enrolled customer anchor must verify the publication. A missing, expired or revoked publication withholds the queue. Without a configured publication the existing Home remains available.
 
 | Configuration | Effect |
 | --- | --- |

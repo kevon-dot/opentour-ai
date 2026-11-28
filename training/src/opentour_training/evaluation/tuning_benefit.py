@@ -780,6 +780,65 @@ def plan_arms(
     return {"fits": [], "comparison": "unrun", "reason": "no_fit_authorized"}
 
 
+LEDGER_KINDS: frozenset[str] = frozenset({"fit", "generation"})
+_KEY_SEPARATOR = "|"
+_LEDGER_FIELDS = ("spend_cap", "fits_authorized", "reserved", "settled")
+# Control, format (zero-width), surrogate and line/paragraph-separator code points make two keys
+# that look identical charge twice, so no key part may carry one.
+_KEY_PART_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def _ledger_part(value: object, code: str) -> str:
+    """One digest or arm part: an exact ``str`` (never a subclass), 1-256 code points, NFC,
+    no separator, no leading/trailing whitespace, no control/format/separator code point.
+
+    The exact-type check runs first, so no override of ``__contains__``, ``__eq__`` or
+    ``__format__`` is ever consulted. NFC is required rather than applied, so a decomposed
+    spelling is refused instead of silently re-keyed. Not covered: compatibility forms (NFKC,
+    e.g. fullwidth letters) and cross-script homoglyphs still key as distinct parts.
+    """
+    part = _ident(value, code)
+    _need(
+        _KEY_SEPARATOR not in part
+        and part == part.strip()
+        and unicodedata.is_normalized("NFC", part)
+        and not any(unicodedata.category(ch) in _KEY_PART_REFUSED_CATEGORIES for ch in part),
+        code,
+    )
+    return part
+
+
+def _ledger_kind(value: object, code: str) -> str:
+    """An exact ``str`` in ``LEDGER_KINDS``; type first, so a subclass or a stateful
+    ``__eq__``/``__hash__`` never decides membership or the fit count."""
+    _need(type(value) is str and value in LEDGER_KINDS, code)
+    assert isinstance(value, str)
+    return value
+
+
+def _ledger_key(
+    protocol_digest: object,
+    arm_id: object,
+    kind: object,
+    *,
+    part_code: str = "reservation_key_invalid",
+    kind_code: str = "reservation_kind_unknown",
+) -> tuple[str, str]:
+    """``(digest|arm|kind, kind)`` built only from checked, exact-``str`` parts.
+
+    Otherwise ``("d|a", "b")`` and ``("d", "a|b")`` would share a key and read as "replayed",
+    and ``from_json`` could not tell a forged key from an honest one. Raises before any state
+    changes; every public entry that takes a kind goes through here first.
+    """
+    checked_kind = _ledger_kind(kind, kind_code)
+    parts = (
+        _ledger_part(protocol_digest, part_code),
+        _ledger_part(arm_id, part_code),
+        checked_kind,
+    )
+    return _KEY_SEPARATOR.join(parts), checked_kind
+
+
 class SpendLedger:
     """Reserve each distinct cost once; replay of the same key never double charges."""
 
@@ -790,9 +849,8 @@ class SpendLedger:
         self._settled: dict[str, int] = {}
 
     def reserve(self, protocol_digest: str, arm_id: str, kind: str, amount: int) -> str:
-        _need(kind in {"fit", "generation"}, "reservation_kind_unknown")
+        key, kind = _ledger_key(protocol_digest, arm_id, kind)
         _count(amount, "reservation_amount_invalid")
-        key = f"{protocol_digest}|{arm_id}|{kind}"
         if key in self._reserved:
             _need(self._reserved[key][1] == amount, "reservation_conflict", key)
             return "replayed"
@@ -806,7 +864,7 @@ class SpendLedger:
         return "reserved"
 
     def settle(self, protocol_digest: str, arm_id: str, kind: str, actual: int) -> str:
-        key = f"{protocol_digest}|{arm_id}|{kind}"
+        key, _ = _ledger_key(protocol_digest, arm_id, kind)
         _count(actual, "settlement_amount_invalid")
         _need(key in self._reserved, "settle_without_reservation")
         _need(actual <= self._reserved[key][1], "actual_exceeds_reservation")
@@ -830,18 +888,23 @@ class SpendLedger:
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> SpendLedger:
+        _need(all(f in raw for f in _LEDGER_FIELDS), "ledger_forged_reservation", "field missing")
         ledger = cls(spend_cap=raw["spend_cap"], fits_authorized=raw["fits_authorized"])
         reserved: dict[str, tuple[str, int]] = {}
         for k, v in raw["reserved"].items():
-            _need(isinstance(v, (list, tuple)) and len(v) == 2, "ledger_forged_reservation", k)
-            _need(v[0] in {"fit", "generation"}, "ledger_forged_reservation", k)
-            parts = k.split("|") if isinstance(k, str) else []
-            _need(len(parts) == 3 and parts[2] == v[0], "ledger_forged_reservation", k)
-            _count(v[1], "ledger_forged_reservation")
-            reserved[k] = (v[0], v[1])
+            _need(type(v) in (list, tuple) and len(v) == 2, "ledger_forged_reservation", k)
+            parts = k.split(_KEY_SEPARATOR) if type(k) is str else []
+            _need(len(parts) == 3, "ledger_forged_reservation", k)
+            # Rebuilt by the same checks reserve applies, so reload admits exactly what reserve
+            # can produce; the stored kind must be the exact str the key names.
+            key, kind = _ledger_key(
+                *parts, part_code="ledger_forged_reservation", kind_code="ledger_forged_reservation"
+            )
+            _need(type(v[0]) is str and v[0] == kind, "ledger_forged_reservation", k)
+            reserved[key] = (kind, _count(v[1], "ledger_forged_reservation"))
         settled: dict[str, int] = {}
         for k, amount in raw["settled"].items():
-            _need(k in reserved, "ledger_forged_settlement", k)
+            _need(type(k) is str and k in reserved, "ledger_forged_settlement", k)
             _need(_count(amount, "ledger_forged_settlement") <= reserved[k][1], "ledger_forged", k)
             settled[k] = amount
         _need(

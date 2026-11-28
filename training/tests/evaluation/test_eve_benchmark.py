@@ -4,6 +4,7 @@ never EVE capacity, Pi School results, provider authority or customer evidence."
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import subprocess
 import sys
@@ -14,10 +15,26 @@ from typing import Any
 import pytest
 from opentour_training.evaluation import eve_benchmark as eb
 from opentour_training.evaluation import eve_fixtures as fx
+from opentour_training.evaluation import statistics_kernel as sk
 
 ROOT = Path(__file__).resolve().parents[2]
 ENV = {"PYTHONPATH": str(ROOT / "src")}
-CLI = [sys.executable, "-I", "-m", "opentour_training.evaluation.eve_fixtures", "run-generated"]
+# -P (not -I): -I would ignore PYTHONPATH and import whatever is installed; -P keeps PYTHONPATH
+# and drops only the implicit cwd entry. test_cli_subprocess_imports_this_checkout pins it.
+PY = [sys.executable, "-P"]
+CLI_MODULE = [*PY, "-m", "opentour_training.evaluation.eve_fixtures"]
+CLI = [*CLI_MODULE, "run-generated"]
+
+
+def _registry_root(base: Path) -> Path:
+    root = base / "registry"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    return root
+
+
+def _env(registry: Path) -> dict[str, str]:
+    return {**ENV, eb.REGISTRY_ENV: str(registry)}
 
 
 def _setup(include_repair: bool = True) -> Any:
@@ -430,11 +447,12 @@ def test_disposition_rules() -> None:
 
 
 def test_cli_exit_codes_and_refusal(tmp_path: Path) -> None:
+    env = _env(_registry_root(tmp_path))
     good = subprocess.run(
         [*CLI, "--out", str(tmp_path / "a"), "--disposition", "benchmark_only"],
         capture_output=True,
         text=True,
-        env=ENV,
+        env=env,
         check=False,
     )
     assert good.returncode == 0 and "tier=generated" in good.stdout
@@ -449,7 +467,7 @@ def test_cli_exit_codes_and_refusal(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
-        env=ENV,
+        env=env,
         check=False,
     )
     assert bad.returncode == 2 and "adopt_requires_interval_supported_improvement" in bad.stderr
@@ -698,3 +716,586 @@ def test_exclusion_reason_must_be_a_closed_code_and_ids_are_hashed_in_scorecard(
     excluded = _score().body["heldout"]["excluded"]
     assert len(excluded) == 1 and excluded[0][0].startswith("case:")
     assert excluded[0][1] == "context_not_authorized"
+
+
+# ---- post-merge audit follow-up (2026-11-28): disposition provenance, owner, one per card
+
+
+def test_disposition_refuses_a_scorecard_whose_body_does_not_match_its_digest() -> None:
+    card = _score()
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+    upgraded = {**card.body, "improvement_claim": "improvement_supported_by_interval"}
+    forged = dataclasses.replace(card, body=upgraded)  # stale digest, genuine seal copied
+    for name in ("adopt_test_simple_fix", "benchmark_only"):
+        assert _code(functools.partial(_dispose, forged, None, name)) == (
+            "scorecard_digest_mismatch"
+        )
+
+
+def test_disposition_refuses_a_hand_built_scorecard_even_with_a_recomputed_digest() -> None:
+    card = _score()
+    upgraded = {**card.body, "improvement_claim": "improvement_supported_by_interval"}
+    for forged in (
+        eb.Scorecard(body=upgraded, scorecard_digest=eb.digest(upgraded)),
+        dataclasses.replace(card, body=upgraded, scorecard_digest=eb.digest(upgraded)),
+        eb.Scorecard(body=dict(card.body), scorecard_digest=card.scorecard_digest),  # no seal
+    ):
+        assert eb.digest(dict(forged.body)) == forged.scorecard_digest  # self-consistent
+        assert _code(functools.partial(_dispose, forged, None, "benchmark_only")) == (
+            "scorecard_not_from_scoring"
+        )
+    injected = {**card.body, "named_owner": {"owner_id": "generated-attacker"}}
+    hand = eb.Scorecard(body=injected, scorecard_digest=eb.digest(injected))
+    assert _code(lambda: _dispose(hand, None, "benchmark_only")) == "scorecard_not_from_scoring"
+    assert _dispose(card, None, "benchmark_only")["scorecard_digest"] == card.scorecard_digest
+
+
+def test_disposition_refuses_a_hand_built_development_finding() -> None:
+    r = fx.run_fixture_benchmark()
+    assert r.finding is not None and r.finding.material_recurring_residual is True
+    genuine = _dispose(r.scorecard, r.finding, "consider_tuning")
+    assert genuine["disposition"] == "consider_tuning"
+    raw = r.finding.to_json()
+    hand_built = eb.DevelopmentFinding(
+        raw["manifest_digest"],
+        raw["baseline_serious"],
+        raw["repair_serious"],
+        raw["verified"],
+        raw["fixes"],
+        raw["regressions"],
+        tuple(raw["residual_error_families"]),
+        True,
+    )
+    edited = dataclasses.replace(r.finding, fixes=r.finding.fixes + 7)  # seal copied, body moved
+    for forged in (hand_built, edited):
+        for name in ("consider_tuning", "benchmark_only"):
+            assert _code(functools.partial(_dispose, r.scorecard, forged, name)) == (
+                "finding_not_from_assessment"
+            )
+
+
+def _named_owner_score(owner: str) -> eb.Scorecard:
+    f, _, cfg, _, _, _ = _setup()
+    m = _freeze_with(f, named_owner_id=owner)
+    elig = tuple(c for c in f.heldout_cases if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    iso = eb.verify_isolation(
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    return _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs)
+
+
+def _record(card: eb.Scorecard, owner: str | None) -> dict[str, Any]:
+    return eb.record_disposition(
+        card, None, disposition="benchmark_only", owner_id=owner, recorded_at="2026-01-01"
+    )
+
+
+def test_named_owner_must_be_supplied_and_the_gate_never_reads_satisfied() -> None:
+    card = _named_owner_score("generated-named-owner")
+    assert card.body["named_owner"] == {"owner_id": "generated-named-owner"}
+    # No owner id supplied: refused, never filled in from the bound record.
+    assert _code(functools.partial(_record, card, None)) == "owner_missing"
+    rec = _record(card, "generated-named-owner")
+    assert rec["owner_id"] == "generated-named-owner"
+    assert rec["owner_binding"] == "named_not_authenticated"
+    assert rec["named_owner_gate_satisfied"] is False  # nothing authenticates owners (OPE-566)
+    assert rec["owner_identity_authenticated"] is False
+    assert rec["registration"] == "unregistered_draft"
+    for other in ("generated-other-owner", "Generated-Named-Owner", "generated-named-owner2"):
+        assert _code(functools.partial(_record, card, other)) == "owner_not_the_named_owner"
+    for malformed in ("generated-named-owner ", "generated-named-owner​", " ", ""):
+        assert _code(functools.partial(_record, card, malformed)) == "owner_invalid"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", " ", "​", "a\nb", "a b", "owner​", "ówner", "-owner", "a" * 129, 7, b"x"],
+)
+def test_owner_ids_use_the_repository_identifier_shape(bad: object) -> None:
+    fixtures = fx.build_fixture_set()
+    assert _code(functools.partial(_freeze_with, fixtures, named_owner_id=bad)) == (
+        "named_owner_invalid"
+    )
+    if type(bad) is str and bad:  # the caller-asserted path validates the same shape
+        assert _code(functools.partial(_record, _score(), bad)) == "owner_invalid"
+
+
+def test_owner_id_shape_accepts_the_repository_identifier_alphabet() -> None:
+    for good in ("a", "generated-owner-1", "Owner.Name:42_x", "a" * 128):
+        assert _record(_named_owner_score(good), good)["owner_id"] == good
+
+
+def test_caller_asserted_owner_is_labelled_and_cannot_satisfy_the_named_owner_gate(
+    tmp_path: Path,
+) -> None:
+    card = _score()
+    assert "named_owner" not in card.body
+    rec = _dispose(card, None, "benchmark_only")
+    assert rec["owner_id"] == "generated-owner-1"
+    assert rec["owner_binding"] == "caller_asserted"
+    assert rec["named_owner_gate_satisfied"] is False
+    assert _code(functools.partial(_record, card, None)) == "owner_missing"
+    registry = _registry_root(tmp_path)
+    out = tmp_path / "out"
+    proc = subprocess.run(
+        [*CLI, "--out", str(out), "--disposition", "benchmark_only"],
+        capture_output=True,
+        text=True,
+        env=_env(registry),
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    (registered,) = list(registry.glob("disposition-*.json"))
+    (copied,) = list(out.glob("disposition-*.json"))
+    cli_rec = json.loads(registered.read_text())
+    assert copied.read_bytes() == registered.read_bytes()
+    assert cli_rec["owner_binding"] == "caller_asserted"
+    assert cli_rec["named_owner_gate_satisfied"] is False
+    assert cli_rec["registration"] == "worker_registry"
+
+
+def test_worker_registry_enforces_one_disposition_per_scorecard(tmp_path: Path) -> None:
+    r = fx.run_fixture_benchmark()
+    registry = eb.DispositionRegistry(_registry_root(tmp_path))
+
+    def once(card: eb.Scorecard, name: str, at: str = "2026-01-01") -> bool:
+        return eb.record_one_disposition(
+            registry, card, None, disposition=name, owner_id="generated-owner-1", recorded_at=at
+        )
+
+    assert registry.lookup(r.scorecard.scorecard_digest) is None
+    assert once(r.scorecard, "benchmark_only") is True
+    assert once(r.scorecard, "benchmark_only") is False  # identical retry is a no-op
+    for name, at in (("gather_more_evidence", "2026-01-01"), ("benchmark_only", "2026-01-02")):
+        assert _code(functools.partial(once, r.scorecard, name, at)) == (
+            "disposition_already_recorded"
+        )
+    stored = registry.lookup(r.scorecard.scorecard_digest)
+    assert stored is not None and stored["disposition"] == "benchmark_only"
+    assert stored["registration"] == "worker_registry"
+    other = _score(include_repair=False)  # a different scorecard may take its own disposition
+    assert other.scorecard_digest != r.scorecard.scorecard_digest
+    assert once(other, "gather_more_evidence") is True
+    files = sorted(registry.root.glob("disposition-*.json"))
+    assert len(files) == 2
+    recorded = {json.loads(p.read_text())["scorecard_digest"] for p in files}
+    assert recorded == {r.scorecard.scorecard_digest, other.scorecard_digest}
+    assert not list(registry.root.glob(".tmp-*"))
+
+
+def test_a_second_disposition_for_the_same_digest_is_refused_wherever_it_is_copied(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's repro: copies to two places, a rescored card, a second registry handle."""
+    root = _registry_root(tmp_path)
+    first = fx.run_fixture_benchmark()
+    rescored = fx.run_fixture_benchmark()  # same digest, fresh seal
+    assert rescored.scorecard.scorecard_digest == first.scorecard.scorecard_digest
+    assert eb.record_one_disposition(
+        eb.DispositionRegistry(root), first.scorecard, None, disposition="benchmark_only",
+        owner_id="generated-owner-1", recorded_at="2026-01-01", copy_to=tmp_path / "a",
+    )  # fmt: skip
+    second = functools.partial(
+        eb.record_one_disposition,
+        eb.DispositionRegistry(root),  # another handle on the same worker root
+        rescored.scorecard,
+        None,
+        disposition="gather_more_evidence",
+        owner_id="generated-owner-1",
+        recorded_at="2026-01-01",
+        copy_to=tmp_path / "b",
+    )
+    assert _code(second) == "disposition_already_recorded"
+    assert not (tmp_path / "b").exists()  # the registry decides before any copy is written
+    assert len(list((tmp_path / "a").glob("disposition-*.json"))) == 1
+
+
+def test_racing_writer_cannot_overwrite_the_registered_disposition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = fx.run_fixture_benchmark()
+    registry = eb.DispositionRegistry(_registry_root(tmp_path))
+    registry.record(r.scorecard, None, disposition="benchmark_only", owner_id="generated-owner-1",
+                    recorded_at="2026-01-01")  # fmt: skip
+    real_read = eb.DispositionRegistry._read
+    calls: list[int] = []
+
+    def stale_first_read(fd: int, name: str) -> bytes | None:
+        calls.append(fd)  # the first read misses the winner's entry, as a racing writer would
+        return None if len(calls) == 1 else real_read(fd, name)
+
+    monkeypatch.setattr(eb.DispositionRegistry, "_read", staticmethod(stale_first_read))
+    late = functools.partial(
+        registry.record,
+        r.scorecard,
+        None,
+        disposition="gather_more_evidence",
+        owner_id="generated-owner-1",
+        recorded_at="2026-01-01",
+    )
+    assert _code(late) == "disposition_already_recorded"
+    monkeypatch.undo()
+    stored = registry.lookup(r.scorecard.scorecard_digest)
+    assert stored is not None and stored["disposition"] == "benchmark_only"
+    assert not list(registry.root.glob(".tmp-*"))
+
+
+def test_registry_root_is_a_private_real_directory_pinned_by_identity(tmp_path: Path) -> None:
+    root = _registry_root(tmp_path)
+    (tmp_path / "file").write_text("x")
+    (tmp_path / "link").symlink_to(root)
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o755)
+    for bad, code in (
+        (Path("relative/registry"), "registry_root_invalid"),
+        (tmp_path / "missing", "registry_root_invalid"),
+        (tmp_path / "file", "registry_root_invalid"),
+        (tmp_path / "link", "registry_root_invalid"),
+        (tmp_path / "link" / "..", "registry_root_invalid"),
+        (loose, "registry_root_not_private"),
+    ):
+        assert _code(functools.partial(eb.DispositionRegistry, bad)) == code
+    assert _code(lambda: eb.DispositionRegistry(str(root))) == "registry_root_invalid"  # type: ignore[arg-type]
+    assert _code(lambda: eb.DispositionRegistry.from_environment({})) == (
+        "disposition_registry_unconfigured"
+    )
+    assert eb.DispositionRegistry.from_environment({eb.REGISTRY_ENV: str(root)}).root == root
+
+    card = _score()
+    registry = eb.DispositionRegistry(root)
+
+    def record() -> object:
+        return registry.record(card, None, disposition="benchmark_only",
+                               owner_id="generated-owner-1", recorded_at="2026-01-01")  # fmt: skip
+
+    root.chmod(0o750)  # loosened after it was opened
+    assert _code(record) == "registry_root_not_private"
+    root.chmod(0o700)
+    root.rename(tmp_path / "moved")
+    root.mkdir(mode=0o700)  # same path, different directory
+    assert _code(record) == "registry_root_moved"
+    assert _code(lambda: registry.lookup(card.scorecard_digest)) == "registry_root_moved"
+    root.rmdir()
+    assert _code(record) == "registry_root_moved"
+    assert _code(lambda: registry.lookup("sha256:short")) == "scorecard_digest_mismatch"
+    assert not list((tmp_path / "moved").iterdir())  # nothing was written anywhere
+
+
+def test_registry_refuses_an_oversized_or_symlinked_entry(tmp_path: Path) -> None:
+    card = _score()
+    root = _registry_root(tmp_path)
+    registry = eb.DispositionRegistry(root)
+    name = "disposition-" + card.scorecard_digest.removeprefix("sha256:") + ".json"
+    (root / name).write_bytes(b" " * 65537)
+    assert _code(lambda: registry.lookup(card.scorecard_digest)) == "registry_entry_invalid"
+    (root / name).unlink()
+    (tmp_path / "elsewhere.json").write_text("{}")
+    (root / name).symlink_to(tmp_path / "elsewhere.json")
+    assert _code(lambda: registry.lookup(card.scorecard_digest)) == "registry_entry_invalid"
+
+
+def test_a_second_registry_is_a_second_authority_the_documented_limit(tmp_path: Path) -> None:
+    """Pins the narrowed claim: one disposition per scorecard PER REGISTRY, not globally."""
+    r = fx.run_fixture_benchmark()
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    one = eb.DispositionRegistry(_registry_root(tmp_path / "one"))
+    two = eb.DispositionRegistry(_registry_root(tmp_path / "two"))
+    for registry, name in ((one, "benchmark_only"), (two, "gather_more_evidence")):
+        registry.record(r.scorecard, None, disposition=name, owner_id="generated-owner-1",
+                        recorded_at="2026-01-01")  # fmt: skip
+    assert "per registry" in (eb.__doc__ or "")
+    assert "can record a second disposition there" in " ".join((eb.__doc__ or "").split())
+
+
+def _cli_run(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [*CLI_MODULE, *args], capture_output=True, text=True, env=env, check=False
+    )
+
+
+def test_cli_refuses_a_second_disposition_for_the_same_scorecard(tmp_path: Path) -> None:
+    registry = _registry_root(tmp_path)
+    env = _env(registry)
+    a, b = tmp_path / "a", tmp_path / "b"
+    first = _cli_run(env, "run-generated", "--out", str(a), "--disposition", "benchmark_only")
+    assert first.returncode == 0, first.stderr
+    again = _cli_run(env, "run-generated", "--out", str(a), "--disposition", "benchmark_only")
+    assert again.returncode == 0, again.stderr  # rerun of the same disposition is idempotent
+    # The reviewer's repro: a different --out no longer hosts a second disposition.
+    second = _cli_run(
+        env, "run-generated", "--out", str(b), "--disposition", "gather_more_evidence"
+    )
+    assert second.returncode == 2 and "disposition_already_recorded" in second.stderr
+    assert not list(b.glob("disposition-*.json"))
+    assert len(list(registry.glob("disposition-*.json"))) == 1
+    unconfigured = _cli_run(
+        ENV, "run-generated", "--out", str(tmp_path / "c"), "--disposition", "benchmark_only"
+    )
+    assert unconfigured.returncode == 2
+    assert "disposition_registry_unconfigured" in unconfigured.stderr
+    assert not (tmp_path / "c").exists()  # refused before anything was written
+
+
+def test_cli_inspect_now_and_dispose_later_from_the_written_run(tmp_path: Path) -> None:
+    registry = _registry_root(tmp_path)
+    env = _env(registry)
+    run, base = tmp_path / "run", tmp_path / "base"
+    assert _cli_run(env, "run-generated", "--out", str(run)).returncode == 0
+    assert _cli_run(env, "run-generated", "--out", str(base), "--baseline-only").returncode == 0
+    assert not list(registry.iterdir())  # inspection first: nothing dispositioned yet
+    later = _cli_run(
+        env, "dispose-generated", "--from", str(run), "--disposition", "consider_tuning",
+        "--copy-to", str(run),
+    )  # fmt: skip
+    assert later.returncode == 0, later.stderr
+    digest = json.loads((run / "scorecard.json").read_text())["scorecard_digest"]
+    assert digest in later.stdout
+    (entry,) = list(registry.glob("disposition-*.json"))
+    rec = json.loads(entry.read_text())
+    assert (rec["scorecard_digest"], rec["disposition"]) == (digest, "consider_tuning")
+    assert (run / entry.name).read_bytes() == entry.read_bytes()
+    dup = _cli_run(env, "dispose-generated", "--from", str(run), "--disposition", "benchmark_only")
+    assert dup.returncode == 2 and "disposition_already_recorded" in dup.stderr
+    baseline = _cli_run(
+        env, "dispose-generated", "--from", str(base), "--disposition", "benchmark_only"
+    )
+    assert baseline.returncode == 0, baseline.stderr  # baseline-only run re-admitted too
+    assert len(list(registry.glob("disposition-*.json"))) == 2
+    # A written scorecard edited to upgrade its claim, digest recomputed, cannot be re-admitted.
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / "manifest.json").write_bytes((run / "manifest.json").read_bytes())
+    card = json.loads((run / "scorecard.json").read_text())
+    card["body"]["improvement_claim"] = "improvement_supported_by_interval"
+    card["scorecard_digest"] = eb.digest(card["body"])
+    (forged / "scorecard.json").write_text(json.dumps(card))
+    bad = _cli_run(
+        env, "dispose-generated", "--from", str(forged), "--disposition", "adopt_test_simple_fix"
+    )
+    assert bad.returncode == 2 and "scorecard_not_reproduced" in bad.stderr
+    (forged / "scorecard.json").write_text("[]")
+    for source in (forged, tmp_path / "absent"):
+        odd = _cli_run(
+            env, "dispose-generated", "--from", str(source), "--disposition", "benchmark_only"
+        )
+        assert odd.returncode == 2 and "scorecard_json_invalid" in odd.stderr, odd.stderr
+    assert len(list(registry.glob("disposition-*.json"))) == 2
+
+
+def test_reloaded_scorecard_is_admitted_only_by_reproducing_it_from_frozen_inputs() -> None:
+    f, m, _, _, runs, _ = _setup()
+    inputs = eb.HeldoutInputs(f.heldout_cases, f.heldout_key, [], _prompts(f, m), runs)
+    card = _score()
+    raw = json.loads(json.dumps(card.to_json()))
+    plain = eb.Scorecard(body=raw["body"], scorecard_digest=raw["scorecard_digest"])
+    assert _code(lambda: _dispose(plain, None, "benchmark_only")) == "scorecard_not_from_scoring"
+    assert _code(lambda: eb.reload_scorecard(raw, m, None)) == "scorecard_inputs_unavailable"
+    reloaded = eb.reload_scorecard(raw, m, inputs)
+    assert reloaded.scorecard_digest == card.scorecard_digest and reloaded.body == card.body
+    assert _dispose(reloaded, None, "benchmark_only")["scorecard_digest"] == card.scorecard_digest
+
+    upgraded = json.loads(json.dumps(raw))
+    upgraded["body"]["improvement_claim"] = "improvement_supported_by_interval"
+    assert _code(lambda: eb.reload_scorecard(upgraded, m, inputs)) == "scorecard_digest_mismatch"
+    upgraded["scorecard_digest"] = eb.digest(upgraded["body"])
+    assert _code(lambda: eb.reload_scorecard(upgraded, m, inputs)) == "scorecard_not_reproduced"
+    baseline_only = dataclasses.replace(inputs, runs=runs[:1])
+    assert _code(lambda: eb.reload_scorecard(raw, m, baseline_only)) == ("scorecard_not_reproduced")
+    other = _freeze_with(f, alpha=0.2)
+    assert _code(lambda: eb.reload_scorecard(raw, other, inputs)) == (
+        "scorecard_not_bound_to_manifest"
+    )
+    shapes: list[object] = [
+        [],
+        {**raw, "extra": 1},
+        {"body": [], "scorecard_digest": raw["scorecard_digest"]},
+        {"body": raw["body"], "scorecard_digest": "sha256:short"},
+    ]
+    for shape in shapes:
+        assert _code(functools.partial(eb.reload_scorecard, shape, m, inputs)) == (
+            "scorecard_json_invalid"
+        )
+
+
+def test_seal_limit_is_stated_in_the_module_doc() -> None:
+    doc = " ".join((eb.__doc__ or "").split())
+    assert "code-path marker, NOT a trust root" in doc
+    assert "any code in the same process can forge it" in doc
+    assert "OPE-566" in doc
+
+
+def test_cli_subprocess_imports_this_checkout() -> None:
+    probe = (
+        "import sys, opentour_training.evaluation.eve_fixtures as f, "
+        "opentour_training.evaluation.eve_benchmark as b; "
+        "print(f.__file__); print(b.__file__); print(sys.flags.isolated)"
+    )
+    proc = subprocess.run([*PY, "-c", probe], capture_output=True, text=True, env=ENV, check=False)
+    assert proc.returncode == 0, proc.stderr
+    fixtures_file, benchmark_file, isolated = proc.stdout.split()
+    src = (ROOT / "src").resolve()
+    assert Path(fixtures_file).resolve() == src / "opentour_training/evaluation/eve_fixtures.py"
+    assert Path(benchmark_file).resolve() == Path(eb.__file__).resolve()
+    assert Path(benchmark_file).resolve().is_relative_to(src)
+    assert isolated == "0" and "-I" not in CLI  # -I would drop PYTHONPATH
+
+
+def _patched_claim(monkeypatch: pytest.MonkeyPatch, case_lower: float, family_lower: float) -> str:
+    real_case, real_family = sk.paired_binary_interval, sk.independent_family_interval
+
+    def case(*a: Any) -> Any:
+        return dataclasses.replace(real_case(*a), lower=case_lower)
+
+    def family(*a: Any) -> Any:
+        return dataclasses.replace(real_family(*a), lower=family_lower)
+
+    monkeypatch.setattr(eb, "paired_binary_interval", case)
+    monkeypatch.setattr(eb, "independent_family_interval", family)
+    try:
+        card = _score()
+        assert (
+            card.body["paired_comparison"]["fixes"] > card.body["paired_comparison"]["regressions"]
+        )
+        claim: str = card.body["improvement_claim"]
+        return claim
+    finally:
+        monkeypatch.undo()
+
+
+def test_a_lower_bound_of_exactly_zero_withholds_the_improvement_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tiny = 5e-324  # the smallest positive float: strictly above zero
+    assert _patched_claim(monkeypatch, tiny, tiny) == "improvement_supported_by_interval"
+    for case_lower, family_lower in ((0.0, tiny), (tiny, 0.0), (0.0, 0.0), (-0.0, tiny)):
+        assert _patched_claim(monkeypatch, case_lower, family_lower) == (
+            "directional_only_interval_includes_zero"
+        )
+
+
+def test_family_lower_bound_alone_withholds_the_improvement_claim() -> None:
+    """Pins both bounds: case-level lower > 0, family-level lower <= 0, so no improvement."""
+    f = fx.build_fixture_set(heldout_cases=400)
+    wide = tuple(
+        dataclasses.replace(c, family_id=f"GEN-FAM-HOLD-W{n // 40:02d}")
+        for n, c in enumerate(f.heldout_cases)
+    )  # same 400 cases, 10 families of 40 instead of 200 of 2
+    f = dataclasses.replace(f, heldout_cases=wide)
+    m = _freeze_with(f)
+    cfg = {c.arm_id: c for c in fx.ARM_CONFIGS}
+    elig = tuple(c for c in wide if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    prompts = [c.question for c in wide if c.case_id in m.heldout_eligible]
+    iso = eb.verify_isolation(m, fit_rows=[], prompt_texts=prompts, heldout_key=f.heldout_key)
+    card = eb.score_heldout(
+        m,
+        heldout_cases=wide,
+        heldout_key=f.heldout_key,
+        fit_rows=[],
+        prompt_texts=prompts,
+        isolation=iso,
+        runs=runs,
+    )
+    p = card.body["paired_comparison"]
+    assert p["family_interval"]["units"] == 10
+    assert p["fixes"] > p["regressions"]
+    assert p["interval"]["lower"] > 0  # the case-level bound alone would support a claim
+    assert p["family_interval"]["lower"] <= 0
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"
+    assert _code(lambda: _dispose(card, None, "adopt_test_simple_fix")) == (
+        "adopt_requires_interval_supported_improvement"
+    )
+
+
+class _ShiftyBody(dict):  # type: ignore[type-arg]
+    """Copies as the genuine body but answers an upgraded claim on direct lookup."""
+
+    def __getitem__(self, key: object) -> Any:
+        if key == "improvement_claim":
+            return "improvement_supported_by_interval"
+        return super().__getitem__(key)
+
+
+def test_disposition_reads_only_the_digest_checked_snapshot_of_the_body() -> None:
+    card = _score()
+    shifty = dataclasses.replace(card, body=_ShiftyBody(card.body))  # genuine digest and seal
+    assert shifty.body["improvement_claim"] == "improvement_supported_by_interval"
+    assert eb.digest(dict(shifty.body)) == card.scorecard_digest
+    assert _code(lambda: _dispose(shifty, None, "adopt_test_simple_fix")) == (
+        "adopt_requires_interval_supported_improvement"
+    )
+
+
+def test_a_finding_subclass_cannot_borrow_a_genuine_seal() -> None:
+    f, _, cfg, _, _, _ = _setup()
+    m = _freeze_with(f, materiality_min_errors=99)  # genuine finding: residual not material
+    dev = {a: fx.simulate_arm(cfg[a], f.development_cases, m) for a in cfg}
+    genuine = eb.assess_development(
+        m,
+        development_cases=f.development_cases,
+        development_key=f.development_key,
+        baseline=dev[eb.BASELINE_ARM],
+        repair=dev[eb.REPAIR_ARM],
+    )
+    assert genuine.material_recurring_residual is False
+    elig = tuple(c for c in f.heldout_cases if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    iso = eb.verify_isolation(
+        m, fit_rows=[], prompt_texts=_prompts(f, m), heldout_key=f.heldout_key
+    )
+    card = _score_with(m, f, heldout_key=f.heldout_key, isolation=iso, runs=runs)
+
+    class Borrowed(eb.DevelopmentFinding):
+        def to_json(self) -> dict[str, Any]:
+            return genuine.to_json()  # what the seal was computed over
+
+    fields = {k: getattr(genuine, k) for k in genuine.__dataclass_fields__}
+    borrowed = Borrowed(**{**fields, "material_recurring_residual": True})
+    assert borrowed.seal == genuine.seal
+    assert _code(lambda: _dispose(card, borrowed, "consider_tuning")) == (
+        "finding_not_from_assessment"
+    )
+    assert _code(lambda: _dispose(card, genuine, "consider_tuning")) == (
+        "tuning_requires_material_recurring_residual"
+    )
+    assert _dispose(card, genuine, "benchmark_only")["disposition"] == "benchmark_only"
+
+
+def test_case_lower_bound_alone_withholds_the_improvement_claim() -> None:
+    """Mirror of the family pin: family-level lower > 0, case-level lower <= 0, no claim."""
+    f = fx.build_fixture_set()
+    fixes_first = tuple(
+        dataclasses.replace(
+            c,
+            family_id=(
+                f"GEN-FAM-HOLD-S{c.case_id}"
+                if int(c.case_id.split("-")[1]) % 5 in (1, 4)  # the cases the repair fixes
+                else "GEN-FAM-HOLD-REST"
+            ),
+        )
+        for c in f.heldout_cases
+    )  # every fix is its own family; everything else, regressions included, shares one
+    f = dataclasses.replace(f, heldout_cases=fixes_first)
+    m = _freeze_with(f)
+    cfg = {c.arm_id: c for c in fx.ARM_CONFIGS}
+    elig = tuple(c for c in fixes_first if c.case_id in m.heldout_eligible)
+    runs = [fx.simulate_arm(cfg[a], elig, m) for a in (eb.BASELINE_ARM, eb.REPAIR_ARM)]
+    prompts = [c.question for c in elig]
+    iso = eb.verify_isolation(m, fit_rows=[], prompt_texts=prompts, heldout_key=f.heldout_key)
+    card = eb.score_heldout(
+        m,
+        heldout_cases=fixes_first,
+        heldout_key=f.heldout_key,
+        fit_rows=[],
+        prompt_texts=prompts,
+        isolation=iso,
+        runs=runs,
+    )
+    p = card.body["paired_comparison"]
+    assert (p["fixes"], p["regressions"]) == (11, 3)
+    assert p["family_interval"]["lower"] > 0  # the family bound alone would support a claim
+    assert p["interval"]["lower"] <= 0
+    assert card.body["improvement_claim"] == "directional_only_interval_includes_zero"

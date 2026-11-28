@@ -7,6 +7,7 @@ customer or real-workplace evidence, and no real model is fitted.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 
 import pytest
@@ -853,3 +854,329 @@ def test_ledger_round_trip_accepts_honest_state_at_grant_and_cap() -> None:
     with pytest.raises(TuningBenefitError) as cap:
         restored.reserve("d", "c", "generation", 1)
     assert cap.value.code == "spend_cap_exceeded"
+
+
+# ---- post-merge audit follow-up (2026-11-28): ledger key structure ----
+
+
+@pytest.mark.parametrize(
+    ("key", "kind"),
+    [("||generation", "generation"), ("d||generation", "generation"), ("|a|fit", "fit")],
+)
+def test_ledger_refuses_keys_with_empty_digest_or_arm(key: str, kind: str) -> None:
+    # The third part matches the stored kind, so only the empty-part check can refuse these.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"][key] = [kind, 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    ("key", "kind"),
+    [
+        ("d|a|fit|x", "fit"),
+        ("d|a|generation|generation", "generation"),
+        ("d|a|generation|", "generation"),
+        ("d|a|generation|b|z", "generation"),
+    ],
+)
+def test_ledger_refuses_keys_with_extra_parts_even_when_the_third_is_the_kind(
+    key: str, kind: str
+) -> None:
+    # Pins the ``len(parts) == 3`` check: every key here has a well-formed third part.
+    assert key.split("|")[2] == kind
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"][key] = [kind, 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    ("digest", "arm"),
+    [
+        ("d", "a|b"),
+        ("d|a", "b"),
+        ("d", "a|"),
+        ("|d", "a"),
+        ("", "a"),
+        ("d", ""),
+        (None, "a"),
+        ("d", 7),
+    ],
+)
+def test_reserve_and_settle_refuse_separator_empty_or_non_str_parts(
+    digest: object, arm: object
+) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=2)
+    for call in (ledger.reserve, ledger.settle):
+        with pytest.raises(TuningBenefitError) as err:
+            call(digest, arm, "generation", 1)  # type: ignore[arg-type]
+        assert err.value.code == "reservation_key_invalid"
+    assert ledger.to_json()["reserved"] == {} and ledger.charged == 0
+
+
+def test_separator_in_an_identifier_cannot_collide_two_pairs() -> None:
+    # ("d|a", "b") and ("d", "a|b") would both key as "d|a|b|..." and read as "replayed".
+    ledger = SpendLedger(spend_cap=100, fits_authorized=2)
+    assert ledger.reserve("d", "a", "generation", 5) == "reserved"
+    with pytest.raises(TuningBenefitError) as first:
+        ledger.reserve("d|a", "b", "generation", 5)
+    with pytest.raises(TuningBenefitError) as second:
+        ledger.reserve("d", "a|b", "generation", 5)
+    assert first.value.code == second.value.code == "reservation_key_invalid"
+    restored = SpendLedger.from_json(ledger.to_json())  # what reserve admits always round-trips
+    assert restored.to_json() == ledger.to_json()
+
+
+# ---- cross-session review follow-up (2026-11-28): exact-str kind and key parts ----
+
+
+class _FormatLiesKind(str):
+    """Equal to ``"generation"`` but formats as ``"generation|zz"``."""
+
+    def __format__(self, spec: str) -> str:
+        return "generation|zz"
+
+
+class _FirstCompareFit:
+    """Not a str: equal to ``"fit"`` only on its first comparison, then never again."""
+
+    def __init__(self) -> None:
+        self.compared = 0
+
+    def __hash__(self) -> int:
+        return hash("fit")
+
+    def __eq__(self, other: object) -> bool:
+        self.compared += 1
+        return self.compared == 1 and other == "fit"
+
+    def __str__(self) -> str:
+        return "fit"
+
+    def __format__(self, spec: str) -> str:
+        return "fit"
+
+
+class _ContainsLies(str):
+    """A str subclass that hides the separator from ``in``."""
+
+    def __contains__(self, item: object) -> bool:
+        return False
+
+
+class _SplitLies(str):
+    """A str subclass whose ``split`` reports a well-formed three-part key."""
+
+    def split(self, sep: Any = None, maxsplit: int = -1) -> list[str]:  # type: ignore[override]
+        return ["d", "a", "fit"]
+
+    def __hash__(self) -> int:
+        return str.__hash__(self)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [_FormatLiesKind("generation"), _FormatLiesKind("fit"), "Fit", "fit ", None, 1, b"fit"],
+    ids=["format-lies-generation", "subclass-fit", "case", "padded", "none", "int", "bytes"],
+)
+def test_reserve_and_settle_refuse_a_kind_that_is_not_an_exact_known_str(kind: object) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    assert ledger.reserve("d", "a", "generation", 1) == "reserved"
+    before = ledger.to_json()
+    for call in (ledger.reserve, ledger.settle):
+        with pytest.raises(TuningBenefitError) as err:
+            call("d", "a", kind, 1)  # type: ignore[arg-type]
+        assert err.value.code == "reservation_kind_unknown"
+    assert ledger.to_json() == before and ledger.charged == 0
+    assert SpendLedger.from_json(ledger.to_json()).to_json() == before
+
+
+def test_format_lying_kind_cannot_reserve_an_unloadable_key() -> None:
+    # Reviewer vector: the subclass reserved "d|a|generation|zz", which reload then refused.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    with pytest.raises(TuningBenefitError) as err:
+        ledger.reserve("d", "a", _FormatLiesKind("generation"), 1)
+    assert err.value.code == "reservation_kind_unknown"
+    assert ledger.to_json()["reserved"] == {}
+
+
+def test_stateful_kind_cannot_take_fits_past_the_grant() -> None:
+    # Reviewer vector: a kind equal to "fit" on its first comparison only took three fits past
+    # fits_authorized=1 in memory, and reload then failed with ledger_forged_fit_count.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    for arm in ("a", "b", "c"):
+        with pytest.raises(TuningBenefitError) as err:
+            ledger.reserve("d", arm, _FirstCompareFit(), 1)  # type: ignore[arg-type]
+        assert err.value.code == "reservation_kind_unknown"
+    assert ledger.to_json()["reserved"] == {}
+    assert ledger.reserve("d", "a", "fit", 1) == "reserved"
+    with pytest.raises(TuningBenefitError) as grant:
+        ledger.reserve("d", "b", "fit", 1)
+    assert grant.value.code == "fit_grant_exceeded"
+
+
+@pytest.mark.parametrize(
+    "stored_kind",
+    [_FormatLiesKind("fit"), _FirstCompareFit(), "fit "],
+    ids=["str-subclass", "stateful", "padded"],
+)
+def test_ledger_reload_refuses_a_stored_kind_that_is_not_an_exact_str(stored_kind: object) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"]["d|a|fit"] = [stored_kind, 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+def test_separator_hidden_by_a_str_subclass_cannot_collide_two_pairs() -> None:
+    # Pins ``type(part) is str`` in the key builder (mutant K1: isinstance). Under isinstance,
+    # these two pairs both key as "d|a|b|generation": reserved, then "replayed".
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    with pytest.raises(TuningBenefitError) as first:
+        ledger.reserve(_ContainsLies("d|a"), "b", "generation", 5)
+    with pytest.raises(TuningBenefitError) as second:
+        ledger.reserve("d", _ContainsLies("a|b"), "generation", 5)
+    with pytest.raises(TuningBenefitError) as third:
+        ledger.settle(_ContainsLies("d|a"), "b", "generation", 5)
+    assert first.value.code == second.value.code == third.value.code == "reservation_key_invalid"
+    assert ledger.to_json()["reserved"] == {}
+
+
+def test_ledger_reload_refuses_a_str_subclass_key() -> None:
+    # Pins ``type(k) is str`` in from_json (mutant K2: isinstance). The subclass claims a
+    # well-formed split, but its real value has four parts.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"][_SplitLies("d|a|b|fit")] = ["fit", 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+def test_ledger_reload_refuses_a_str_subclass_settlement_key() -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    ledger.reserve("d", "a", "fit", 5)
+    raw = ledger.to_json()
+    raw["settled"][_SplitLies("d|a|fit")] = 1
+    assert _forged_refusal(raw) == "ledger_forged_settlement"
+
+
+_BAD_PARTS = [
+    "d ",
+    " d",
+    "   ",
+    "\t",
+    "d\x00",
+    "\x00",
+    "d\u200b",
+    "\u200b",
+    "\ufeffd",
+    "d\u2028a",
+    "d\ud800",  # lone surrogate (Cs): not UTF-8 encodable
+    "\udfff",
+    "e\u0301",  # NFD of U+00E9
+    "x" * 257,
+]
+_BAD_PART_IDS = [
+    "trailing-space",
+    "leading-space",
+    "whitespace-only",
+    "tab-only",
+    "nul",
+    "nul-only",
+    "zwsp",
+    "zwsp-only",
+    "bom",
+    "line-separator",
+    "lone-surrogate",
+    "lone-surrogate-only",
+    "nfd",
+    "too-long",
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_PARTS, ids=_BAD_PART_IDS)
+def test_reserve_and_settle_refuse_ill_formed_digest_or_arm(bad: str) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    for digest_, arm in ((bad, "a"), ("d", bad)):
+        for call in (ledger.reserve, ledger.settle):
+            with pytest.raises(TuningBenefitError) as err:
+                call(digest_, arm, "generation", 1)
+            assert err.value.code == "reservation_key_invalid"
+    assert ledger.to_json()["reserved"] == {} and ledger.charged == 0
+
+
+@pytest.mark.parametrize("bad", _BAD_PARTS, ids=_BAD_PART_IDS)
+def test_ledger_reload_refuses_ill_formed_digest_or_arm(bad: str) -> None:
+    for key in (f"{bad}|a|generation", f"d|{bad}|generation"):
+        raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
+        raw["reserved"][key] = ["generation", 1]
+        assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+def test_visually_identical_parts_are_not_charged_twice() -> None:
+    # Reviewer vector: "d" vs "d " and NFC vs NFD were two keys and two charges.
+    ledger = SpendLedger(spend_cap=10, fits_authorized=1)
+    assert ledger.reserve("d", "\u00e9", "generation", 6) == "reserved"
+    for digest_, arm in (("d ", "\u00e9"), ("d", "e\u0301"), ("d\u200b", "\u00e9")):
+        with pytest.raises(TuningBenefitError) as err:
+            ledger.reserve(digest_, arm, "generation", 6)
+        assert err.value.code == "reservation_key_invalid"
+    assert sum(v for _, v in ledger.to_json()["reserved"].values()) == 6
+
+
+def test_well_formed_edge_parts_are_admitted_and_round_trip() -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    longest = "x" * 256
+    assert ledger.reserve(longest, longest, "fit", 1) == "reserved"
+    assert ledger.reserve("sha256:" + "0" * 64, "real only", "generation", 1) == "reserved"
+    assert ledger.reserve("d", "\u00e9", "generation", 1) == "reserved"  # NFC is admitted
+    assert ledger.settle(longest, longest, "fit", 1) == "settled"
+    raw = ledger.to_json()
+    restored = SpendLedger.from_json(raw)
+    assert restored.to_json() == raw
+    assert all(type(k) is str for k in raw["reserved"])
+    assert all(type(v[0]) is str for v in raw["reserved"].values())
+
+
+def test_ledger_reload_refuses_a_list_subclass_reservation_value() -> None:
+    class _Row(list):  # type: ignore[type-arg]
+        pass
+
+    raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
+    raw["reserved"]["d|a|fit"] = _Row(["fit", 1])
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize("surrogate", ["d\ud800", "\udfff", "\ud800d"])
+def test_lone_surrogate_part_is_refused_before_any_state_change(surrogate: str) -> None:
+    # Re-review vector (Cs): without the category rule, reserve("d\ud800", ...) was admitted and
+    # the ledger then could not be written as UTF-8 (UnicodeEncodeError).
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    assert ledger.reserve("d", "a", "generation", 1) == "reserved"
+    before = ledger.to_json()
+    for digest_, arm in ((surrogate, "a"), ("d", surrogate)):
+        for call in (ledger.reserve, ledger.settle):
+            with pytest.raises(TuningBenefitError) as err:
+                call(digest_, arm, "generation", 1)
+            assert err.value.code == "reservation_key_invalid"
+    assert ledger.to_json() == before and ledger.charged == 0
+    json.dumps(ledger.to_json(), ensure_ascii=False).encode("utf-8")  # still writable
+
+
+@pytest.mark.parametrize("entry", ["reserve", "settle"])
+def test_kind_is_checked_before_the_amount(entry: str) -> None:
+    # Pins the order: a bad kind with a bad amount reports the kind, never the amount.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    with pytest.raises(TuningBenefitError) as kind_first:
+        getattr(ledger, entry)("d", "a", "bogus", -1)
+    assert kind_first.value.code == "reservation_kind_unknown"
+    with pytest.raises(TuningBenefitError) as key_first:
+        getattr(ledger, entry)("d|x", "a", "generation", -1)
+    assert key_first.value.code == "reservation_key_invalid"
+    assert ledger.to_json()["reserved"] == {}
+
+
+@pytest.mark.parametrize("field", ["spend_cap", "fits_authorized", "reserved", "settled"])
+def test_ledger_reload_refuses_a_missing_top_level_field(field: str) -> None:
+    raw = SpendLedger(spend_cap=100, fits_authorized=1).to_json()
+    del raw[field]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"

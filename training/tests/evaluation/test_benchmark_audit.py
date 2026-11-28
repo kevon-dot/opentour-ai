@@ -11,6 +11,7 @@ import random
 from dataclasses import replace
 from typing import Any
 
+import opentour_training.evaluation.benchmark_audit.audit as audit_module
 import pytest
 from audit_fixtures import (
     CONSUMED,
@@ -23,9 +24,18 @@ from audit_fixtures import (
     real_sample_records,
 )
 from opentour_training.evaluation.benchmark_audit.audit import (
+    LABEL_EVIDENCE_FIELDS,
     audit,
     draw_audit_sample,
+    label_manifest_digest,
     mapper_view,
+)
+from opentour_training.evaluation.benchmark_audit.exposure import (
+    Channel,
+    ExposureGuard,
+    QueryRequest,
+    Surface,
+    replay_exposure,
 )
 from opentour_training.evaluation.benchmark_audit.inference import (
     design_weighted_error,
@@ -34,14 +44,19 @@ from opentour_training.evaluation.benchmark_audit.inference import (
     zero_error_upper_bound,
 )
 from opentour_training.evaluation.benchmark_audit.model import (
+    ExposureRecord,
     PopulationKind,
     PreprocessingRecord,
+    ReleaseEntry,
     SamplingDesign,
     SelectionUse,
     Verdict,
+    canonical_form,
+    exposure_record_digest,
 )
 
 V = Verdict
+SELECTOR = frozenset({"selector"})
 
 
 def codes(receipt: dict[str, Any]) -> set[str]:
@@ -224,6 +239,97 @@ def test_mutation_d_label_changed_after_freeze_is_stale_and_names_the_label_mani
     assert receipt["verdict"] == V.STALE.value
     assert any("label_manifest" in r["detail"] for r in receipt["reasons"])
     assert receipt["claims"]["broad_improvement_alert_permitted"] is False
+
+
+def overturned_r04() -> tuple[Any, ...]:
+    """Two reviewers agree on a wrong label; the independent record overturns it."""
+    wrong = commit("generated-r04", "generated-wrong-action")
+    right = commit("generated-r04", "generated-action-generated-r04")
+    return tuple(
+        replace(
+            r,
+            final_label_digest=wrong,
+            adjudicator_label_digest=wrong,
+            independent_label_digest=right,
+        )
+        if r.family_id == "generated-r04"
+        else r
+        for r in baseline_records()
+    )
+
+
+def test_repro_verifier_evidence_dropped_after_freeze_is_stale_not_allowed() -> None:
+    frozen = overturned_r04()
+    assert run(frozen)["verdict"] == V.INVALID.value
+    dropped = tuple(
+        replace(r, independent_source=None, independent_label_digest=None)
+        if r.family_id == "generated-r04"
+        else r
+        for r in frozen
+    )
+    receipt = run(dropped, frozen_records=frozen)
+    assert receipt["verdict"] == V.STALE.value
+    assert {"code": "bound_digest_changed", "detail": "label_manifest"} in receipt["reasons"]
+    assert receipt["next_evidence_request"]
+    assert receipt["claims"]["broad_improvement_alert_permitted"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("first_labeler_id", "generated-labeler-z"),
+        ("adjudicator_id", None),
+        ("adjudicator_saw_first_label", True),
+        ("adjudicator_saw_predictions", True),
+        ("adjudicator_label_digest", None),
+        ("independent_source", None),
+        ("independent_label_digest", None),
+        ("unresolved", True),
+        ("fresh_confirmation", True),
+    ],
+)
+def test_verifier_evidence_changed_after_freeze_is_stale(field: str, value: object) -> None:
+    frozen = baseline_records()
+    changed = tuple(
+        replace(r, **{field: value}) if r.family_id == "generated-r05" else r for r in frozen
+    )
+    receipt = run(changed, frozen_records=frozen)
+    assert receipt["verdict"] == V.STALE.value, field
+    assert {"code": "bound_digest_changed", "detail": "label_manifest"} in receipt["reasons"]
+    resealed = run(changed)["bindings"]  # frozen afresh over the changed evidence: not stale
+    assert resealed["frozen"] == resealed["current"]
+
+
+def test_label_manifest_tells_apart_mistyped_values_whatever_they_claim() -> None:
+    record = baseline_records()[0]
+    values = [
+        "generated-a",
+        _SubStr("generated-a"),
+        _ConstantFace("generated-a"),
+        _ConstantFace("generated-b"),
+        0.5,
+        0.25,
+    ]
+    digests = {
+        label_manifest_digest([replace(record, final_label_digest=v)])  # type: ignore[arg-type]
+        for v in values
+    }
+    assert len(digests) == len(values)
+
+
+def test_label_manifest_binds_the_label_and_every_verifier_field_the_audit_reads() -> None:
+    assert LABEL_EVIDENCE_FIELDS == (
+        "final_label_digest",
+        "first_labeler_id",
+        "adjudicator_id",
+        "adjudicator_saw_first_label",
+        "adjudicator_saw_predictions",
+        "adjudicator_label_digest",
+        "independent_source",
+        "independent_label_digest",
+        "unresolved",
+        "fresh_confirmation",
+    )
 
 
 # ---- Acceptance packs ----
@@ -426,11 +532,19 @@ def test_real_sample_with_precision_is_eligible_but_alerts_wait_for_the_upstream
     receipt = real()
     assert receipt["verdict"] == V.EVALUATION_ALLOWED.value
     assert receipt["inference_to_future_cases"]["conclusion"] == "ruled_out_at_ceiling"
-    assert receipt["claims"]["overall_accuracy_claim"] == "eligible_pending_upstream_receipt"
+    # No guard history: "no exposure" is caller-asserted, so the claim is limited (I2 ruling).
+    assert receipt["claims"]["overall_accuracy_claim"] == "claim_limited_caller_asserted"
     assert receipt["claims"]["customer_accuracy_alert_permitted"] is False
     assert receipt["label_audit"]["design_weighted_error"] == 0.0
-    # Consumer contract only: a future OPE-416 consumer would set this after verifying it.
-    assert real(upstream_snapshot_verified=True)["claims"]["customer_accuracy_alert_permitted"]
+    # A caller's verification flag is caller-asserted and cannot by itself enable the alert;
+    # it waits for an upstream receipt the worker verifies itself (OPE-416, unlanded).
+    asserted = real(upstream_snapshot_verified=True)
+    assert asserted["claims"]["customer_accuracy_alert_permitted"] is False
+    assert (
+        "upstream_receipt_not_worker_verified"
+        in (asserted["claims"]["customer_accuracy_alert_blocked_by"])
+    )
+    assert any("OPE-416" in text for text in asserted["next_evidence_request"])
 
 
 def test_real_sample_without_snapshot_binding_is_insufficient() -> None:
@@ -504,7 +618,7 @@ def test_label_error_beyond_tolerance_is_invalid_and_within_tolerance_is_recorde
     assert "label_overturned_by_independent_record" in codes(within)
 
 
-def real_changed(records: Any, tolerance: float) -> dict[str, Any]:
+def real_changed(records: Any, tolerance: float, **kw: Any) -> dict[str, Any]:
     _, sizes = real_sample_records()
     return run(
         records,
@@ -516,6 +630,7 @@ def real_changed(records: Any, tolerance: float) -> dict[str, Any]:
             "tolerable_label_error": tolerance,
         },
         candidate_snapshot=OBSERVED_SNAPSHOT,
+        **kw,
     )
 
 
@@ -543,3 +658,692 @@ def test_single_label_error_within_registered_tolerance_is_recorded_not_invalid(
     assert beyond["verdict"] == V.INVALID.value
     assert "label_error_exceeds_tolerance" in codes(beyond)
     assert sizes
+
+
+# ---- Adjudicator independence: each recorded condition is load-bearing ----
+
+
+def adjudicator_only(**changes: Any) -> tuple[Any, ...]:
+    """Every protected family verified by the blinded adjudicator alone; r01 takes ``changes``."""
+    return tuple(
+        replace(
+            r,
+            independent_source=None,
+            independent_label_digest=None,
+            **(changes if r.family_id == "generated-r01" else {}),
+        )
+        for r in baseline_records()
+    )
+
+
+def test_blinded_distinct_adjudicator_alone_verifies_every_family() -> None:
+    receipt = run(adjudicator_only())
+    assert receipt["verdict"] == V.EVALUATION_ALLOWED.value
+    assert receipt["denominator_flow"]["verified"] == 12
+
+
+def test_adjudicator_who_saw_predictions_does_not_verify_the_family() -> None:
+    receipt = run(adjudicator_only(adjudicator_saw_predictions=True))
+    assert receipt["denominator_flow"]["verified"] == 11
+    assert receipt["denominator_flow"]["unverified"] == 1
+    every = tuple(replace(r, adjudicator_saw_predictions=True) for r in adjudicator_only())
+    assert run(every)["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+    assert "no_verified_families" in codes(run(every))
+
+
+def test_adjudicator_who_is_the_first_labeler_does_not_verify_the_family() -> None:
+    receipt = run(adjudicator_only(adjudicator_id="generated-labeler-a"))
+    assert receipt["denominator_flow"]["verified"] == 11
+    assert receipt["denominator_flow"]["unverified"] == 1
+    every = tuple(replace(r, adjudicator_id=r.first_labeler_id) for r in adjudicator_only())
+    assert run(every)["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+
+
+@pytest.mark.parametrize(
+    ("changes", "counter"),
+    [
+        ({"adjudicator_saw_predictions": True}, "recorded_blind_to_predictions"),
+        ({"adjudicator_saw_first_label": True}, "recorded_blind_to_first_label"),
+        ({"adjudicator_id": "generated-labeler-a"}, "distinct_from_first_labeler"),
+    ],
+)
+def test_receipt_states_blinding_only_when_recorded_conditions_show_it(
+    changes: dict[str, Any], counter: str
+) -> None:
+    baseline = run()["audit_selection"]
+    assert baseline["adjudicator_independence"] == "blinded_to_first_label_and_predictions"
+    assert baseline["adjudicator_independence_recorded"][counter] == 12
+    # r01 is still verified by the independent record, so the verdict need not move; the
+    # receipt must nonetheless stop claiming that every adjudication was blinded.
+    records = tuple(
+        replace(r, **changes) if r.family_id == "generated-r01" else r for r in baseline_records()
+    )
+    selection = run(records)["audit_selection"]
+    assert selection["adjudicator_independence"] == "independence_not_shown_for_every_adjudication"
+    assert selection["adjudicator_independence_recorded"][counter] == 11
+    assert selection["adjudicator_independence_recorded"]["adjudicated"] == 12
+
+
+def test_receipt_states_no_adjudication_when_only_independent_records_verify() -> None:
+    records = tuple(
+        replace(r, adjudicator_id=None, adjudicator_label_digest=None) for r in baseline_records()
+    )
+    receipt = run(records)
+    assert receipt["verdict"] == V.EVALUATION_ALLOWED.value
+    assert receipt["audit_selection"]["adjudicator_independence"] == "no_adjudication_recorded"
+
+
+# ---- Caller-asserted fields cannot lift a hold ----
+
+
+def test_caller_asserted_exposure_cannot_launder_a_disputed_or_unresolved_family() -> None:
+    wrong = commit("generated-r04", "generated-wrong-action")
+    overturned = tuple(
+        replace(r, final_label_digest=wrong, adjudicator_label_digest=wrong)
+        if r.family_id == "generated-r04"
+        else r
+        for r in baseline_records()
+    )
+    retired = run(overturned, exposed_families=frozenset({"generated-r04"}))
+    assert retired["verdict"] == V.INVALID.value
+    assert "label_overturned_by_independent_record" in codes(retired)
+    assert retired["label_audit"]["label_quality_gate"]["overturned"] == 1
+    unresolved = tuple(
+        replace(
+            r,
+            adjudicator_id=None,
+            adjudicator_label_digest=None,
+            independent_source=None,
+            independent_label_digest=None,
+            unresolved=True,
+        )
+        if r.family_id in {"generated-r07", "generated-r08"}
+        else r
+        for r in baseline_records()
+    )
+    hidden = run(unresolved, exposed_families=frozenset({"generated-r07", "generated-r08"}))
+    assert hidden["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+    assert "unresolved_ambiguity" in codes(hidden)
+
+
+def test_caller_asserted_upstream_verification_cannot_lift_a_held_verdict() -> None:
+    small, sizes = real_sample_records(20, 20)
+    overrides = {
+        "population_kind": PopulationKind.REAL_SAMPLE,
+        "evidence_origin": "observed",
+        "sampling_design": SamplingDesign.STRATIFIED_RANDOM,
+        "sample_sizes": sizes,
+    }
+    held = {
+        "imprecise": run(
+            small,
+            prereg_overrides=overrides,
+            candidate_snapshot=OBSERVED_SNAPSHOT,
+            upstream_snapshot_verified=True,
+        ),
+        "no_snapshot": real(candidate_snapshot=None, upstream_snapshot_verified=True),
+        "unlogged": real(unlogged_disclosures=1, upstream_snapshot_verified=True),
+    }
+    for name, receipt in held.items():
+        assert receipt["verdict"] != V.EVALUATION_ALLOWED.value, name
+        assert receipt["claims"]["customer_accuracy_alert_permitted"] is False, name
+        assert receipt["claims"]["overall_accuracy_claim"] == "not_established", name
+        assert receipt["upstream"]["verification"] == "caller_asserted_by_consumer", name
+
+
+def test_receipt_labels_caller_asserted_fields_and_the_claims_resting_on_them() -> None:
+    provenance = run()["provenance"]
+    assert provenance == {
+        "exposed_families": "caller_asserted",
+        "unlogged_disclosures": "caller_asserted",
+        "exposure_log_covers_protected_families": True,
+        "exposure_history_nonempty": False,
+        "exposure_history_signed": False,
+        "excluded_reason": "caller_asserted",
+        "decided_day": "caller_asserted",
+        "upstream_snapshot_verified": "caller_asserted",
+        "evidence_origin": "caller_asserted",
+        "adjudicator_blinding_flags": "caller_asserted",
+        "adjudicator_distinct_from_first_labeler": "worker_compared_supplied_ids",
+    }
+    assert run()["claims"]["caller_asserted_dependencies"] == []
+    limited = real()["claims"]
+    assert limited["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+    assert limited["caller_asserted_dependencies"] == ["exposed_families", "unlogged_disclosures"]
+    alert = real(upstream_snapshot_verified=True)["claims"]
+    assert alert["customer_accuracy_alert_permitted"] is False
+    assert alert["caller_asserted_dependencies"] == ["exposed_families", "unlogged_disclosures"]
+
+
+# ---- Exposure histories are supplied and unsigned until OPE-566 ----
+
+REAL_UNIVERSE = frozenset(r.family_id for r in real_sample_records()[0] if r.split == "protected")
+
+
+def selector_query(query_id: str, cell: set[str], roles: frozenset[str] = SELECTOR) -> Any:
+    return QueryRequest(query_id, Surface.CHART, Channel.WORKER_UI, frozenset(cell), roles)
+
+
+def harmless_history() -> Any:
+    """A fresh guard over the real universe with one harmless selector release.
+
+    Anyone can build this. It shows nothing about the guard that served real traffic.
+    """
+    guard = ExposureGuard(REAL_UNIVERSE, frozenset())
+    assert guard.evaluate(selector_query("q", {"generated-sr000", "generated-sr001"})).allowed
+    return guard.record()
+
+
+def test_repro_fresh_guard_history_cannot_launder_a_guard_that_leaked() -> None:
+    served = ExposureGuard(REAL_UNIVERSE, frozenset())
+    assert served.evaluate(selector_query("s", {"generated-sr000", "generated-sr001"})).allowed
+    reader = frozenset({"reader"})
+    assert served.evaluate(selector_query("r", {"generated-sr000"}, reader)).allowed
+    assert real(exposure_record=served.record())["verdict"] == V.INVALID.value
+    fresh = real(exposure_record=harmless_history())
+    assert fresh["verdict"] == V.EVALUATION_ALLOWED.value  # the replayed history is harmless
+    assert fresh["provenance"]["exposed_families"] == "replayed_from_supplied_unsigned_history"
+    assert fresh["claims"]["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+    assert fresh["claims"]["caller_asserted_dependencies"] == [
+        "exposed_families",
+        "unlogged_disclosures",
+    ]
+    assert fresh["claims"]["customer_accuracy_alert_permitted"] is False
+    assert (
+        "exposure_not_derived_from_covering_history"
+        in (fresh["claims"]["customer_accuracy_alert_blocked_by"])
+    )
+
+
+def test_repro_releases_split_across_two_guards_are_never_worker_held() -> None:
+    p0, p1, p2 = "generated-sr000", "generated-sr001", "generated-sr002"
+    first = ExposureGuard(REAL_UNIVERSE, frozenset())
+    second = ExposureGuard(REAL_UNIVERSE, frozenset())
+    assert first.evaluate(selector_query("wide", {p0, p1, p2})).allowed
+    assert second.evaluate(selector_query("narrow", {p0, p1})).allowed
+    combined = ExposureRecord(REAL_UNIVERSE, first.record().releases + second.record().releases)
+    assert p2 in replay_exposure(combined)[0]  # together they isolate p2
+    for history in (first.record(), second.record()):
+        receipt = real(exposure_record=history)
+        assert receipt["contamination"]["exposed_families_retired"] == 0
+        assert receipt["claims"]["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+        assert "exposed_families" in receipt["claims"]["caller_asserted_dependencies"]
+        assert receipt["claims"]["customer_accuracy_alert_permitted"] is False
+
+
+def test_customer_accuracy_alert_requires_worker_held_evidence_not_caller_flags() -> None:
+    blocked = "customer_accuracy_alert_blocked_by"
+    every_blocker = [
+        "upstream_receipt_not_worker_verified",
+        "exposure_not_derived_from_covering_history",
+        "claim_rests_on_caller_assertions",
+    ]
+    no_history = real(upstream_snapshot_verified=True)["claims"]
+    assert no_history["customer_accuracy_alert_permitted"] is False
+    assert no_history[blocked] == every_blocker
+    supplied = real(upstream_snapshot_verified=True, exposure_record=harmless_history())
+    assert supplied["verdict"] == V.EVALUATION_ALLOWED.value
+    assert supplied["claims"]["customer_accuracy_alert_permitted"] is False
+    assert supplied["claims"][blocked] == every_blocker
+    assert supplied["claims"]["broad_improvement_alert_permitted"] is False
+    assert any("OPE-416" in text for text in supplied["next_evidence_request"])
+    generated = run()["claims"][blocked]
+    assert generated[:2] == ["overall_accuracy_not_eligible", "evidence_origin_not_observed"]
+
+
+def test_sealed_history_tampered_after_issue_is_invalid() -> None:
+    served = ExposureGuard(REAL_UNIVERSE, frozenset())
+    served.evaluate(selector_query("s", {"generated-sr000", "generated-sr001"}))
+    served.evaluate(selector_query("r", {"generated-sr000"}, frozenset({"reader"})))
+    history = served.record()
+    assert real(exposure_record=history)["verdict"] == V.INVALID.value
+    object.__setattr__(history, "releases", ())  # erase the leak from the frozen record
+    tampered = real(exposure_record=history)
+    assert tampered["verdict"] == V.INVALID.value
+    assert "exposure_history_tampered" in codes(tampered)
+    assert tampered["next_evidence_request"]
+    object.__setattr__(history, "content_digest", None)  # an unsealed record is not intact
+    assert "exposure_history_tampered" in codes(real(exposure_record=history))
+    clean = real(exposure_record=harmless_history())
+    assert "exposure_history_tampered" not in codes(clean)
+    assert served.record().intact() and not history.intact()
+
+
+def leaky_history() -> ExposureRecord:
+    """A sealed history: a harmless selector release, then a reader release that isolates."""
+    served = ExposureGuard(REAL_UNIVERSE, frozenset())
+    served.evaluate(selector_query("s", {"generated-sr000", "generated-sr001"}))
+    served.evaluate(selector_query("r", {"generated-sr000"}, frozenset({"reader"})))
+    history = served.record()
+    assert history.intact() and history.well_typed()
+    assert real(exposure_record=history)["verdict"] == V.INVALID.value
+    return history
+
+
+def _tamper_cell(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[1], "cell", h.releases[0].cell)  # hide the isolating cell
+
+
+def _tamper_role(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[0], "protected_role", not h.releases[0].protected_role)
+
+
+def _tamper_auth_sentinel(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[1], "authorized_by", "<NoneType:None>")
+
+
+def _tamper_auth_named(h: ExposureRecord) -> None:
+    object.__setattr__(h.releases[1], "authorized_by", "generated-owner")
+
+
+def _tamper_universe(h: ExposureRecord) -> None:
+    object.__setattr__(h, "universe", h.universe | {"generated-extra"})
+
+
+def _tamper_order(h: ExposureRecord) -> None:
+    object.__setattr__(h, "releases", h.releases[::-1])
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        _tamper_cell,
+        _tamper_role,
+        _tamper_auth_sentinel,
+        _tamper_auth_named,
+        _tamper_universe,
+        _tamper_order,
+    ],
+)
+def test_sealed_history_tampered_in_any_field_or_order_is_invalid(tamper: Any) -> None:
+    history = leaky_history()
+    tamper(history)
+    assert not history.intact()
+    receipt = real(exposure_record=history)
+    assert receipt["verdict"] == V.INVALID.value
+    assert "exposure_history_tampered" in codes(receipt)
+
+
+class _SubStr(str):
+    """A str subclass; exposure history strings must be exact str."""
+
+
+class _ConstantFace(str):
+    """A str subclass whose repr, str, equality and hash hide its value."""
+
+    def __repr__(self) -> str:
+        return "generated-constant"
+
+    def __str__(self) -> str:
+        return "generated-constant"
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return 0
+
+
+def test_digest_encoding_is_type_tagged_so_lookalike_values_differ() -> None:
+    lookalikes = [
+        (None, "<NoneType:None>"),
+        (frozenset({"generated-sr000"}), ("generated-sr000",)),
+        (frozenset({"generated-sr000"}), ["generated-sr000"]),
+        (True, 1),
+        ("1", 1),
+        (("generated-sr000",), ["generated-sr000"]),
+        (_SubStr("generated-sr000"), "generated-sr000"),
+        (_ConstantFace("generated-a"), _ConstantFace("generated-b")),
+        (0.5, 0.25),
+    ]
+    for a, b in lookalikes:
+        assert canonical_form(a) != canonical_form(b), (a, b)
+        first = (ReleaseEntry(frozenset({"generated-sr000"}), False, a),)  # type: ignore[arg-type]
+        second = (ReleaseEntry(frozenset({"generated-sr000"}), False, b),)  # type: ignore[arg-type]
+        assert exposure_record_digest(REAL_UNIVERSE, first) != exposure_record_digest(
+            REAL_UNIVERSE, second
+        )
+    entries = leaky_history().releases
+    assert exposure_record_digest(REAL_UNIVERSE, entries) != exposure_record_digest(
+        tuple(sorted(REAL_UNIVERSE)), entries
+    )
+
+
+def _mistyped(kind: str) -> ExposureRecord:
+    cell = frozenset({"generated-sr000", "generated-sr001"})
+    entry = ReleaseEntry(cell, True, None)
+    bad: dict[str, tuple[object, object]] = {
+        "tuple_universe": (tuple(sorted(REAL_UNIVERSE)), (entry,)),
+        "set_universe": (set(REAL_UNIVERSE), (entry,)),
+        "non_str_universe_member": (REAL_UNIVERSE | {7}, (entry,)),
+        "list_releases": (REAL_UNIVERSE, [entry]),
+        "non_entry_release": (REAL_UNIVERSE, ((cell, True, None),)),
+        "tuple_cell": (REAL_UNIVERSE, (ReleaseEntry(tuple(sorted(cell)), True, None),)),
+        "set_cell": (REAL_UNIVERSE, (ReleaseEntry(set(cell), True, None),)),
+        "str_subclass_cell_member": (
+            REAL_UNIVERSE,
+            (ReleaseEntry(frozenset({_SubStr("generated-sr000")}), True, None),),
+        ),
+        "int_role_flag": (REAL_UNIVERSE, (ReleaseEntry(cell, 1, None),)),
+        "str_subclass_authorizer": (
+            REAL_UNIVERSE,
+            (ReleaseEntry(cell, True, _SubStr("generated-owner")),),
+        ),
+    }
+    universe, releases = bad[kind]
+    # Digest computed over the mistyped content itself: only the type check can refuse it.
+    digest = exposure_record_digest(universe, releases)
+    return ExposureRecord(universe, releases, digest)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "tuple_universe",
+        "set_universe",
+        "non_str_universe_member",
+        "list_releases",
+        "non_entry_release",
+        "tuple_cell",
+        "set_cell",
+        "str_subclass_cell_member",
+        "int_role_flag",
+        "str_subclass_authorizer",
+    ],
+)
+def test_mistyped_history_is_refused_as_malformed_and_never_crashes(kind: str) -> None:
+    history = _mistyped(kind)
+    assert not history.well_typed()
+    receipt = real(exposure_record=history)
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"code": "exposure_history_malformed", "detail": "field without its exact type"} in (
+        receipt["reasons"]
+    )
+    assert receipt["next_evidence_request"]
+    assert receipt["contamination"]["exposed_families_retired"] == len(REAL_UNIVERSE)
+    assert receipt["provenance"]["exposure_log_covers_protected_families"] is False
+    assert receipt["claims"]["overall_accuracy_claim"] == "not_established"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "tuple_universe",
+        "set_universe",
+        "non_str_universe_member",
+        "list_releases",
+        "non_entry_release",
+    ],
+)
+def test_replay_refuses_a_record_whose_universe_or_releases_are_mistyped(kind: str) -> None:
+    with pytest.raises(ValueError):
+        replay_exposure(_mistyped(kind))
+
+
+class _BrokenRepr:
+    def __repr__(self) -> str:
+        raise RuntimeError("generated-broken-repr")
+
+
+def test_a_history_value_that_cannot_be_encoded_is_not_intact_and_does_not_crash() -> None:
+    cell = frozenset({"generated-sr000", "generated-sr001"})
+    history = ExposureRecord(
+        REAL_UNIVERSE,
+        (ReleaseEntry(cell, True, _BrokenRepr()),),  # type: ignore[arg-type]
+        "0" * 64,
+    )
+    assert not history.intact() and not history.well_typed()
+    receipt = real(exposure_record=history)
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"exposure_history_malformed", "exposure_history_tampered"} <= codes(receipt)
+
+
+def test_a_non_record_object_is_refused_as_malformed() -> None:
+    receipt = real(exposure_record=object())
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"exposure_history_malformed", "exposure_history_tampered"} <= codes(receipt)
+
+
+def test_releases_must_be_an_exact_tuple_to_seal_or_to_stay_intact() -> None:
+    entries = list(leaky_history().releases)
+    with pytest.raises(TypeError):
+        ExposureRecord.sealed(REAL_UNIVERSE, entries)  # type: ignore[arg-type]
+    # Entries are hashed whatever the container, so emptying a list changes the digest...
+    assert exposure_record_digest(REAL_UNIVERSE, entries) != exposure_record_digest(
+        REAL_UNIVERSE, []
+    )
+    forged = ExposureRecord(
+        REAL_UNIVERSE,
+        entries,  # type: ignore[arg-type]
+        exposure_record_digest(REAL_UNIVERSE, entries),
+    )
+    # ...and a list-held record is never intact, before or after it is emptied.
+    assert not forged.intact()
+    entries.clear()
+    assert not forged.intact()
+    receipt = real(exposure_record=forged)
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"exposure_history_tampered", "exposure_history_malformed"} <= codes(receipt)
+    swapped = leaky_history()
+    object.__setattr__(swapped, "releases", list(swapped.releases))
+    assert not swapped.intact()
+
+
+def test_history_coverage_and_emptiness_are_recorded_and_hold() -> None:
+    narrow = ExposureGuard(frozenset({"generated-sr000", "generated-sr001"}), frozenset())
+    narrow.evaluate(selector_query("q", {"generated-sr000", "generated-sr001"}))
+    narrowed = real(exposure_record=narrow.record())
+    assert narrowed["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+    assert narrowed["provenance"]["exposure_log_covers_protected_families"] is False
+    empty = real(exposure_record=ExposureGuard(REAL_UNIVERSE, frozenset()).record())
+    assert empty["provenance"]["exposure_history_nonempty"] is False
+    assert empty["claims"]["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+
+
+def stand_in_history_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test-local stand-in for the OPE-566 verifier; production inputs cannot reach it."""
+    monkeypatch.setattr(audit_module, "_exposure_history_verified_by_worker", lambda _r: True)
+
+
+def test_overall_claim_is_eligible_only_when_every_dependency_is_worker_derived(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stand_in_history_verifier(monkeypatch)
+    held = real(exposure_record=harmless_history())["claims"]
+    assert held["overall_accuracy_claim"] == "eligible_pending_upstream_receipt"
+    assert held["caller_asserted_dependencies"] == []
+    # Even a verified history must cover every family and be non-empty.
+    empty = real(exposure_record=ExposureGuard(REAL_UNIVERSE, frozenset()).record())["claims"]
+    assert empty["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+    narrow = ExposureGuard(frozenset({"generated-sr000", "generated-sr001"}), frozenset())
+    narrow.evaluate(selector_query("q", {"generated-sr000", "generated-sr001"}))
+    narrowed = real(exposure_record=narrow.record())["claims"]
+    assert (
+        "exposure_not_derived_from_covering_history"
+        in (narrowed["customer_accuracy_alert_blocked_by"])
+    )
+    records, _ = real_sample_records()
+    target = next(r for r in records if r.independent_source and r.stratum == "routine")
+    adjudicated = tuple(
+        replace(r, independent_source=None, independent_label_digest=None)
+        if r.family_id == target.family_id
+        else r
+        for r in records
+    )
+    blinded = real_changed(adjudicated, 0.02, exposure_record=harmless_history())["claims"]
+    assert blinded["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+    assert blinded["caller_asserted_dependencies"] == ["adjudicator_blinding_flags"]
+    unsampled = next(r for r in records if r.split == "protected" and not r.independent_source)
+    excluded = tuple(
+        replace(r, excluded_reason="generated-caller-exclusion")
+        if r.family_id == unsampled.family_id
+        else r
+        for r in records
+    )
+    caller_excluded = real_changed(excluded, 0.02, exposure_record=harmless_history())["claims"]
+    assert caller_excluded["caller_asserted_dependencies"] == ["excluded_reason"]
+    late = tuple(
+        replace(r, decided_day=250) if r.family_id == unsampled.family_id else r for r in records
+    )
+    caller_timed = real_changed(late, 0.02, exposure_record=harmless_history())["claims"]
+    assert caller_timed["overall_accuracy_claim"] == "claim_limited_caller_asserted"
+    assert caller_timed["caller_asserted_dependencies"] == ["decided_day"]
+
+
+def test_alert_gate_opens_only_with_stand_in_verifiers_and_a_covering_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate composition only. Neither a verifiable OPE-416 receipt nor a signed OPE-566 history
+    exists (held gaps); both stand-ins are test-local and unreachable from production inputs."""
+    stand_in_history_verifier(monkeypatch)
+    assert (
+        real(exposure_record=harmless_history())["claims"]["customer_accuracy_alert_permitted"]
+        is False
+    )  # the upstream receipt is still unverified
+    monkeypatch.setattr(audit_module, "_upstream_receipt_verified_by_worker", lambda _s: True)
+    allowed = real(exposure_record=harmless_history())["claims"]
+    assert allowed["customer_accuracy_alert_permitted"] is True
+    assert allowed["customer_accuracy_alert_blocked_by"] == []
+    assert allowed["caller_asserted_dependencies"] == ["evidence_origin"]
+    assert real()["claims"]["customer_accuracy_alert_permitted"] is False  # no history
+
+
+def test_caller_set_timing_cannot_launder_a_disputed_or_unresolved_family() -> None:
+    wrong = commit("generated-r04", "generated-wrong-action")
+    for day in (201, 290):  # after the cutoff; inside the cutoff but immature at as-of
+        overturned = tuple(
+            replace(r, final_label_digest=wrong, adjudicator_label_digest=wrong, decided_day=day)
+            if r.family_id == "generated-r04"
+            else r
+            for r in baseline_records()
+        )
+        cutoff = 200 if day == 201 else 400
+        receipt = run(overturned, prereg_overrides={"temporal_cutoff_day": cutoff})
+        assert receipt["verdict"] == V.INVALID.value, day
+        assert "label_overturned_by_independent_record" in codes(receipt)
+    unresolved = tuple(
+        replace(
+            r,
+            adjudicator_id=None,
+            adjudicator_label_digest=None,
+            independent_source=None,
+            independent_label_digest=None,
+            unresolved=True,
+            decided_day=201,
+        )
+        if r.family_id in {"generated-r07", "generated-r08"}
+        else r
+        for r in baseline_records()
+    )
+    held = run(unresolved)
+    assert "unresolved_ambiguity" in codes(held)
+    assert held["provenance"]["decided_day"] == "caller_asserted"
+
+
+# ---- Caller-set exclusions, identity types and malformed caller values ----
+
+
+def test_caller_set_exclusion_cannot_launder_a_disputed_or_unresolved_family() -> None:
+    wrong = commit("generated-r04", "generated-wrong-action")
+    overturned = tuple(
+        replace(
+            r,
+            final_label_digest=wrong,
+            adjudicator_label_digest=wrong,
+            excluded_reason="generated-caller-exclusion",
+        )
+        if r.family_id == "generated-r04"
+        else r
+        for r in baseline_records()
+    )
+    receipt = run(overturned)
+    assert receipt["verdict"] == V.INVALID.value
+    assert "label_overturned_by_independent_record" in codes(receipt)
+    unresolved = tuple(
+        replace(
+            r,
+            adjudicator_id=None,
+            adjudicator_label_digest=None,
+            independent_source=None,
+            independent_label_digest=None,
+            unresolved=True,
+            excluded_reason="generated-caller-exclusion",
+        )
+        if r.family_id in {"generated-r07", "generated-r08"}
+        else r
+        for r in baseline_records()
+    )
+    assert "unresolved_ambiguity" in codes(run(unresolved))
+    assert run(unresolved)["provenance"]["excluded_reason"] == "caller_asserted"
+
+
+class _LyingId(str):
+    """A str subclass that claims to differ from every other value."""
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    def __ne__(self, other: object) -> bool:
+        return True
+
+    __hash__ = str.__hash__
+
+
+def test_identity_fields_must_be_exact_str_so_a_subclass_cannot_fake_independence() -> None:
+    liar = run(adjudicator_only(adjudicator_id=_LyingId("generated-labeler-a")))
+    assert liar["denominator_flow"]["verified"] == 11
+    counts = liar["audit_selection"]["adjudicator_independence_recorded"]
+    assert counts["distinct_from_first_labeler"] == 11
+    # r01's only verifier would be an independent source given as a str subclass: not accepted.
+    records = tuple(
+        replace(
+            r,
+            independent_source=_LyingId("generated-source"),
+            adjudicator_saw_predictions=True,
+        )
+        if r.family_id == "generated-r01"
+        else r
+        for r in baseline_records()
+    )
+    assert run(records)["denominator_flow"]["verified"] == 11
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("unlogged_disclosures", -5),
+        ("unlogged_disclosures", True),
+        ("unlogged_disclosures", 1.0),
+        ("exposed_families", {"generated-r01"}),
+        ("exposed_families", frozenset({1})),
+    ],
+)
+def test_malformed_caller_exposure_values_are_invalid(field: str, value: object) -> None:
+    receipt = run(**{field: value})
+    assert receipt["verdict"] == V.INVALID.value
+    assert {"code": "caller_assertion_malformed", "detail": field} in receipt["reasons"]
+    assert receipt["next_evidence_request"]
+
+
+def test_max_unresolved_boundary_is_inclusive() -> None:
+    def unresolved(count: int) -> tuple[Any, ...]:
+        chosen = {f"generated-r0{i}" for i in range(1, count + 1)}
+        return tuple(
+            replace(
+                r,
+                adjudicator_id=None,
+                adjudicator_label_digest=None,
+                independent_source=None,
+                independent_label_digest=None,
+                unresolved=True,
+            )
+            if r.family_id in chosen
+            else r
+            for r in baseline_records()
+        )
+
+    at = run(unresolved(2), prereg_overrides={"max_unresolved": 2})
+    assert "unresolved_ambiguity" not in codes(at)
+    assert at["verdict"] == V.EVALUATION_ALLOWED.value
+    over = run(unresolved(3), prereg_overrides={"max_unresolved": 2})
+    assert "unresolved_ambiguity" in codes(over)
