@@ -37,7 +37,7 @@ READER_REVISIONS = {
     "csv": "opentour.reader.csv@1.0.0",
     "jsonl": "opentour.reader.jsonl@1.0.0",
     "docx": "opentour.reader.docx@1.0.1",
-    "xlsx": "opentour.reader.xlsx@1.0.1",
+    "xlsx": "opentour.reader.xlsx@1.0.2",
     "pdf": pdf.PDF_REVISION,
     "ocr-text": "opentour.reader.ocr-rendition@1.0.0",
     "native-markdown": "opentour.reader.text@1.0.0",
@@ -561,7 +561,13 @@ def read_xlsx(
                 if raw is None:
                     continue
                 if kind == "s":
-                    value = strings[int(raw)]
+                    index = int(raw)
+                    if not 0 <= index < len(strings):
+                        # A negative index would silently select the wrong string from the end.
+                        raise ReaderFailure(
+                            ExtractionState.CORRUPT, "malformed_content", NextActor.OWNER
+                        )
+                    value = strings[index]
                     spans.append(
                         Span(
                             locator,
