@@ -203,6 +203,7 @@ class VerifiedPartition:
     device: int
     inode: int
     mtime_ns: int
+    ctime_ns: int
 
 
 # ---- the source --------------------------------------------------------------------------
@@ -473,7 +474,14 @@ class ManifestSource:
             computed,
         )
         return VerifiedPartition(
-            ref, path, computed, size, info.st_dev, info.st_ino, info.st_mtime_ns
+            ref,
+            path,
+            computed,
+            size,
+            info.st_dev,
+            info.st_ino,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
         )
 
     # ---- partition rows -----------------------------------------------------------------
@@ -487,12 +495,21 @@ class ManifestSource:
             raise ExtractionError("parquet_reader_unavailable")
         handle, info = self._open(verified.path)
         with handle:
-            identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            # ctime as well as mtime: an in-place edit that restores the mtime cannot restore the
+            # ctime, so the file is failed here rather than surfacing only as a row mismatch.
+            identity = (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
             if identity != (
                 verified.device,
                 verified.inode,
                 verified.byte_size,
                 verified.mtime_ns,
+                verified.ctime_ns,
             ):
                 raise ExtractionError("partition_mutated")
             handle.seek(0)

@@ -20,7 +20,7 @@ each test fails on its own instead of the whole file failing to import.
 from __future__ import annotations
 
 import os
-from dataclasses import astuple
+from dataclasses import astuple, replace
 from pathlib import Path
 
 import pytest
@@ -430,3 +430,198 @@ def test_resuming_with_a_different_declared_case_field_is_refused(private: Path)
         )
     same = engine_for(private, source)
     assert same.start(RunLimits(page_size=2)) == run
+
+
+# ---- W9 a dispute survives quarantine and a successor (cross-session review H1) ------------
+
+
+def contradiction(feed_revision: int = 11) -> dict[str, object]:
+    """A change entry that contradicts decision 0 at the same revision."""
+    entry = change(feed_revision, 0, 1)
+    entry["row"] = {**entry["row"], "content_digest": digest_of("generated-contradiction")}
+    return entry
+
+
+def replace_with_identical_bytes(export: Export) -> None:
+    """What an rsync does: the same bytes under a new inode."""
+    target = export.root / "parts/generated-decisions-0.parquet"
+    (target.parent / "rsync.tmp").write_bytes(target.read_bytes())
+    os.replace(target.parent / "rsync.tmp", target)
+
+
+def control_reconciliation(private: Path, export: Export) -> tuple[object, bool]:
+    """The same export and change feed, read once on a fresh register with no quarantine."""
+    source = ManifestSource(export.root, "manifest.json", decoder=SentinelDecoder())
+    engine = BulkExtraction(
+        private / "state" / "control.sqlite3", source, Grants({RES_D, RES_O}), tenant=TENANT
+    )
+    run = engine.start(RunLimits(page_size=2))
+    engine.step(run)
+    engine.consume_changes(run, "decision")
+    return engine.reconcile_outcomes(run), engine.publish(run).published
+
+
+def finish_with_successor(engine: BulkExtraction, run: str) -> str:
+    successor = engine.successor(run)
+    engine.step(successor)
+    engine.consume_changes(successor, "decision")
+    return successor
+
+
+def decision_zero_state(engine: BulkExtraction, run: str) -> str:
+    family = family_id(TENANT, RES_D, "generated-decision-0")
+    return next(f["state"] for f in engine.families(run) if f["family_id"] == family)
+
+
+def test_a_dispute_recorded_before_quarantine_survives_the_successor(private: Path) -> None:
+    export = Export(private / "export")
+    engine, run, _ = manifest_engine(private, export)
+    engine.step(run, max_pages=1)  # decision 0 is staged, its partition still being read
+    export.append(contradiction())
+    engine.consume_changes(run, "decision")
+    assert decision_zero_state(engine, run) == "disputed"
+    replace_with_identical_bytes(export)
+    engine.step(run)  # partition_mutated: quarantined, but the dispute must not be erased
+    assert decision_zero_state(engine, run) == "disputed"
+    assert not engine.publish(run).published
+    successor = finish_with_successor(engine, run)
+    control, control_published = control_reconciliation(private, export)
+    result = engine.reconcile_outcomes(successor)
+    assert (result.decisions, result.verified, result.disputed) == (8, 3, 1)
+    assert result == control
+    assert decision_zero_state(engine, successor) == "disputed"
+    published = engine.publish(successor)
+    assert published.published == control_published
+    disputes = engine.semantic_manifest(successor)["disputes"]
+    assert [d[0] for d in disputes] == [family_id(TENANT, RES_D, "generated-decision-0")]
+
+
+def test_a_contradiction_received_while_quarantined_is_recorded_as_a_dispute(
+    private: Path,
+) -> None:
+    export = Export(private / "export")
+    engine, run, _ = manifest_engine(private, export)
+    engine.step(run, max_pages=1)
+    replace_with_identical_bytes(export)
+    engine.step(run)
+    state = {p["partition_id"]: p["state"] for p in engine.status(run)["partitions"]}
+    assert state["generated-decisions-0"] == "failed"
+    export.append(contradiction())
+    engine.consume_changes(run, "decision")  # arrives during the quarantine window
+    assert decision_zero_state(engine, run) == "disputed"
+    assert not engine.publish(run).published
+    successor = finish_with_successor(engine, run)
+    result = engine.reconcile_outcomes(successor)
+    assert (result.decisions, result.verified, result.disputed) == (8, 3, 1)
+    assert result == control_reconciliation(private, export)[0]
+    assert decision_zero_state(engine, successor) == "disputed"
+
+
+# ---- W10 un-normalized rows are counted, never dropped (review M1) --------------------------
+
+
+def test_rows_not_yet_normalized_are_counted_as_pending_with_their_reason(
+    private: Path,
+) -> None:
+    stuck = family_id(TENANT, RES_D, "generated-decision-3")
+
+    def flaky(event: bx.StagedEvent) -> str:
+        if event.family_id == stuck:
+            raise ExtractionError("normalizer_unavailable")
+        return event.payload_digest
+
+    engine = engine_for(private, GeneratedSource(history(8)), normalizer=flaky)
+    run = engine.start(RunLimits(max_page_retries=50))
+    engine.step(run)
+    result = engine.reconcile_outcomes(run)
+    assert result.decisions == 8  # not 7: the stuck decision is still an input decision
+    assert result.verified + result.pending + result.disputed == result.decisions
+    assert result.unnormalized_decisions >= 1 and result.held_decisions == 0
+    assert result.pending >= result.unnormalized_decisions
+
+
+# ---- W11 an in-place edit with the mtime restored fails the file (review L1) ---------------
+
+
+def test_an_edit_that_keeps_size_and_restores_mtime_fails_the_file_and_a_successor_recovers(
+    private: Path,
+) -> None:
+    export = Export(private / "export")
+    standard(export)
+    decoder = SentinelDecoder()
+    source = ManifestSource(export.root, "manifest.json", decoder=decoder)
+    engine = BulkExtraction(
+        private / "state" / "register.sqlite3", source, Grants({RES_D, RES_O}), tenant=TENANT
+    )
+    run = engine.start(RunLimits(page_size=1))
+    target = export.root / "parts/generated-decisions-0.parquet"
+    original = target.read_bytes()
+    info = target.stat()
+    good = decision(1).content_digest
+    bad = ("0" if good[0] != "0" else "1") + good[1:]
+    calls = {"n": 0}
+
+    def edit_then_restore() -> None:
+        calls["n"] += 1
+        if calls["n"] in (2, 3):  # edited for page 2, restored for page 3; mtime kept each time
+            target.write_bytes(
+                original.replace(good.encode(), bad.encode()) if calls["n"] == 2 else original
+            )
+            os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+    decoder.before_decode = edit_then_restore
+    engine.step(run)
+    part = {p["partition_id"]: p for p in engine.status(run)["partitions"]}["generated-decisions-0"]
+    assert (part["state"], part["reason"]) == ("failed", "partition_mutated")
+    assert engine.status(run)["quarantined_rows"] == 2
+    decoder.before_decode = None
+    successor = engine.successor(run)
+    engine.step(successor)
+    assert {p["state"] for p in engine.status(successor)["partitions"]} == {"complete"}
+    cited = engine.feature_citation(
+        successor, resource_id=RES_D, native_id="generated-decision-1", decision_time=10_000
+    )
+    assert (cited.status, cited.content_digest) == ("cited", good)
+    assert engine.publish(successor).published
+
+
+def test_a_row_digest_mismatch_quarantines_its_rows_and_a_successor_rereads_it(
+    private: Path,
+) -> None:
+    class OnceWrong(GeneratedSource):
+        """Delivers one altered row on the first read only, as a flaky transport might."""
+
+        def __init__(self) -> None:
+            super().__init__(history(8))
+            self.altered = False
+
+        def read_partition(self, partition_id: str, *, start: int, limit: int) -> bx.PartitionPage:
+            page = super().read_partition(partition_id, start=start, limit=limit)
+            if partition_id == "generated-decisions-0" and start == 0 and not self.altered:
+                self.altered = True
+                rows = (replace(page.rows[0], content_digest=digest_of("altered")),)
+                return bx.PartitionPage(
+                    page.partition_id,
+                    page.start,
+                    rows + page.rows[1:],
+                    page.mapping_revision,
+                    page.exhausted,
+                )
+            return page
+
+    engine = engine_for(private, OnceWrong())
+    run = engine.start()
+    engine.step(run)
+    part = {p["partition_id"]: p for p in engine.status(run)["partitions"]}["generated-decisions-0"]
+    assert (part["state"], part["reason"]) == ("mismatch", "digest_mismatch")
+    assert engine.status(run)["quarantined_rows"] == 4
+    assert (
+        engine.feature_citation(
+            run, resource_id=RES_D, native_id="generated-decision-0", decision_time=10_000
+        ).status
+        == "excluded_quarantined"
+    )
+    successor = engine.successor(run)
+    engine.step(successor)
+    assert {p["state"] for p in engine.status(successor)["partitions"]} == {"complete"}
+    assert engine.publish(successor).published

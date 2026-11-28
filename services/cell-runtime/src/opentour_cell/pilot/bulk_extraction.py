@@ -30,7 +30,14 @@ Failure isolation for files: when a partition's bytes change, vanish or are repl
 link while it is being read, it is marked `failed` with that reason, every row already staged
 from it is quarantined (never cited, joined, normalized or published), and every other
 partition keeps advancing; `step` returns normally. A failed partition refuses publication
-until a successor re-reads it from its first row.
+until a successor re-reads it from its first row. A partition whose rows do not reproduce the
+declared row digest or count (`mismatch`) has its rows quarantined and is re-read the same way.
+
+Disputes are evidence, kept apart from extraction state: a contradictory payload at the same
+revision is recorded in `disputes` whatever the row's state (quarantined included), quarantine
+never clears it, every successor inherits it together with the change-feed cursor that
+delivered it, and a re-read of the same revision is staged disputed. Nothing in this module
+resolves a dispute; there is no resolution path yet, so a dispute is permanent for the lineage.
 
 Source history: the store of record for what a manifest source has shown before, the
 first-seen file digest of every partition ID, the digest of every manifest revision and the
@@ -74,7 +81,8 @@ _ZERO = "0" * 64
 # A store is opened only when it carries exactly this format; older stores lack the work
 # partition columns and the frozen partitioning scheme, so they are refused, never re-read.
 # v3 is deliberately never issued: the format-refusal test uses it as an unknown format.
-CHECKPOINT_FORMAT = "opentour.ope519.checkpoint.v4"
+# v5 adds the `disputes` table; v4 stores (never on main) are refused like every older one.
+CHECKPOINT_FORMAT = "opentour.ope519.checkpoint.v5"
 WORK_PARTITION_SCHEME = "opentour.ope519.work-partition.sha256-lp.v1"
 DEFAULT_WORK_BUCKETS = 64
 MAX_WORK_BUCKETS = 65_536
@@ -381,6 +389,10 @@ class Reconciliation:
     non_authoritative_outcomes: int
     # Decisions whose bucket has a failed work unit: still counted (as pending), never joined.
     held_decisions: int = 0
+    # Decisions whose row is staged and sealed but not yet normalized: counted as pending.
+    unnormalized_decisions: int = 0
+    # Outcome rows not yet normalized: not joined, so neither matched nor unmatched yet.
+    unnormalized_outcomes: int = 0
 
 
 @dataclass(frozen=True)
@@ -469,6 +481,9 @@ _SCHEMA = (
         tenant TEXT NOT NULL, scope TEXT NOT NULL, feed_id TEXT NOT NULL, predecessor TEXT,
         state TEXT NOT NULL, lines INTEGER NOT NULL, chain TEXT NOT NULL,
         PRIMARY KEY(tenant, scope, feed_id))""",
+    """CREATE TABLE IF NOT EXISTS disputes (
+        run_id TEXT NOT NULL, family_id TEXT NOT NULL, revision INTEGER NOT NULL,
+        resource_id TEXT NOT NULL, PRIMARY KEY(run_id, family_id, revision))""",
     """CREATE TABLE IF NOT EXISTS renames (
         run_id TEXT NOT NULL, family_id TEXT NOT NULL, revision INTEGER NOT NULL,
         resource_id TEXT NOT NULL, PRIMARY KEY(run_id, family_id, revision))""",
@@ -1029,11 +1044,26 @@ class BulkExtraction:
                 " AND state='pending'",
                 (reason, run_id, partition_id),
             )
-            db.execute(
-                "UPDATE admissions SET state='quarantined' WHERE run_id=? AND partition_id=?"
-                " AND origin='snapshot'",
-                (run_id, partition_id),
-            )
+            self._quarantine_rows(db, run_id, partition_id)
+
+    @staticmethod
+    def _quarantine_rows(db: sqlite3.Connection, run_id: str, partition_id: str) -> None:
+        """Quarantine a partition's staged rows without ever losing a recorded dispute.
+
+        A dispute is evidence about the source, separate from extraction state: it lives in
+        `disputes`, is copied to every successor and outlives the row it was raised on, so a
+        re-read of the same row comes back disputed instead of clean.
+        """
+        db.execute(
+            "INSERT OR IGNORE INTO disputes SELECT run_id, family_id, revision, resource_id"
+            " FROM admissions WHERE run_id=? AND partition_id=? AND state='disputed'",
+            (run_id, partition_id),
+        )
+        db.execute(
+            "UPDATE admissions SET state='quarantined' WHERE run_id=? AND partition_id=?"
+            " AND origin='snapshot'",
+            (run_id, partition_id),
+        )
 
     def _record_failure(self, run_id: str, partition_id: str, limits: RunLimits) -> str:
         with self._txn() as db:
@@ -1158,6 +1188,10 @@ class BulkExtraction:
             " WHERE run_id=? AND partition_id=?",
             (cursor, count, digest, state, reason, run_id, part["partition_id"]),
         )
+        if state == "mismatch":
+            # The rows read do not reproduce the declared digest or count, so none of them is
+            # trusted: quarantined here, and a successor re-reads the file from its first row.
+            self._quarantine_rows(db, run_id, part["partition_id"])
         db.execute(
             "UPDATE runs SET rows_seen=?, input_bytes=?, pages=pages+1,"
             " duplicate_deliveries=duplicate_deliveries+? WHERE run_id=?",
@@ -1242,6 +1276,12 @@ class BulkExtraction:
         if existing is not None:
             if existing["payload_digest"] == digest:
                 return "duplicate"
+            # Recorded as a dispute whatever the row's extraction state, even quarantined, so
+            # neither quarantine nor a successor's re-read can lose it.
+            db.execute(
+                "INSERT OR IGNORE INTO disputes VALUES (?,?,?,?)",
+                (run_id, family, row.revision, resource),
+            )
             # A quarantined row stays quarantined: a later contradiction cannot revive it.
             db.execute(
                 "UPDATE admissions SET state='disputed' WHERE run_id=? AND family_id=?"
@@ -1264,7 +1304,10 @@ class BulkExtraction:
             "INSERT INTO admissions(run_id, family_id, revision, resource_id, partition_id, kind,"
             " native_id, path, content_digest, payload_digest, size_bytes, available_at,"
             " occurred_at, decision_key, authority, label, state, case_key, work_bucket, seq,"
-            " origin, normalized) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admitted',?,?,?,?,0)",
+            " origin, normalized) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+            # A revision already disputed (e.g. before a quarantine) is staged disputed again.
+            " CASE WHEN EXISTS (SELECT 1 FROM disputes d WHERE d.run_id=? AND d.family_id=?"
+            " AND d.revision=?) THEN 'disputed' ELSE 'admitted' END,?,?,?,?,0)",
             (
                 run_id,
                 family,
@@ -1282,6 +1325,9 @@ class BulkExtraction:
                 row.decision_key,
                 row.authority,
                 row.label,
+                run_id,
+                family,
+                row.revision,
                 row.case_key,
                 bucket,
                 seq,
@@ -1500,6 +1546,8 @@ class BulkExtraction:
         """Current state per evidence family, derived so arrival order cannot change it."""
         rows = self._all(
             "SELECT a.family_id, a.revision, a.state, a.payload_digest, a.kind,"
+            " EXISTS (SELECT 1 FROM disputes d WHERE d.run_id=a.run_id AND d.family_id="
+            "a.family_id AND d.revision=a.revision) AS contested,"
             " COALESCE((SELECT MAX(t.revision) FROM tombstones t WHERE t.run_id=a.run_id"
             " AND t.family_id=a.family_id), 0) AS tomb FROM admissions a WHERE a.run_id=? AND"
             " a.revision=(SELECT MAX(revision) FROM admissions b WHERE b.run_id=a.run_id"
@@ -1508,7 +1556,11 @@ class BulkExtraction:
         )
         out = []
         for r in rows:
-            state = "deleted" if r["tomb"] >= r["revision"] else r["state"]
+            state = (
+                "deleted"
+                if r["tomb"] >= r["revision"]
+                else ("disputed" if r["contested"] else r["state"])
+            )
             out.append(
                 {
                     "family_id": r["family_id"],
@@ -1544,6 +1596,12 @@ class BulkExtraction:
                 ]
                 for r in self._all(
                     "SELECT * FROM admissions WHERE run_id=? ORDER BY family_id, revision", run_id
+                )
+            ],
+            "disputes": [
+                [r["family_id"], r["revision"]]
+                for r in self._all(
+                    "SELECT * FROM disputes WHERE run_id=? ORDER BY family_id, revision", run_id
                 )
             ],
             "tombstones": [
@@ -1971,10 +2029,12 @@ class BulkExtraction:
             for p in parts:
                 if p["resource_id"] not in keep:
                     continue
-                state = "pending" if p["state"] in ("withdrawn", "failed") else p["state"]
+                state = (
+                    "pending" if p["state"] in ("withdrawn", "failed", "mismatch") else p["state"]
+                )
                 # A partition that failed its integrity checks is re-read from its first row:
                 # nothing staged from it before the failure is trusted or carried forward.
-                reread = p["reason"] in INTEGRITY_FAILURES
+                reread = p["reason"] in INTEGRITY_FAILURES or p["state"] == "mismatch"
                 db.execute(
                     "INSERT INTO partitions(run_id, partition_id, resource_id, feed,"
                     " declared_digest, declared_count, grant_revision, state, reason, cursor,"
@@ -1997,7 +2057,9 @@ class BulkExtraction:
                         p["file_sha256"],
                     ),
                 )
-            for table in ("admissions", "renames", "tombstones", "rejections"):
+            # Disputes go first and all of them: the feed cursor is inherited below, so the
+            # contradictions that feed delivered are never re-read and must be carried here.
+            for table in ("disputes", "admissions", "renames", "tombstones", "rejections"):
                 for r in db.execute(f"SELECT * FROM {table} WHERE run_id=?", (run_id,)).fetchall():
                     if r["resource_id"] not in keep:
                         continue
@@ -2104,9 +2166,11 @@ class BulkExtraction:
                     for r in group
                     if r["kind"] == "decision" and r["decision_key"]
                 }
-                part = Reconciliation(len(keys), 0, len(keys), 0, 0, 0, len(keys))
+                contested = {r["decision_key"] for r in group if r["state"] == "disputed"} & keys
+                waiting = len(keys - contested)
+                part = Reconciliation(len(keys), 0, waiting, len(contested), 0, 0, waiting)
             else:
-                part = self._join([r for r in group if r["normalized"]])
+                part = self._join(group)
             total = Reconciliation(
                 *(a + b for a, b in zip(asdict(total).values(), asdict(part).values(), strict=True))
             )
@@ -2114,29 +2178,35 @@ class BulkExtraction:
 
     @staticmethod
     def _join(rows: list[sqlite3.Row]) -> Reconciliation:
-        """One bucket's outcome join over its normalized decision and outcome rows."""
-        decisions = {
-            r["decision_key"] for r in rows if r["kind"] == "decision" and r["decision_key"]
-        }
+        """One bucket's outcome join: only normalized rows join; every decision is counted.
+
+        A decision whose row is not normalized yet stays an input decision and is pending
+        (`unnormalized_decisions`), never dropped from the totals; outcomes for it wait with it.
+        """
+        decided = [r for r in rows if r["kind"] == "decision" and r["decision_key"]]
+        decisions = {r["decision_key"] for r in decided}
+        waiting = decisions - {r["decision_key"] for r in decided if r["normalized"]}
         finals: dict[str, set[str]] = {}
         # A contradictory row never leaves the count: its decision stays an input decision and
         # is reported disputed, because nothing about it can be trusted as verified.
         contested = {r["decision_key"] for r in rows if r["state"] == "disputed"} & decisions
-        unmatched = non_authoritative = 0
+        unmatched = non_authoritative = unnormalized_outcomes = 0
         for r in rows:
             if r["kind"] != "outcome" or r["state"] == "disputed":
                 continue
-            if r["decision_key"] not in decisions:
+            if not r["normalized"]:
+                unnormalized_outcomes += 1
+            elif r["decision_key"] not in decisions:
                 unmatched += 1
+            elif r["decision_key"] in waiting:
+                continue  # its decision is not normalized yet: held with it, not joined
             elif r["authority"] != "independent" or not r["label"]:
                 non_authoritative += 1
             else:
                 finals.setdefault(r["decision_key"], set()).add(r["label"])
         conflicting = {key for key, labels in finals.items() if len(labels) > 1} | contested
         disputed = len(conflicting)
-        verified = sum(1 for key, labels in finals.items() if len(labels) == 1) - len(
-            {key for key, labels in finals.items() if len(labels) == 1} & contested
-        )
+        verified = len({key for key, labels in finals.items() if len(labels) == 1} - contested)
         return Reconciliation(
             len(decisions),
             verified,
@@ -2144,4 +2214,7 @@ class BulkExtraction:
             disputed,
             unmatched,
             non_authoritative,
+            0,
+            len(waiting - contested),
+            unnormalized_outcomes,
         )
