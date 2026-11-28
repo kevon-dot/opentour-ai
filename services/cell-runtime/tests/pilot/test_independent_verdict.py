@@ -1387,6 +1387,32 @@ def test_q1_expired_verdict_reevaluates_past_its_own_cohort_marker_only(tmp_path
     )
 
 
+def test_q1b_declared_basis_never_waives_the_fresh_cohort_gate(tmp_path):
+    """Review 577a774 F1: a reselected claim declared frozen_before_readout got verified_gain."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    first = run(tmp_path, s, ev=ev)
+    assert first.outcome == "verified_gain"
+    assert first.document["selection_basis_source"] == "caller_asserted"
+    for basis in ("frozen_before_readout", "after_protected_readout"):
+        doc = held(
+            run(
+                tmp_path,
+                s,
+                ev=ev,
+                result_revision=sha("reselected-" + basis),
+                selection_basis=basis,
+            ),
+            "inconclusive",
+            "fresh_confirmation_cohort_required",
+        )
+        assert doc["selection_basis"] == basis
+    # The claim's own key is still the one marker skipped, and a disjoint cohort still passes.
+    assert run(tmp_path, s, ev=ev).document == first.document
+    assert run(tmp_path, Scenario(CLEAN_WIN, prefix="new-"), ev=ev).outcome == "verified_gain"
+    assert "caller-asserted" in (iv.IndependentEvaluator._check_selection.__doc__ or "")
+
+
 def test_q2_newly_automated_without_an_error_ceiling_is_inconclusive_not_an_error(tmp_path):
     """Mutant: dropping the no-ceiling guard would multiply None and raise TypeError."""
     t = {k: v for k, v in terms_for().items() if k != "error_ceiling_bps"}

@@ -45,9 +45,10 @@ returns the stored original after re-checking it against the current claim; a ch
 a new key and a new verdict; a verdict past its ``not_after`` is archived and re-evaluated.
 Verified non-wins (no material gain, regression, inconclusive) are first-class outcomes.
 
-The fresh-cohort register is per custody directory: a candidate selected after a protected
-readout is held when its cases or families overlap any cohort a verdict in this directory
-scored. Another evaluator's custody directory does not share it.
+The fresh-cohort register is per custody directory: any new claim (whatever ``selection_basis``
+the producer declares, since that basis is caller-asserted) is held when its cases or families
+overlap any cohort a verdict in this directory scored. Another evaluator's custody directory
+does not share it.
 
 Evidence tier, stated precisely: every record is ``locally_keyed``. The evaluator commits its
 private predictions with an HMAC key held in its own custody directory, but that directory sits on
@@ -336,6 +337,8 @@ class ClaimedResult:
     policy_digest: str
     claimed_paired: Mapping[str, Mapping[str, int]]
     job_manifest_digest: str | None = None
+    # Caller-asserted: bound into the claim digest and recorded, but never trusted to waive the
+    # fresh-cohort gate (``IndependentEvaluator._check_selection``).
     selection_basis: str = "frozen_before_readout"
 
     def validate(self) -> None:
@@ -1461,14 +1464,15 @@ class IndependentEvaluator:
     def _check_selection(
         self, key: str, claim: ClaimedResult, population: SealedPopulation, reasons: _Reasons
     ) -> None:
-        """A post-readout selection needs cases and families no scored verdict here has seen.
+        """A new claim needs cases and families no scored verdict here has seen.
 
-        The one marker skipped is the one recorded under this claim's own verdict key: an expired
+        ``selection_basis`` is the producer's own, caller-asserted statement, so it never waives
+        this gate: whatever basis is declared, any claim other than the one under this verdict
+        key is held when its cases or families overlap a cohort this custody already scored (a
+        reselected candidate declared ``frozen_before_readout`` is held exactly like one declared
+        ``after_protected_readout``). The one marker skipped is the claim's own: an expired
         verdict being re-evaluated must not count its own earlier scoring as a prior readout.
-        Every other claim's cohort still refuses on any case or family overlap.
         """
-        if claim.selection_basis != "after_protected_readout":
-            return
         cases = {c.case_id for c in population.cases}
         families = {c.family_id for c in population.cases}
         for path in sorted((self._root / "cohorts").glob("*.json")):
@@ -1532,6 +1536,7 @@ class IndependentEvaluator:
             "claim_digest": claim.digest(),
             "policy_digest": policy.digest(),
             "selection_basis": claim.selection_basis,
+            "selection_basis_source": "caller_asserted",
             "job_manifest_digest": claim.job_manifest_digest,
             "outcome": outcome,
             "reasons": reasons.reasons(),
