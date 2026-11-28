@@ -19,6 +19,7 @@ from opentour_cell.pilot.incremental_recompute import (
     Family,
     FieldRef,
     LeaseLost,
+    Manifest,
     PublishConflict,
     RecomputeService,
     Registry,
@@ -587,3 +588,65 @@ def test_missing_published_state_row_forces_full_rebuild(svc: RecomputeService) 
     assert set(report.plan.dirty) == set(svc.registry.families)
     parity(svc)
     assert svc.run("w", now=1).plan.dirty == ()
+
+
+def lineage_fams(a_revision: str = "family-r1", child_parent: str = "A") -> list[Family]:
+    """A and B consume the same field, so moving a child between them leaves its inputs alone."""
+    return [
+        Family("A", TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,), revision=a_revision),
+        Family("B", TENANT, PURPOSE, DEVELOPMENT, (FREIGHT,)),
+        Family("A-child", TENANT, PURPOSE, DEVELOPMENT, (), parent_id=child_parent),
+        Family("A-grandchild", TENANT, PURPOSE, DEVELOPMENT, (), parent_id="A-child"),
+        Family("C", TENANT, PURPOSE, DEVELOPMENT, (DATE,)),
+    ]
+
+
+def restart_with(tmp_path: Path, revised: list[Family]) -> tuple[Manifest, ir.RunReport, int]:
+    path = str(tmp_path / "lineage.db")
+    first = RecomputeService(path, Registry(lineage_fams()))
+    boot = first.bootstrap(base_state())
+    jobs = first.job_count()
+    first.close()
+    restarted = RecomputeService(path, Registry(revised))
+    report = restarted.run("w", now=0)
+    parity(restarted)
+    assert restarted.job_count() == jobs + report.jobs_started
+    assert restarted.run("w", now=1).plan.dirty == ()
+    restarted.close()
+    return boot, report, jobs
+
+
+def test_cache_key_binds_the_ordered_ancestor_chain() -> None:
+    registry, state = Registry(lineage_fams()), base_state()
+    assert registry.lineage("A-grandchild") == [["A-child", "family-r1"], ["A", "family-r1"]]
+    assert registry.lineage("A") == []
+    for revised in (lineage_fams(a_revision="family-r2"), lineage_fams(child_parent="B")):
+        other = Registry(revised)
+        for family in ("A-child", "A-grandchild"):
+            before = ir.evaluate_family(registry, family, state)
+            after = ir.evaluate_family(other, family, state)
+            assert other.effective_consumes(family) == registry.effective_consumes(family)
+            assert before.status == after.status == BUILT
+            assert after.cache_key != before.cache_key
+
+
+def test_parent_revision_bump_with_unchanged_inputs_misses_the_cache(tmp_path: Path) -> None:
+    boot, report, _ = restart_with(tmp_path, lineage_fams(a_revision="family-r2"))
+    assert report.plan.mode == "bounded_full_rebuild"
+    results = report.manifest.results
+    for family in ("A", "A-child", "A-grandchild"):  # the grandchild proves the whole chain
+        assert results[family].status == BUILT
+        assert results[family].cache_key != boot.results[family].cache_key
+    for family in ("B", "C"):  # outside A's lineage: reused as cache hits
+        assert results[family].cache_key == boot.results[family].cache_key
+    assert report.jobs_started == 3 and report.cache_hits == 2
+
+
+def test_reparent_with_identical_inputs_misses_the_cache(tmp_path: Path) -> None:
+    boot, report, _ = restart_with(tmp_path, lineage_fams(child_parent="B"))
+    assert report.plan.mode == "bounded_full_rebuild"
+    results = report.manifest.results
+    for family in ("A-child", "A-grandchild"):
+        assert results[family].status == BUILT
+        assert results[family].cache_key != boot.results[family].cache_key
+    assert report.jobs_started == 2 and report.cache_hits == 3

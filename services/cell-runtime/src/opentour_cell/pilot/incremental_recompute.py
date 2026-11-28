@@ -13,6 +13,11 @@ once OPE-416 writes real manifests. Nothing here authorizes a fit: plans and man
 carry ``fit_authorized = False`` and rows are never exposed, only digests, so protected
 per-case answers cannot leak through a manifest.
 
+A synthetic child's artifact derives from its ancestors, so the cache key binds the full
+ancestor chain as ordered ``(ancestor_id, family_revision)`` pairs: a parent revision bump or a
+re-parent is a cache miss for every descendant even when the inherited inputs are unchanged.
+That changed the key shape, so ``TOOL_VERSION`` is v2.
+
 The cache key binds ``TOOL_VERSION``, ``VERIFIER_VERSION`` (the verifier/finality rule a
 built artifact was checked under) and ``ARTIFACT_SCHEMA_VERSION``. The same versions are in
 the stored registry fingerprint, so bumping any of them forces a bounded full rebuild with no
@@ -38,7 +43,7 @@ from typing import Any
 
 from opentour_cell.pilot.operating_point import canonical, digest
 
-TOOL_VERSION = "opentour.recompute.v1"
+TOOL_VERSION = "opentour.recompute.v2"  # v2: ancestor chain in the cache key
 MANIFEST_VERSION = "opentour.recompute.manifest.v1"
 VERIFIER_VERSION = "opentour.recompute.verifier-finality.v1"
 ARTIFACT_SCHEMA_VERSION = "opentour.recompute.family-artifact.v1"
@@ -229,6 +234,17 @@ class Registry:
             cursor = self.families[cursor].parent_id
         return chain
 
+    def lineage(self, family_id: str) -> list[list[str]]:
+        """Ordered ``[ancestor_id, family_revision]`` pairs, nearest parent first, self excluded."""
+        chain: list[list[str]] = []
+        seen = {family_id}
+        cursor = self.families[family_id].parent_id
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            chain.append([cursor, self.families[cursor].revision])
+            cursor = self.families[cursor].parent_id
+        return chain
+
     def effective_consumes(self, family_id: str) -> tuple[FieldRef, ...]:
         refs = {ref for anc in self.ancestry(family_id) for ref in self.families[anc].consumes}
         return tuple(sorted(refs))
@@ -292,7 +308,8 @@ def evaluate_family(registry: Registry, family_id: str, state: SourceState) -> F
         )
     key = digest({
         "tenant": fam.tenant, "purpose": fam.purpose, "epoch": epoch, "inputs": inputs,
-        "family": fam.family_id, "family_revision": fam.revision, "parent": fam.parent_id,
+        "family": fam.family_id, "family_revision": fam.revision,
+        "ancestors": registry.lineage(family_id),
         "split": fam.split, "tool": TOOL_VERSION, "verifier": VERIFIER_VERSION,
         "artifact_schema": ARTIFACT_SCHEMA_VERSION,
     })  # fmt: skip
