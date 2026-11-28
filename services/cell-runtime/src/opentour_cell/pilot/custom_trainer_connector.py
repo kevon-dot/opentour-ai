@@ -23,7 +23,10 @@ placeholders resolved server-side and never logged or placed in errors.
 Not proven: no real customer trainer, GPU, paid compute, provider or real credential is touched.
 Tests prove software behavior only and establish no provider or customer evidence. Passing here
 yields ``EvidenceTier.FIXTURE`` at most (see ``integration_tier``); real-trainer qualification and
-customer witnessing are unsatisfied external gates.
+customer witnessing are unsatisfied external gates. ``CUSTOMER_WITNESSED`` is unreachable from
+production code: ``classify_integration`` and ``integration_tier`` accept no witness verifier until
+the OPE-566 ``PilotVerifier`` lands and is wired as the only accepted verifier (OPE-582 keys
+pending), so a well-formed, bound customer witness classifies as ``SOFTWARE_QUALIFIED``.
 """
 
 from __future__ import annotations
@@ -34,12 +37,14 @@ import hmac
 import json
 import math
 import os
+import re
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot.connector_ext import EvidenceTier, FenceReceipt, Usage, UsageSource
@@ -212,20 +217,258 @@ def check_compatibility(
     return verdict("compatible")
 
 
-def integration_tier(
-    trainer_origin: str, qualification_ref: str | None, customer_witness_ref: str | None
-) -> EvidenceTier:
-    """Classify an integration. A generated or simulated trainer is FIXTURE whatever refs claim."""
-    generated = trainer_origin.startswith(("generated-", "simulated:")) or trainer_origin.endswith(
-        ".invalid"
+# ---- Integration evidence tier ----
+#
+# The tiers are FIXTURE < SOFTWARE_QUALIFIED < CUSTOMER_WITNESSED. A caller can claim anything, so
+# every step up fails closed:
+#
+# * The trainer identity must be an exact ``str``: a subclass could override ``casefold``,
+#   ``strip`` or ``__eq__`` and so choose its own key. It is NFKC-normalised and casefolded, and an
+#   identity carrying invisible, control or non-ASCII characters is refused outright (FIXTURE), so
+#   case, fullwidth, zero-width and homoglyph variants of a fixture marker cannot pass.
+# * Owner ruling (OPE-566): a name CONTAINING a generated, simulated, reference, fixture or sentinel
+#   token, or naming a ``.invalid`` host (with or without a trailing dot, port or path), is FIXTURE
+#   whatever is supplied. The tokens are matched as substrings of the normalised key, so
+#   ``GeneratedTrainer``, ``fixtures-trainer`` and ``references-acme`` are all FIXTURE. This rule
+#   can only lower a tier, never raise one; a real customer trainer whose name contains a token
+#   must be renamed.
+# * SOFTWARE_QUALIFIED needs a non-blank qualification reference (still caller-asserted).
+# * CUSTOMER_WITNESSED needs software qualification plus a structured ``CustomerWitness`` record
+#   (never a bare string) under purpose ``opentour.pilot.customer-witness.v1``, bound to the exact
+#   engagement, trainer id, job id, artifact revision and observed outcome under classification,
+#   naming the ``customer_owner`` role, and authenticated by the OPE-566 ``PilotVerifier`` only
+#   (owner ruling). Only a successfully completed job can be witnessed (OPE-566 decision): the
+#   observed outcome must be exactly ``JobState.COMPLETED``'s value, so a failed, cancelled or
+#   unknown job is refused with ``customer_witness_outcome_refused``.
+# * ``PilotVerifier`` has not landed and the OPE-582 issuer keys do not exist, so no verifier is
+#   accepted anywhere. Two independent lines hold that:
+#   1. The rules (``_classify_integration``) call a verifier only when
+#      ``type(verifier) is _ACCEPTED_VERIFIER_TYPE``, and that constant is ``None`` in production.
+#      Every verifier is therefore refused with ``customer_witness_unverifiable`` and never called,
+#      whatever path reaches the rules: an alias, ``functools.partial``, a ``globals()`` lookup or
+#      an import from another module. Tests that need the CUSTOMER_WITNESSED positive case
+#      monkeypatch the constant to their test double's class.
+#   2. The production entry points, ``classify_integration`` and ``integration_tier``, drop any
+#      verifier a caller passes and call the rules with ``verifier=None``.
+#   CUSTOMER_WITNESSED is therefore unreachable from production code.
+#
+# Wiring rule for when ``PilotVerifier`` lands: ``_ACCEPTED_VERIFIER_TYPE`` becomes
+# ``PilotVerifier`` (an exact type match: never a subclass, never any object that merely matches
+# the structural ``CustomerWitnessVerifier`` shape), the entry points forward the verifier, and the
+# ``WitnessSubject`` is derived at wiring time from the connector's journal state for the settled
+# job (engagement, trainer id, job id, collected artifact revision, terminal outcome), never from a
+# caller argument.
+
+CUSTOMER_WITNESS_PURPOSE = "opentour.pilot.customer-witness.v1"
+WITNESS_ROLE_CUSTOMER_OWNER = "customer_owner"
+_WITNESS_ROLES = frozenset({WITNESS_ROLE_CUSTOMER_OWNER})
+# Any one of these tokens anywhere in a normalised trainer identity marks a fixture trainer.
+_FIXTURE_TOKENS = frozenset({"generated", "simulated", "reference", "fixture", "sentinel"})
+# ``.invalid`` as a whole host label: followed by the end, a dot, a port, a path or anything that
+# cannot continue a label.
+_INVALID_HOST = re.compile(r"\.invalid(?![a-z0-9-])")
+# The only witnessable outcome: a successful terminal finish. Compared as an exact ``str``.
+_WITNESSABLE_OUTCOME: str = mc.JobState.COMPLETED.value
+# The one verifier class whose instances the rules may call. ``None``: no verifier is accepted
+# until the OPE-566 ``PilotVerifier`` lands, when this becomes that class.
+_ACCEPTED_VERIFIER_TYPE: type[object] | None = None
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Co", "Cs", "Cn", "Zl", "Zp"})
+
+
+@dataclass(frozen=True)
+class WitnessSubject:
+    """The exact integration a witness must be about.
+
+    Today the classifying caller supplies it, which is harmless only because no production path
+    can reach CUSTOMER_WITNESSED. Once ``PilotVerifier`` is wired the subject comes from the
+    connector's journal, never from the caller.
+    """
+
+    engagement: str
+    trainer_id: str
+    job_id: str
+    artifact_revision: str
+    observed_outcome: str
+
+
+@dataclass(frozen=True)
+class CustomerWitness:
+    """A structured ``opentour.pilot.customer-witness.v1`` record. Unverified data.
+
+    ``attestation`` is the opaque issuer evidence (signatures under the OPE-566 profile: the
+    customer's anchored key, co-signed by a permitted operator custodian key) that only
+    ``PilotVerifier`` may check. This module never interprets it.
+    """
+
+    engagement: str
+    trainer_id: str
+    job_id: str
+    artifact_revision: str
+    observed_outcome: str
+    witness_role: str
+    purpose: str
+    attestation: str
+
+
+_WITNESS_BOUND_FIELDS = (
+    "engagement",
+    "trainer_id",
+    "job_id",
+    "artifact_revision",
+    "observed_outcome",
+)
+
+
+class CustomerWitnessVerifier(Protocol):
+    """The call shape a witness verifier is invoked with. It is not an acceptance criterion.
+
+    Matching this shape grants nothing: the production entry points accept no verifier, and once
+    ``PilotVerifier`` lands they accept that concrete class only. The verifier must return exactly
+    ``True`` only when ``witness`` is authenticated by its issuers and is about ``subject``; any
+    other return value, and any exception, is a refusal.
+    """
+
+    def verify_customer_witness(
+        self, witness: CustomerWitness, subject: WitnessSubject
+    ) -> bool: ...
+
+
+@dataclass(frozen=True)
+class IntegrationVerdict:
+    tier: EvidenceTier
+    reason: str
+
+
+def _invisible(text: str) -> bool:
+    return any(unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in text)
+
+
+def _trainer_key(origin: object) -> str | None:
+    """NFKC, casefold and strip a trainer identity; ``None`` when it is not a clean identity.
+
+    Only an exact ``str`` is accepted: a subclass's overridden methods would otherwise run here.
+    """
+    if type(origin) is not str or _invisible(origin):
+        return None
+    key = unicodedata.normalize("NFKC", origin).casefold().strip()
+    if not key or _invisible(key) or not all(" " <= ch <= "~" for ch in key):
+        return None
+    return key
+
+
+def is_fixture_trainer(origin: object) -> bool:
+    """True for a name containing a fixture token, a ``.invalid`` host, or an unclean identity."""
+    key = _trainer_key(origin)
+    if key is None:
+        return True
+    return any(token in key for token in _FIXTURE_TOKENS) or _INVALID_HOST.search(key) is not None
+
+
+def _clean_text(value: object) -> bool:
+    """An exact, non-blank ``str`` with no invisible characters. Subclasses are refused."""
+    return type(value) is str and not _invisible(value) and bool(value.strip())
+
+
+def classify_integration(
+    trainer_origin: str,
+    qualification_ref: str | None,
+    customer_witness: CustomerWitness | None = None,
+    *,
+    subject: WitnessSubject | None = None,
+    witness_verifier: object = None,
+) -> IntegrationVerdict:
+    """Classify an integration with a fixed reason. Fails closed at every step up the ladder.
+
+    The production entry point. It accepts no witness verifier until the OPE-566 ``PilotVerifier``
+    lands: ``witness_verifier`` is never called (and ``_ACCEPTED_VERIFIER_TYPE`` is ``None``), so
+    the highest reachable tier is SOFTWARE_QUALIFIED, with ``customer_witness_unverifiable`` for a
+    well-formed, bound witness.
+    """
+    del witness_verifier  # refused uncalled: no verifier is accepted before PilotVerifier
+    return _classify_integration(
+        trainer_origin, qualification_ref, customer_witness, subject=subject, verifier=None
     )
-    if generated or not trainer_origin:
-        return EvidenceTier.FIXTURE
-    if customer_witness_ref:
-        return EvidenceTier.CUSTOMER_WITNESSED
-    if qualification_ref:
-        return EvidenceTier.SOFTWARE_QUALIFIED
-    return EvidenceTier.FIXTURE
+
+
+def _classify_integration(
+    trainer_origin: object,
+    qualification_ref: object,
+    customer_witness: object,
+    *,
+    subject: object,
+    verifier: object,
+) -> IntegrationVerdict:
+    """The classification rules. Private: production passes ``verifier=None`` only.
+
+    Whoever calls this, a verifier is called only when its exact type is
+    ``_ACCEPTED_VERIFIER_TYPE``, which is ``None`` in production. A record built without its
+    attributes (``object.__new__``) is malformed, never an ``AttributeError``.
+    """
+    if _trainer_key(trainer_origin) is None:
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "trainer_identity_unverifiable")
+    if is_fixture_trainer(trainer_origin):
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "fixture_trainer")
+    if not _clean_text(qualification_ref):
+        return IntegrationVerdict(EvidenceTier.FIXTURE, "software_qualification_absent")
+
+    def capped(reason: str) -> IntegrationVerdict:
+        return IntegrationVerdict(EvidenceTier.SOFTWARE_QUALIFIED, reason)
+
+    witness = customer_witness
+    if witness is None:
+        return capped("customer_witness_absent")
+    if type(witness) is not CustomerWitness:
+        return capped("customer_witness_unstructured")
+    witness_fields = (*_WITNESS_BOUND_FIELDS, "witness_role", "purpose", "attestation")
+    claimed = {name: getattr(witness, name, None) for name in witness_fields}
+    if not all(_clean_text(value) for value in claimed.values()):
+        return capped("customer_witness_malformed")
+    if claimed["purpose"] != CUSTOMER_WITNESS_PURPOSE:
+        return capped("customer_witness_purpose_refused")
+    if claimed["witness_role"] not in _WITNESS_ROLES:
+        return capped("customer_witness_role_refused")
+    if type(subject) is not WitnessSubject:
+        return capped("customer_witness_binding_mismatch")
+    about = {name: getattr(subject, name, None) for name in _WITNESS_BOUND_FIELDS}
+    if not all(_clean_text(value) for value in about.values()):
+        return capped("customer_witness_subject_malformed")
+    if (
+        claimed["observed_outcome"] != _WITNESSABLE_OUTCOME
+        or about["observed_outcome"] != _WITNESSABLE_OUTCOME
+    ):
+        return capped("customer_witness_outcome_refused")
+    if about["trainer_id"] != trainer_origin or any(
+        claimed[name] != about[name] for name in _WITNESS_BOUND_FIELDS
+    ):
+        return capped("customer_witness_binding_mismatch")
+    accepted = _ACCEPTED_VERIFIER_TYPE
+    if verifier is None or accepted is None or type(verifier) is not accepted:
+        return capped("customer_witness_unverifiable")
+    try:
+        verified = cast(CustomerWitnessVerifier, verifier).verify_customer_witness(witness, subject)
+    except Exception:  # any verifier failure is a refusal, never "skip and continue"
+        return capped("customer_witness_refused")
+    if verified is not True:
+        return capped("customer_witness_refused")
+    return IntegrationVerdict(EvidenceTier.CUSTOMER_WITNESSED, "customer_witness_verified")
+
+
+def integration_tier(
+    trainer_origin: str,
+    qualification_ref: str | None,
+    customer_witness: CustomerWitness | None = None,
+    *,
+    subject: WitnessSubject | None = None,
+    witness_verifier: object = None,
+) -> EvidenceTier:
+    """The tier alone; ``classify_integration`` gives the reason. Accepts no verifier either."""
+    return classify_integration(
+        trainer_origin,
+        qualification_ref,
+        customer_witness,
+        subject=subject,
+        witness_verifier=witness_verifier,
+    ).tier
 
 
 def sign_result(secret: str, result: TrainerResult | Mapping[str, str]) -> str:
