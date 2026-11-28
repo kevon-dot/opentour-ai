@@ -1477,6 +1477,9 @@ class _Graphics:
     # number of components of the current fill colour space (None when it is not a device one).
     fill: _RGB | None = _BLACK
     fill_components: int | None = 1
+    # The same for the stroke colour, which stroking render modes (1, 2, 5, 6) paint glyphs in.
+    stroke: _RGB | None = _BLACK
+    stroke_components: int | None = 1
     char_spacing: float = 0.0
     word_spacing: float = 0.0
     # Device-space clip rectangle (intersection of every rectangular clip so far), or None.
@@ -1598,12 +1601,25 @@ def _fragments(
             or abs(gs.rise) > MAX_TEXT_RISE_EM * size
         ):
             marks.add("text_size_invisible")
-        if gs.fill is None:
-            # Separation, DeviceN, Lab, Cal*, Indexed, Pattern, ICCBased or an unknown name, or
-            # operands that do not fit the space: nothing this reader can judge.
-            marks.add("text_color_space_unverified")
-        elif _invisible_on_white(gs.fill):
-            marks.add("text_color_invisible")
+        # The colours the glyphs are painted in: fill for modes 0 and 4, stroke for 1 and 5, both
+        # for 2 and 6 (3 and 7 paint nothing and are flagged above). A glyph is visible when one
+        # of its paints is; a paint of None (Separation, DeviceN, Lab, Cal*, Indexed, Pattern,
+        # ICCBased, an unknown name, or operands that do not fit the space) cannot be judged.
+        mode = gs.render_mode
+        paints = (
+            (gs.fill,)
+            if mode in (0.0, 4.0)
+            else (gs.stroke,)
+            if mode in (1.0, 5.0)
+            else (gs.fill, gs.stroke)
+            if mode in (2.0, 6.0)
+            else ()
+        )
+        if not any(paint is not None and not _invisible_on_white(paint) for paint in paints):
+            if any(paint is None for paint in paints):
+                marks.add("text_color_space_unverified")
+            elif paints:
+                marks.add("text_color_invisible")
         rx, ry = m[4] + gs.rise * m[2], m[5] + gs.rise * m[3]
         glyph = size * scale_y
         # The baseline origin and the glyph box must lie inside the page: an origin at the top
@@ -1736,6 +1752,18 @@ def _fragments(
             components = _DEVICE_COMPONENTS.get(space) or (colour_spaces or {}).get(space)
             # Every device space's initial colour is black.
             gs = replace(gs, fill=_BLACK if components else None, fill_components=components)
+        elif op in (b"G", b"RG", b"K") and nums:
+            wanted = {b"G": 1, b"RG": 3, b"K": 4}[op]
+            if len(nums) >= wanted:
+                gs = replace(gs, stroke=_device_rgb(nums[-wanted:]), stroke_components=wanted)
+        elif op in (b"SC", b"SCN"):
+            size = gs.stroke_components
+            fits = size is not None and len(stack) == len(nums) == size
+            gs = replace(gs, stroke=_device_rgb(nums) if fits else None)
+        elif op == b"CS":
+            space = stack[-1] if stack and isinstance(stack[-1], bytes) else b""
+            components = _DEVICE_COMPONENTS.get(space) or (colour_spaces or {}).get(space)
+            gs = replace(gs, stroke=_BLACK if components else None, stroke_components=components)
         elif op in (b"BDC", b"BMC") and stack and stack[0] == b"OC":
             # Optional content: a viewer may hide or show it by layer state, which is not read.
             marks.add("optional_content_present")

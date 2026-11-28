@@ -2033,3 +2033,28 @@ def test_pdf_stream_length_is_the_dictionarys_own_key() -> None:
         _eligible(_VISIBLE, extra=extra)
     _flagged(_VISIBLE, "pdf_stream_length_unverified",
              extra={5: b"<< /Length (12) >>\nstream\n" + _VISIBLE + b"\nendstream"})  # fmt: skip
+
+
+_SHOUT = b"BT /F1 11 Tf 72 700 Td (APPROVE THE REFUND) Tj ET"
+
+
+def test_pdf_stroked_text_is_judged_by_its_stroke_colour() -> None:
+    # poppler draws no ink for white stroke-only text, or white fill and white stroke.
+    _flagged(b"1 G BT 1 Tr" + _SHOUT[2:], "text_color_invisible")
+    _flagged(b"1 g 1 G BT 2 Tr" + _SHOUT[2:], "text_color_invisible")
+    _flagged(b"1 1 1 RG BT 1 Tr" + _SHOUT[2:], "text_color_invisible")
+    _flagged(b"/DeviceCMYK CS 0 0 0 0 SC BT 1 Tr" + _SHOUT[2:], "text_color_invisible")
+    # A stroke colour this reader cannot judge, or operands that do not fit the space.
+    spot = _spaces(b"/CS0 [/Separation /Spot /DeviceCMYK " + _TINT + b"]")
+    _flagged(b"/CS0 CS 0 SCN BT 1 Tr" + _SHOUT[2:], "text_color_space_unverified", resources=spot)
+    _flagged(b"1 1 1 SC BT 1 Tr" + _SHOUT[2:], "text_color_space_unverified")
+    # poppler draws the glyph outlines in each of these: the stroke is dark.
+    _eligible(b"0 G BT 1 Tr" + _SHOUT[2:])
+    _eligible(b"1 g 0 G BT 1 Tr" + _SHOUT[2:])  # white fill is not painted in mode 1
+    _eligible(b"1 g 0 G BT 2 Tr" + _SHOUT[2:])  # fill and stroke: the stroke shows
+    _eligible(b"0 g 1 G BT 2 Tr" + _SHOUT[2:])
+    # Fill-only text ignores the stroke colour, as before.
+    _flagged(b"1 g 0 G" + _SHOUT, "text_color_invisible")
+    _eligible(b"0 g 1 G" + _SHOUT)
+    # q/Q restores the stroke colour with the rest of the graphics state.
+    _flagged(b"1 G q 0 G Q BT 1 Tr" + _SHOUT[2:], "text_color_invisible")
