@@ -258,12 +258,16 @@ def _checked_arm_fields(
     check and then deliver something else. The other fields are plain values read once by the
     caller. Raises ``TypeError`` for a wrong type and ``ValueError`` for an empty ``case_id`` or
     an ``answer`` with no visible content, empty or blank (a genuine abstention is ``None``).
+
+    The case id, the answer and every citation must be exactly ``str``, never a subclass: a
+    subclass can override ``__eq__`` or ``__hash__`` so that a guess compares equal to the
+    protected answer, or an unapproved citation to an approved one, inside the scorer.
     """
-    if not isinstance(case_id, str):
+    if type(case_id) is not str:
         raise TypeError("ArmOutput.case_id must be a str")
     if not case_id:
         raise ValueError("ArmOutput.case_id must not be empty")
-    if answer is not None and not isinstance(answer, str):
+    if answer is not None and type(answer) is not str:
         raise TypeError("ArmOutput.answer must be a str or None")
     if answer is not None and not _carries_content(answer):
         raise ValueError("ArmOutput.answer carries no content; use None to abstain")
@@ -273,7 +277,7 @@ def _checked_arm_fields(
         cites = tuple(citations)
     except Exception:
         raise TypeError("ArmOutput.citations could not be read as a sequence") from None
-    if not all(isinstance(citation, str) for citation in cites):
+    if not all(type(citation) is str for citation in cites):
         raise TypeError("ArmOutput.citations must contain only str")
     if type(abstained) is not bool:
         raise TypeError("ArmOutput.abstained must be a bool")
@@ -302,6 +306,29 @@ class ArmOutput:
         object.__setattr__(self, "answer", answer)
         object.__setattr__(self, "citations", citations)
         object.__setattr__(self, "abstained", abstained)
+
+
+def _checked_outputs(raw: object) -> tuple[ArmOutput, ...]:
+    """What ``generate`` returned, accepted only as a tuple of exact ``ArmOutput`` instances whose
+    fields pass the boundary rule again, and returned as freshly built outputs.
+
+    An inference is not trusted to have built its outputs through ``ArmOutput``: a look-alike
+    object, an ``ArmOutput`` subclass, or an instance whose fields were swapped after its own
+    check (``object.__setattr__``) would otherwise reach the scorer unchecked.
+    """
+    if type(raw) is not tuple or not all(type(o) is ArmOutput for o in raw):
+        raise EveRefusal("output_shape_invalid")
+    checked = []
+    for o in raw:
+        if type(o.citations) is not tuple:  # ArmOutput always stores a tuple; this one was edited
+            raise EveRefusal("output_shape_invalid")
+        try:
+            checked.append(
+                ArmOutput(*_checked_arm_fields(o.case_id, o.answer, o.citations, o.abstained))
+            )
+        except (TypeError, ValueError):
+            raise EveRefusal("output_shape_invalid") from None
+    return tuple(checked)
 
 
 class GenerativeInference(Protocol):
@@ -1106,7 +1133,7 @@ class EveReplayWorker:
         check_egress(key, "request", [r.as_mapping() for r in requests])
 
         try:
-            outputs = inference.generate(arm, tuple(requests))
+            outputs = _checked_outputs(inference.generate(arm, tuple(requests)))
         except OSError:
             raise EveRefusal("inference_unavailable") from None
         requested = {r.case_id for r in requests}

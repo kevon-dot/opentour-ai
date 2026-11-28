@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1426,3 +1426,179 @@ def test_absent_abstain_and_wrong_are_three_different_things(env: Env, monkeypat
             f"wrong-{n}", lambda rows, p=placeholder: ({**rows[0], "answer": p}, *rows[1:])
         )
         assert wrong == (rp.Verdict.SERIOUS_ERROR, True)
+
+
+# --- PR #204 audit follow-up: str subclasses and the type of what ``generate`` returns. --------
+
+
+class EqualsEverything(str):
+    """Generated hostile sentinel: a ``str`` subclass that compares equal to any value."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+def _no_arm_journaled(env: Env, worker: rp.EveReplayWorker, arm: rp.ArmSpec) -> bool:
+    return worker.journal.arm(rp.run_id_for(env.manifest, arm)) is None
+
+
+class Returning(ScriptedInference):
+    """A non-candidate inference whose ``generate`` returns ``edit`` of the genuine outputs."""
+
+    def __init__(self, edit: Any) -> None:
+        super().__init__(BASE, BASELINE)
+        self.edit = edit
+
+    def generate(self, arm: rp.ArmSpec, requests: tuple[rp.ReplayRequest, ...]) -> Any:
+        return self.edit(super().generate(arm, requests))
+
+
+def _smuggled(out: rp.ArmOutput, **fields: Any) -> rp.ArmOutput:
+    """An ArmOutput whose fields were swapped after its own check ran, bypassing __post_init__."""
+    for name, value in fields.items():
+        object.__setattr__(out, name, value)
+    return out
+
+
+def test_str_subclass_answer_equal_to_everything_is_refused_not_scored_correct(
+    env: Env, monkeypatch
+) -> None:
+    guess = EqualsEverything("generated-guess-without-the-answer")
+    assert guess == answer(2)  # the hostile property the boundary must not let through
+    with pytest.raises(TypeError):
+        _arm_output(answer=guess)
+    # candidate connector row: refused at the boundary, nothing journaled
+    infer = _serve(
+        env, monkeypatch, lambda rows: (rows[0], {**rows[1], "answer": guess}, *rows[2:])
+    )
+    worker = env.worker()
+    arm = env.arm("candidate", infer.served_revision)
+    with refuses("output_shape_invalid"):
+        env.replay(arm, infer, worker=worker)
+    assert _no_arm_journaled(env, worker, arm)
+    # non-candidate arm: a smuggled answer is re-checked by replay_arm before the scorer sees it
+    worker = env.worker("smuggled-answer.jsonl")
+    hostile = Returning(lambda outs: (outs[0], _smuggled(outs[1], answer=guess), *outs[2:]))
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), hostile, worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+def test_str_subclass_citation_is_refused(env: Env, monkeypatch) -> None:
+    cite = EqualsEverything("generated-unapproved-passage")
+    with pytest.raises(TypeError):
+        _arm_output(citations=(cite,))
+    with pytest.raises(TypeError):
+        _arm_output(citations=["p1-a", cite])
+    infer = _serve(env, monkeypatch, lambda rows: ({**rows[0], "citations": [cite]}, *rows[1:]))
+    worker = env.worker()
+    arm = env.arm("candidate", infer.served_revision)
+    with refuses("output_shape_invalid"):
+        env.replay(arm, infer, worker=worker)
+    assert _no_arm_journaled(env, worker, arm)
+    worker = env.worker("smuggled-citation.jsonl")
+    hostile = Returning(lambda outs: (_smuggled(outs[0], citations=(cite,)), *outs[1:]))
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), hostile, worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+def test_str_subclass_case_id_is_refused(env: Env, monkeypatch) -> None:
+    with pytest.raises(TypeError):
+        _arm_output(case_id=EqualsEverything("generated-p1"))
+    infer = _serve(
+        env,
+        monkeypatch,
+        lambda rows: ({**rows[0], "case_id": EqualsEverything(rows[0]["case_id"])}, *rows[1:]),
+    )
+    worker = env.worker()
+    arm = env.arm("candidate", infer.served_revision)
+    with refuses("output_shape_invalid"):
+        env.replay(arm, infer, worker=worker)
+    assert _no_arm_journaled(env, worker, arm)
+    worker = env.worker("smuggled-case-id.jsonl")
+    hostile = Returning(
+        lambda outs: (_smuggled(outs[0], case_id=EqualsEverything(outs[0].case_id)), *outs[1:])
+    )
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), hostile, worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+@dataclass(frozen=True)
+class LookAlike:
+    """Generated sentinel with ArmOutput's fields but not its type or its checks."""
+
+    case_id: str
+    answer: Any
+    citations: Any
+    abstained: Any
+
+
+class ArmOutputSubclass(rp.ArmOutput):
+    pass
+
+
+def _lookalike(out: rp.ArmOutput) -> LookAlike:
+    return LookAlike(out.case_id, out.answer, out.citations, out.abstained)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda outs: list(outs), id="list-not-tuple"),
+        pytest.param(lambda outs: iter(outs), id="iterator"),
+        pytest.param(lambda outs: None, id="none"),
+        pytest.param(lambda outs: {o.case_id: o for o in outs}, id="mapping"),
+        pytest.param(lambda outs: (_lookalike(outs[0]), *outs[1:]), id="look-alike-object"),
+        pytest.param(
+            lambda outs: (
+                {
+                    "case_id": outs[0].case_id,
+                    "answer": outs[0].answer,
+                    "citations": list(outs[0].citations),
+                    "abstained": outs[0].abstained,
+                },
+                *outs[1:],
+            ),
+            id="row-mapping",
+        ),
+        pytest.param(
+            lambda outs: (
+                ArmOutputSubclass(
+                    outs[0].case_id, outs[0].answer, outs[0].citations, outs[0].abstained
+                ),
+                *outs[1:],
+            ),
+            id="arm-output-subclass",
+        ),
+        pytest.param(
+            lambda outs: (_smuggled(outs[0], citations=["p1-a"]), *outs[1:]),
+            id="smuggled-list-citations",
+        ),
+        pytest.param(
+            lambda outs: (_smuggled(outs[0], abstained=0), *outs[1:]),
+            id="smuggled-int-abstained",
+        ),
+    ],
+)
+def test_generate_returns_anything_but_a_tuple_of_checked_arm_outputs_is_refused(
+    env: Env, edit: Any
+) -> None:
+    worker = env.worker()
+    with refuses("output_shape_invalid"):
+        env.replay(env.arm("baseline"), Returning(edit), worker=worker)
+    assert _no_arm_journaled(env, worker, env.arm("baseline"))
+
+
+def test_generate_returning_genuine_arm_outputs_still_scores_normally(env: Env) -> None:
+    record = env.replay(env.arm("baseline"), Returning(lambda outs: outs))
+    assert record.rows[0].verdict is rp.Verdict.CORRECT_ANSWER
+    assert [r.verdict for r in record.rows] == [
+        r.verdict for r in env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE)).rows
+    ]
