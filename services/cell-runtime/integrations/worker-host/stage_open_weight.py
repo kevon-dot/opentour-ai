@@ -180,12 +180,12 @@ def verify_runtime(python, profile):
         raise Held("unqualified_numeric_runtime")
 
 
-def verify_model_tree(directory_fd, profile, owner_uid):
+def verify_model_tree(directory_fd, profile, owner_uid, directory_mode=DIRECTORY_MODE):
     """Exactly the pinned files, owned by the installer, read-only, with every digest."""
     info = os.fstat(directory_fd)
     if info.st_uid != owner_uid:
         raise Held("model_base_owner_mismatch")
-    if stat.S_IMODE(info.st_mode) != DIRECTORY_MODE:
+    if stat.S_IMODE(info.st_mode) != directory_mode:
         raise Held("model_base_mode_invalid")
     names = sorted(os.listdir(directory_fd))
     expected = sorted(profile["files"])
@@ -322,6 +322,20 @@ def _cleanup(areas, keep=None):
     return "complete" if complete else "incomplete"
 
 
+def _make_private(directory_fd, name):
+    """Best effort: set a directory about to move to another parent to 0700, through a fd."""
+    try:
+        fd = os.open(name, _DIR_FLAGS, dir_fd=directory_fd)
+    except OSError:
+        return  # a link or a non-directory moves as it is
+    try:
+        os.fchmod(fd, 0o700)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def hold(areas):
     """Move model-base to a fresh held name in the work area before any cleanup.
 
@@ -334,6 +348,7 @@ def hold(areas):
     if not present:
         return "absent", _cleanup(areas)
     held = _unique("held")
+    _make_private(areas.volume, MODEL_NAME)
     try:
         os.rename(MODEL_NAME, held, src_dir_fd=areas.volume, dst_dir_fd=areas.work)
         _sync(areas.volume, areas.work)
@@ -360,8 +375,15 @@ def _held(areas, reason):
 
 
 def _pinned_document(release, name, pins):
+    expected = PINS if pins is None else pins
+    if (
+        not isinstance(expected, dict)
+        or set(expected) != set(PINS)
+        or not all(isinstance(v, str) and _HEX.fullmatch(v) for v in expected.values())
+    ):
+        raise Held("invalid_pins")
     document = _release_document(release, name)
-    if hashlib.sha256(document).hexdigest() != (pins or PINS)[name]:
+    if hashlib.sha256(document).hexdigest() != expected[name]:
         raise Held("release_profile_unpinned")
     return document
 
@@ -383,8 +405,12 @@ def _verify_installed(areas, profile, expected_identity=None):
         raise Held("staged_model_file_required") from error
     try:
         info = os.fstat(model_fd)
-        if expected_identity is not None and (info.st_dev, info.st_ino) != expected_identity:
-            raise Held("model_base_replaced")
+        if expected_identity is not None:
+            if (info.st_dev, info.st_ino) != expected_identity:
+                raise Held("model_base_replaced")
+            # Just promoted at 0700: make it read-only through the same descriptor.
+            os.fchmod(model_fd, DIRECTORY_MODE)
+            os.fsync(model_fd)
         verify_model_tree(model_fd, profile, areas.owner_uid)
     finally:
         os.close(model_fd)
@@ -432,6 +458,8 @@ def _copy_verified(source_dir, areas, profile, staging):
                     dir_fd=staging_fd,
                 )
                 with os.fdopen(writer_fd, "wb") as writer:
+                    # An early stop only: verify_model_tree re-hashes the staged copy before
+                    # promotion and again after it, so this hash is deliberately redundant.
                     sha = hashlib.sha256()
                     while chunk := reader.read(1 << 20):
                         sha.update(chunk)
@@ -441,7 +469,8 @@ def _copy_verified(source_dir, areas, profile, staging):
                     os.fsync(writer_fd)
             if sha.hexdigest() != digest:
                 raise Held("staged_model_hash_mismatch")
-        os.fchmod(staging_fd, DIRECTORY_MODE)
+        # The directory stays 0700 until it is promoted: a non-root caller cannot move a
+        # directory it cannot write into another parent. It becomes 0555 after the rename.
         os.fsync(staging_fd)
         _sync(areas.work)
         info = os.fstat(staging_fd)
@@ -466,11 +495,12 @@ def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid
             areas.check()
             staging_fd, identity = _copy_verified(source_dir, areas, profile, staging)
             try:
-                verify_model_tree(staging_fd, profile, owner_uid)
+                verify_model_tree(staging_fd, profile, owner_uid, 0o700)
             finally:
                 os.close(staging_fd)
             areas.check()
             if _exists_at(areas.volume, MODEL_NAME):
+                _make_private(areas.volume, MODEL_NAME)
                 os.rename(MODEL_NAME, previous, src_dir_fd=areas.volume, dst_dir_fd=areas.work)
             areas.check()
             os.rename(staging, MODEL_NAME, src_dir_fd=areas.work, dst_dir_fd=areas.volume)
@@ -486,7 +516,8 @@ def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid
         areas.close()
 
 
-def main(argv=None, *, pins=None):
+def main(argv=None, *, pins=None, installer_uid=0):
+    """``pins`` and ``installer_uid`` exist for generated test fixtures; the CLI never sets them."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("verify", "stage"):
@@ -505,7 +536,7 @@ def main(argv=None, *, pins=None):
     if args.model_dir.name != MODEL_NAME:
         parser.error("the model directory must be the worker volume's model-base")
     try:
-        if os.geteuid() != 0:
+        if os.geteuid() != installer_uid:
             result = _result("unverified", "installer_root_required")
         elif args.command == "stage":
             result = stage(
@@ -515,10 +546,18 @@ def main(argv=None, *, pins=None):
                 args.model_dir,
                 args.wheel_dir,
                 args.python,
+                installer_uid,
                 pins=pins,
             )
         else:
-            result = verify(args.release, args.model_dir, args.wheel_dir, args.python, pins=pins)
+            result = verify(
+                args.release,
+                args.model_dir,
+                args.wheel_dir,
+                args.python,
+                installer_uid,
+                pins=pins,
+            )
     except OSError:
         # Never a traceback: report the safe outcome and leave the route to the worker's check.
         result = _result("unverified", "installer_io_error")

@@ -289,14 +289,20 @@ def verified(site, owner=OWNER):
 PINNED_HARNESS = (
     "import json, runpy, sys; "
     "ns = runpy.run_path(sys.argv[1], run_name='ope577_pinned_cli'); "
-    "raise SystemExit(ns['main'](sys.argv[3:], pins=json.loads(sys.argv[2])))"
+    "raise SystemExit(ns['main'](sys.argv[4:], pins=json.loads(sys.argv[2]), "
+    "installer_uid=int(sys.argv[3])))"
 )
 
 
-def pinned_cli(site, *argv):
-    """The isolated stdlib-only CLI, with the fixture's pins passed in-process (tests only)."""
+def pinned_cli(site, *argv, pins=True):
+    """The isolated stdlib-only CLI with the fixture's pins and this runner's uid (tests only).
+
+    The command line cannot set either value; tests pass them in-process so the CLI paths run
+    on non-root runners too. ``pins=False`` keeps the product pins.
+    """
     script = str(HOST / "stage_open_weight.py")
-    return [*ISOLATED, "-c", PINNED_HARNESS, script, json.dumps(site["pins"]), *argv]
+    chosen = json.dumps(site["pins"]) if pins else "null"
+    return [*ISOLATED, "-c", PINNED_HARNESS, script, chosen, str(OWNER), *argv]
 
 
 def cli_arguments(site):
@@ -361,7 +367,7 @@ def test_stage_accepts_a_correct_sentinel_set_and_promotes_read_only(site):
     rules_only_state_unchanged(site)
 
 
-def test_stage_cli_runs_isolated_as_root(site):
+def test_stage_cli_runs_isolated(site):
     arguments = cli_arguments(site)
     command = pinned_cli(site, "stage", *arguments, "--source", str(site["source"]))
     ready = subprocess.run(
@@ -372,11 +378,6 @@ def test_stage_cli_runs_isolated_as_root(site):
         check=False,
         env={},
     )
-    if OWNER != 0:
-        assert ready.returncode == 2
-        assert json.loads(ready.stdout)["reason"] == "installer_root_required"
-        assert not site["model"].exists()
-        return
     assert ready.returncode == 0, ready.stderr
     assert json.loads(ready.stdout)["route"] == "ready"
     tamper(site["model"] / "config.json")
@@ -431,7 +432,46 @@ def test_real_pins_refuse_a_self_consistent_release_with_other_digests(site, cap
     assert completed.returncode == 2 and completed.stderr == ""
     expected = "release_profile_unpinned" if OWNER == 0 else "installer_root_required"
     assert json.loads(completed.stdout)["reason"] == expected
+    # The same CLI code with the product pins, on any runner identity.
+    pinned = subprocess.run(
+        pinned_cli(
+            site,
+            "stage",
+            *cli_arguments(site),
+            "--source",
+            str(site["source"]),
+            "--revision",
+            REVISION,
+            pins=False,
+        ),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={},
+    )
+    assert pinned.returncode == 2 and pinned.stderr == ""
+    assert json.loads(pinned.stdout)["reason"] == "release_profile_unpinned"
     assert not site["model"].exists()
+
+
+@pytest.mark.parametrize(
+    "pins",
+    [
+        {},
+        {"training/profiles/smollm2_135m_lora_v1.json": "0" * 64},
+        {
+            "training/profiles/smollm2_135m_lora_v1.json": "0" * 64,
+            "training/profiles/smollm2_135m_lora_v1.requirements.txt": "not-a-digest",
+        },
+        ["not", "a", "mapping"],
+    ],
+)
+def test_partial_or_malformed_pins_refuse_cleanly(site, pins):
+    result = stage_module["verify"](
+        site["release"], site["model"], site["wheels"], str(site["python"]), OWNER, pins=pins
+    )
+    assert (result["route"], result["reason"]) == ("held", "invalid_pins")
 
 
 @pytest.mark.parametrize("command", ["stage", "verify"])
@@ -666,7 +706,7 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
     tamper(site["model"] / "config.json")
     if via == "module":
         result = verified(site)
-    elif OWNER == 0:
+    else:
         completed = subprocess.run(
             pinned_cli(site, "verify", *cli_arguments(site)),
             capture_output=True,
@@ -677,8 +717,6 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
         )
         assert completed.returncode == 2 and completed.stderr == ""
         result = json.loads(completed.stdout)
-    else:
-        pytest.skip("the CLI acts only as root; the module case covers non-root runners")
     assert (result["route"], result["reason"]) == ("held", "staged_model_hash_mismatch")
     assert (result["model_base"], result["cleanup"]) == ("moved_to_held", "incomplete")
     assert not site["model"].exists()
@@ -689,7 +727,7 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
 
 
 def run_main(capsys, site, *argv):
-    code = stage_module["main"](list(argv), pins=site["pins"])
+    code = stage_module["main"](list(argv), pins=site["pins"], installer_uid=OWNER)
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -709,11 +747,9 @@ def test_a_failed_held_rename_reports_move_failed_and_leaves_the_base(
     monkeypatch.setattr(os, "rename", refusing_rename)
     if via == "module":
         result = verified(site)
-    elif OWNER == 0:
+    else:
         code, result = run_main(capsys, site, "verify", *cli_arguments(site))
         assert code == 2
-    else:
-        pytest.skip("the CLI acts only as root; the module case covers non-root runners")
     assert (result["route"], result["reason"]) == ("held", "staged_model_hash_mismatch")
     assert (result["model_base"], result["cleanup"]) == ("move_failed", "not_run")
     assert site["model"].is_dir() and copies(site["work"], "held") == []
@@ -734,20 +770,19 @@ def test_an_io_error_while_hashing_the_base_holds_instead_of_raising(site, monke
     result = verified(site)
     assert (result["route"], result["reason"]) == ("held", "verification_io_error")
     assert result["model_base"] == "moved_to_held" and not site["model"].exists()
-    if OWNER == 0:  # the CLI reports the same held result, without a traceback
-        monkeypatch.setattr(hashlib, "file_digest", real_digest)
-        assert staged(site)["route"] == "ready"
-        monkeypatch.setattr(hashlib, "file_digest", failing_digest)
-        code, cli_result = run_main(capsys, site, "verify", *cli_arguments(site))
-        assert code == 2
-        assert (cli_result["route"], cli_result["reason"]) == ("held", "verification_io_error")
+    # The CLI reports the same held result, without a traceback.
+    monkeypatch.setattr(hashlib, "file_digest", real_digest)
+    assert staged(site)["route"] == "ready"
+    monkeypatch.setattr(hashlib, "file_digest", failing_digest)
+    code, cli_result = run_main(capsys, site, "verify", *cli_arguments(site))
+    assert code == 2
+    assert (cli_result["route"], cli_result["reason"]) == ("held", "verification_io_error")
 
 
 def test_an_io_error_escaping_a_command_is_reported_as_unverified(site, monkeypatch, capsys):
     def escaping(*args, **kwargs):
         raise OSError(5, "generated failure outside the verify handlers")
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setitem(stage_module, "verify", escaping)
     code, result = run_main(capsys, site, "verify", *cli_arguments(site))
     assert code == 2
@@ -820,7 +855,9 @@ def test_verify_refuses_a_base_not_owned_by_the_installer_or_with_wrong_modes(si
 def test_verify_holds_a_linked_base_without_following_it(site):
     assert staged(site)["route"] == "ready"
     outside = site["volume"].parent / "outside-base"
+    site["model"].chmod(0o700)  # a non-root mover needs write access to rewrite ".."
     os.rename(site["model"], outside)
+    outside.chmod(0o555)
     site["model"].symlink_to(outside)
     assert verified(site)["reason"] == "staged_model_file_required"
     assert not site["model"].is_symlink() and one_held(site).is_symlink()
