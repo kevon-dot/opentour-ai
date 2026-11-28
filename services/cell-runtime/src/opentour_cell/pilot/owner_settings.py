@@ -95,7 +95,13 @@ def _publish_worker(path: Path, value: Json) -> None:
 
 class OwnerSettings:
     def __init__(
-        self, directory: Path, organization: str, engagement: str, *, authority_file: Path
+        self,
+        directory: Path,
+        organization: str,
+        engagement: str,
+        *,
+        authority_file: Path,
+        _initialize: bool = True,
     ):
         self.directory = directory
         self.organization, self.engagement = organization, engagement
@@ -105,6 +111,14 @@ class OwnerSettings:
             directory / "training.sqlite3", organization, existing_only=True
         )
         self.ledger = LearningMandates(directory, organization, engagement)
+        if not _initialize:
+            with self.ledger._db(write=False) as db:
+                tables = db.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('owner_settings_heads', 'owner_settings_revisions')"
+                ).fetchone()[0]
+                _need(tables == 2, "settings_storage_uninitialized")
+            return
         # This adds metadata to the existing ledger; it never creates another budget store.
         with self.ledger._db() as db:
             db.execute(
@@ -116,6 +130,15 @@ class OwnerSettings:
                 "(scope TEXT, revision TEXT, packet TEXT, receipt TEXT, "
                 "PRIMARY KEY(scope,revision))"
             )
+
+    @classmethod
+    def open_readback(
+        cls, directory: Path, organization: str, engagement: str, *, authority_file: Path
+    ) -> OwnerSettings:
+        """Open a provisioned settings store without creating or migrating any tables."""
+        return cls(
+            directory, organization, engagement, authority_file=authority_file, _initialize=False
+        )
 
     @contextmanager
     def _approval_serialized(self) -> Iterator[None]:
@@ -627,7 +650,15 @@ class OwnerSettings:
                     "settings_revision_conflict",
                 )
             if prior is not None:
-                self.ledger._mandate(db, prior)
+                prior_row, _ = self.ledger._mandate(db, prior)
+                if action == "pause":
+                    # Pause uses the same denial marker as a mandate withdrawal. An active
+                    # settings head whose mandate was already withdrawn cannot become paused.
+                    assert head is not None
+                    _need(
+                        prior_row["withdrawn"] is None or head["state"] == "pause",
+                        "settings_mandate_already_withdrawn",
+                    )
                 db.execute(
                     "UPDATE mandates SET withdrawn=coalesce(withdrawn,?) WHERE scope=? AND id=?",
                     (int(time.time()), self.ledger.scope, prior),
@@ -786,7 +817,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         _need(args.workflow is None or args.command == "status", "unexpected_workflow_selection")
-        service = OwnerSettings(
+        open_service = OwnerSettings.open_readback if args.workflow is not None else OwnerSettings
+        service = open_service(
             args.directory, args.organization, args.engagement, authority_file=args.authority
         )
         value = _read(args.input) if args.input else None

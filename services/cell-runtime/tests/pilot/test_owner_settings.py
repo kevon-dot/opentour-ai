@@ -209,6 +209,48 @@ def test_scoped_setup_status_is_read_only_and_rechecks_roles_after_restart(tmp_p
     assert not list(c.owner.glob("settings-cycle-*.json"))
 
 
+def test_readback_open_cannot_initialize_settings_tables(tmp_path):
+    s = Setup(tmp_path)
+    c = s.customer
+    with c.ledger._db() as db:
+        db.execute("DROP TABLE owner_settings_heads")
+        db.execute("DROP TABLE owner_settings_revisions")
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_storage_uninitialized"):
+        settings.OwnerSettings.open_readback(c.owner, c.org, c.eng, authority_file=s.authority)
+    with c.ledger._db(write=False) as db:
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name LIKE 'owner_settings_%'"
+        ).fetchone()
+    assert s.protocol() == before
+
+
+def test_independent_withdrawal_cannot_be_relabelled_by_a_pending_pause(tmp_path):
+    s = Setup(tmp_path)
+    receipt = s.apply()
+    pause = s.sign(s.preview(action="pause")["claim"])
+    s.customer.ledger.withdraw(receipt["mandate_id"], actor=s.owner)
+    before = s.protocol()
+    with pytest.raises(settings.SettingsError, match="settings_mandate_already_withdrawn"):
+        s.service.save(pause, actor=s.owner)
+    workflow = s.policy["mandate"]["workflow"]
+    status = s.service.setup_readback(actor=s.reviewer, workflow=workflow)
+    assert status["state"] == "revoked" and status["revision"] == receipt["revision"]
+    assert s.protocol() == before
+
+
+def test_only_a_new_signed_revoke_changes_a_saved_pause_to_revoked(tmp_path):
+    s = Setup(tmp_path)
+    s.apply()
+    paused = s.apply(action="pause")
+    s.customer.ledger.withdraw(paused["mandate_id"], actor=s.owner)
+    workflow = s.policy["mandate"]["workflow"]
+    assert s.service.setup_readback(actor=s.reviewer, workflow=workflow)["state"] == "paused"
+    revoked = s.apply(action="revoke")
+    status = s.service.setup_readback(actor=s.reviewer, workflow=workflow)
+    assert status["state"] == "revoked" and status["revision"] == revoked["revision"]
+
+
 def test_preview_and_signed_save_refuse_outdated_and_cross_workflow_claims_without_io(tmp_path):
     s = Setup(tmp_path)
     first = s.apply()
