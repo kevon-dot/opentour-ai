@@ -3,27 +3,34 @@
 Fixture kind for every test: generated. Every secret is a sentinel generated at test time and
 every value-like string is assembled at runtime; no real key, provider or account is used. The
 standing mandate is a real ``LearningMandates`` ledger in a temporary directory. Because its
-schema forces ``max_cost_cents == 0``, paid-dispatch paths use ``ProviderCapTestSeam``, which is
-refused outside tests. These tests prove local software behavior only (EvidenceTier.FIXTURE).
+schema forces ``max_cost_cents == 0``, paid-dispatch paths use ``ProviderCapTestSeam`` from the
+tests-only ``provider_credential_seams`` module, registered into the source registry that is
+empty in the source tree. These tests prove local software behavior only (EvidenceTier.FIXTURE).
 
 Item 1  least-privilege reference record and value refusal ........ C1-C8
 Item 2  value only at the locator; resolver; leak scan ............ R1-R7, L1-L3
 Item 3  rotation drill with fresh-subprocess refusal of the old .... T1-T4
 Item 4  durable append-only revocation; withdrawal; outcomes ...... V1-V7
-Item 5  verified mandate owner, payer and cap before dispatch ..... D1-D8
-Scope   test seams, evidence tier and the not-proven document ..... S1-S2, E1
+Item 5  verified mandate owner, payer and cap before dispatch ..... D1-D9
+Store   pinned mandate store identity (copy, recreate, replace) ... P1-P4
+Scope   source registry, clock, evidence tier and the document .... S1-S3, E1
 """
 
 from __future__ import annotations
 
+import ast
 import base64
 import gc
 import hashlib
+import inspect
 import json
 import logging
 import os
 import pickle
+import re
 import secrets
+import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -33,6 +40,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import provider_credential_seams as seams
 import pytest
 from opentour_cell.pilot import learning_mandate as lm
 from opentour_cell.pilot import open_weight
@@ -41,7 +49,13 @@ from opentour_cell.pilot.connector_ext import EvidenceTier
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.training import LocalTrainingStore
 
-pc.enable_test_seams()
+seams.register()
+
+
+@pytest.fixture(autouse=True)
+def _restore_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pc, "_wall_clock", pc._wall_clock)
+
 
 SRC = Path(pc.__file__).resolve().parents[2]
 TEST_FILE = __file__
@@ -115,10 +129,10 @@ class MandateEnv:
             "max_seconds": seconds,
         }
 
-    def args(self) -> list[str]:
+    def args(self, directory: Path | None = None) -> list[str]:
         return [
             "--mandates",
-            str(self.directory),
+            str(directory or self.directory),
             "--organization",
             ORG,
             "--engagement",
@@ -171,7 +185,7 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> MandateEnv:
 
 
 def seam(env: MandateEnv, cap: int = 5_000, consumed: int = 1_000, **kw: Any) -> Any:
-    return pc.ProviderCapTestSeam(
+    return seams.ProviderCapTestSeam(
         env.mandates,
         cap_minor_units=cap,
         provider=PROVIDER,
@@ -234,10 +248,25 @@ def request(env: MandateEnv, job: str = "job-0001", **changes: Any) -> pc.Dispat
     return pc.DispatchRequest(**fields)
 
 
-def active_ledger(
-    ledger_dir: Path, store: Path, value: str, clock: Clock | None = None
+def ledger_at(
+    directory: Path, clock: Clock | None = None, env: MandateEnv | None = None
 ) -> pc.CredentialLedger:
-    ledger = pc.CredentialLedger(ledger_dir, test_clock=clock or Clock())
+    if clock is not None:
+        seams.use_clock(clock)
+    ledger = pc.CredentialLedger(directory)
+    if env is not None:
+        ledger.bind_mandate_store(env.mandates)
+    return ledger
+
+
+def active_ledger(
+    ledger_dir: Path,
+    store: Path,
+    value: str,
+    clock: Clock | None = None,
+    env: MandateEnv | None = None,
+) -> pc.CredentialLedger:
+    ledger = ledger_at(ledger_dir, clock, env)
     ledger.issue(reference(put_secret(store, "acct-0001.secret", value)))
     ledger.activate("pcref-0001")
     return ledger
@@ -246,7 +275,7 @@ def active_ledger(
 def authorized(
     ledger_dir: Path, store: Path, env: MandateEnv, value: str
 ) -> tuple[pc.CredentialLedger, Any, pc.DispatchAuthorization, pc.CredentialResolver]:
-    ledger = active_ledger(ledger_dir, store, value)
+    ledger = active_ledger(ledger_dir, store, value, env=env)
     source = seam(env, cap=50_000)
     auth = ledger.authorize_dispatch(request(env), mandates=source, actor=WORKER)
     resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=source)
@@ -609,7 +638,7 @@ def test_r5_only_an_active_reference_inside_its_window_resolves(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
     clock = Clock()
-    ledger = pc.CredentialLedger(ledger_dir, test_clock=clock)
+    ledger = ledger_at(ledger_dir, clock, env)
     source = seam(env)
     resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=source)
     ledger.issue(reference(put_secret(store, "acct-0001.secret", sentinel())))
@@ -631,7 +660,7 @@ def test_r5_only_an_active_reference_inside_its_window_resolves(
 def test_r6_store_key_locators_need_a_secret_store_resolver(
     ledger_dir: Path, env: MandateEnv
 ) -> None:
-    ledger = pc.CredentialLedger(ledger_dir, test_clock=Clock())
+    ledger = ledger_at(ledger_dir, env=env)
     ledger.issue(
         reference("customer-store/fine-tuning/acct-0001", locator_kind=pc.LocatorKind.STORE_KEY)
     )
@@ -797,7 +826,7 @@ def scan_for_leaks(
 
 
 def _probe(
-    ledger_dir: Path, env: MandateEnv, authorization: str, job: str
+    ledger_dir: Path, env: MandateEnv, authorization: str, job: str, mandates: Path | None = None
 ) -> tuple[int, dict[str, Any], str]:
     completed = subprocess.run(
         [
@@ -813,7 +842,7 @@ def _probe(
             job,
             "--expected-uid",
             str(os.getuid()),
-            *env.args(),
+            *env.args(mandates),
         ],
         env=dict(os.environ, PYTHONPATH=CHILD_PATH),
         capture_output=True,
@@ -833,7 +862,7 @@ def test_l1_no_value_reaches_logs_exceptions_reprs_files_or_the_journal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     first, second, bad = sentinel(), sentinel(), sentinel()
-    ledger = pc.CredentialLedger(ledger_dir)  # real time, as the fresh probe processes use
+    ledger = ledger_at(ledger_dir, env=env)  # real time, as the fresh probe processes use
     source = seam(env, cap=50_000)
     resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=source)
     old = reference(put_secret(store, "acct-0001.secret", first))
@@ -998,7 +1027,7 @@ def test_t1_rotation_drill_old_reference_refused_from_a_fresh_process(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
     old_value, new_value = sentinel(), sentinel()
-    ledger = pc.CredentialLedger(ledger_dir)
+    ledger = ledger_at(ledger_dir, env=env)
     source = seam(env, cap=50_000)
     ledger.issue(reference(put_secret(store, "acct-0001.secret", old_value)))
     ledger.activate("pcref-0001")
@@ -1066,7 +1095,7 @@ def test_t2_old_locator_cannot_be_reissued_or_reactivated(ledger_dir: Path, stor
 
 
 def test_t3_rotation_needs_an_active_reference(ledger_dir: Path, store: Path) -> None:
-    ledger = pc.CredentialLedger(ledger_dir, test_clock=Clock())
+    ledger = pc.CredentialLedger(ledger_dir)
     assert refusal(lambda: ledger.rotate(reference(store / "x.secret"))) == (
         "no_active_reference_to_rotate"
     )
@@ -1075,7 +1104,7 @@ def test_t3_rotation_needs_an_active_reference(ledger_dir: Path, store: Path) ->
 
 def test_t4_activation_respects_the_reference_window(ledger_dir: Path, store: Path) -> None:
     clock = Clock()
-    ledger = pc.CredentialLedger(ledger_dir, test_clock=clock)
+    ledger = ledger_at(ledger_dir, clock)
     ledger.issue(reference(store / "early.secret", issued_at=NOW + 100, not_after=NOW + 200))
     assert refusal(lambda: ledger.activate("pcref-0001")) == "reference_outside_window"
     clock.now = NOW + 150
@@ -1151,9 +1180,7 @@ def test_v2_outcomes_are_recorded_as_observed(
     assert len(lines(ledger)) == count
 
 
-def test_v3_withdrawal_is_atomic_and_sticky_until_reenrolment(
-    ledger_dir: Path, store: Path, env: MandateEnv
-) -> None:
+def test_v3_withdrawal_is_atomic_and_final(ledger_dir: Path, store: Path, env: MandateEnv) -> None:
     ledger, source, _, _ = authorized(ledger_dir, store, env, sentinel())
     ledger.rotate(
         reference(put_secret(store, "rotation-0002.secret", sentinel()), reference_id="pcref-0002")
@@ -1181,21 +1208,32 @@ def test_v3_withdrawal_is_atomic_and_sticky_until_reenrolment(
     assert refusal(lambda: restarted.withdraw(PROVIDER, "customer-account-0002")) == (
         "no_reference_to_withdraw"
     )
-    assert refusal(lambda: restarted.reenroll(PROVIDER, ACCOUNT, owner_ref="owner-0002")) == (
-        "reenrolment_owner_mismatch"
+    # Re-enrolment with an owner reference read back from the ledger itself is refused, and so
+    # is every other form: the mandate store cannot express a post-withdrawal owner approval.
+    owner_ref = restarted.reference("pcref-0001").owner_ref
+    count = len(lines(restarted))
+    for kwargs in (
+        {"owner_ref": owner_ref},
+        {"owner_ref": owner_ref, "mandates": env.mandates},
+        {},
+    ):
+        assert refusal(restarted.reenroll, PROVIDER, ACCOUNT, **kwargs) == (
+            "reenrolment_requires_signed_owner_record"
+        )
+    assert len(lines(restarted)) == count
+    assert restarted.withdrawn(PROVIDER, ACCOUNT)
+    assert refusal(restarted.issue, reference(fresh_locator, reference_id="pcref-0004")) == (
+        "account_withdrawn"
     )
-    restarted.reenroll(PROVIDER, ACCOUNT, owner_ref=OWNER)
-    assert not restarted.withdrawn(PROVIDER, ACCOUNT)
-    assert refusal(lambda: restarted.reenroll(PROVIDER, ACCOUNT, owner_ref=OWNER)) == (
-        "account_not_withdrawn"
+    dispatch = request(env, "job-0009", reference_id="pcref-0002")
+    assert refusal(restarted.authorize_dispatch, dispatch, mandates=source, actor=WORKER) == (
+        "account_withdrawn"
     )
-    assert refusal(lambda: restarted.issue(reference(store / "acct-0001.secret"))) in {
-        "reference_already_issued",
-        "secret_locator_reused",
-    }
-    restarted.issue(reference(fresh_locator, reference_id="pcref-0004"))
-    restarted.activate("pcref-0004")
-    assert restarted.status("pcref-0001") == "revoked"
+    # A forged re-enrolment event (the old event kind) is refused on read.
+    forge(
+        restarted, "reenrolled", {"provider": PROVIDER, "account_id": ACCOUNT, "owner_ref": OWNER}
+    )
+    assert refusal(restarted.status, "pcref-0001") == "credential_ledger_corrupt"
 
 
 def test_v4_forged_events_that_break_withdrawal_or_activity_rules_fail_closed(
@@ -1254,14 +1292,20 @@ def test_v5_the_journal_is_append_only_and_tamper_evident(
     grown = ledger.path.read_bytes()
     assert grown.startswith(snapshot) and len(grown) > len(snapshot)
     events = [json.loads(line) for line in grown.splitlines()]
-    assert [e["kind"] for e in events] == ["issued", "activated", "dispatch_authorized", "revoked"]
-    assert [e["seq"] for e in events] == [1, 2, 3, 4]
+    assert [e["kind"] for e in events] == [
+        "store_bound",
+        "issued",
+        "activated",
+        "dispatch_authorized",
+        "revoked",
+    ]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4, 5]
+    bound, *original = grown.splitlines(keepends=True)
 
     def corrupt(data: bytes) -> str:
-        ledger.path.write_bytes(data)
+        ledger.path.write_bytes(bound + data)
         return refusal(lambda: ledger.status("pcref-0001"))
 
-    original = grown.splitlines(keepends=True)
     assert corrupt(b"".join(original[:2] + original[3:])) == "credential_ledger_corrupt"
     edited = json.loads(original[2])
     edited["body"]["max_minor_units"] = 1
@@ -1271,16 +1315,17 @@ def test_v5_the_journal_is_append_only_and_tamper_evident(
     assert corrupt(b"".join([original[1], original[0], *original[2:]])) == (
         "credential_ledger_corrupt"
     )
-    assert corrupt(grown[:-5]) == "credential_ledger_corrupt"
-    assert corrupt(grown[:-1]) == "credential_ledger_corrupt"  # final line without a newline
-    assert corrupt(grown + b"not json\n") == "credential_ledger_corrupt"
+    body = b"".join(original)
+    assert corrupt(body[:-5]) == "credential_ledger_corrupt"
+    assert corrupt(body[:-1]) == "credential_ledger_corrupt"  # final line without a newline
+    assert corrupt(body + b"not json\n") == "credential_ledger_corrupt"
     # The same final event in a non-canonical encoding (only the last line, so the chain holds).
     loose = json.dumps(json.loads(original[3])).encode() + b"\n"
     assert corrupt(b"".join(original[:3]) + loose) == "credential_ledger_corrupt"
     ledger.path.write_bytes(grown)
     assert ledger.status("pcref-0001") == "revoked"
     # Stated limitation: with no external anchor, dropping the final event is not detected.
-    ledger.path.write_bytes(b"".join(original[:3]))
+    ledger.path.write_bytes(bound + b"".join(original[:3]))
     assert ledger.status("pcref-0001") == "active"
 
 
@@ -1310,7 +1355,7 @@ def test_v6_a_settled_or_uncertain_job_is_never_reauthorized(
 def test_v7_job_and_evidence_refs_cannot_carry_digest_shaped_values(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     source = seam(env)
     before = lines(ledger)
     for job in (
@@ -1331,7 +1376,7 @@ def test_v7_job_and_evidence_refs_cannot_carry_digest_shaped_values(
 def test_d1_verified_mandate_authorizes_reserves_and_is_journaled(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     source = seam(env)
     dispatch = request(env)
     auth = ledger.authorize_dispatch(dispatch, mandates=source, actor=WORKER)
@@ -1355,7 +1400,7 @@ def test_d1_verified_mandate_authorizes_reserves_and_is_journaled(
 def test_d2_a_real_mandate_holds_every_paid_dispatch_until_it_records_a_cap(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     before = lines(ledger)
     dispatch = request(env)
     assert refusal(
@@ -1378,7 +1423,7 @@ def test_d2_a_real_mandate_holds_every_paid_dispatch_until_it_records_a_cap(
 def test_d3_mandate_sources_other_than_the_verified_ledger_are_refused(
     ledger_dir: Path, store: Path, env: MandateEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     dispatch = request(env)
 
     class Subclass(lm.LearningMandates):
@@ -1394,13 +1439,20 @@ def test_d3_mandate_sources_other_than_the_verified_ledger_are_refused(
             "mandate_source_untrusted"
         )
     live = seam(env)
-    monkeypatch.setattr(pc, "_TEST_SEAMS", False)
-    assert refusal(lambda: ledger.authorize_dispatch(dispatch, mandates=live, actor=WORKER)) == (
-        "test_seam_refused_outside_tests"
+    monkeypatch.setattr(pc, "_SOURCE_REGISTRY", {})
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=live, actor=WORKER) == (
+        "mandate_source_untrusted"
     )
-    assert refusal(lambda: seam(env)) == "test_seam_refused_outside_tests"
-    assert refusal(lambda: pc.CredentialLedger(ledger_dir, test_clock=Clock())) == (
-        "test_seam_refused_outside_tests"
+    resolver_args = {"expected_uid": os.getuid(), "mandates": live}
+    assert refusal(pc.CredentialResolver, ledger, **resolver_args) == "mandate_source_untrusted"
+    # A registered type must still wrap an exact LearningMandates.
+    monkeypatch.setattr(
+        pc,
+        "_SOURCE_REGISTRY",
+        {seams.ProviderCapTestSeam: pc._SourceHooks(lambda s: subclass, lambda *a: {})},
+    )
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=live, actor=WORKER) == (
+        "mandate_source_untrusted"
     )
 
 
@@ -1489,7 +1541,7 @@ def test_d4_dispatch_is_refused_without_a_matching_well_formed_mandate(
     changes: dict[str, Any],
     expected: str,
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     source = seam(env, **view)
     before = lines(ledger)
     seconds = changes.pop("reservation_seconds", 10)
@@ -1506,7 +1558,7 @@ def test_d4_dispatch_is_refused_without_a_matching_well_formed_mandate(
 def test_d5_the_cap_is_cumulative_and_inclusive(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     source = seam(env, cap=5_000, consumed=0)
     assert ledger.authorize_dispatch(
         request(env, "job-0001", max_minor_units=5_000), mandates=source, actor=WORKER
@@ -1517,7 +1569,7 @@ def test_d5_the_cap_is_cumulative_and_inclusive(
             "mandate_cap_exceeded"
         )
     # A second credential ledger sharing the mandate still sees the mandate's own usage.
-    other = pc.CredentialLedger(ledger_dir.parent / "other", test_clock=Clock())
+    other = ledger_at(ledger_dir.parent / "other", env=env)
     other.issue(reference(store / "other.secret"))
     other.activate("pcref-0001")
     dispatch = request(env, "job-0009", max_minor_units=1)
@@ -1529,7 +1581,7 @@ def test_d5_the_cap_is_cumulative_and_inclusive(
 def test_d5b_the_local_journal_bounds_spend_when_the_mandate_usage_lags(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     # The mandate keeps reporting zero usage; only this ledger's journal knows about job-0001.
     lagging = seam(
         env, cap=5_000, consumed=0, receipt_overrides={"cumulative_reserved_cost_cents": 0}
@@ -1546,7 +1598,7 @@ def test_d5b_the_local_journal_bounds_spend_when_the_mandate_usage_lags(
 def test_d6_the_mandate_ledger_enforces_its_own_fit_budget(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     source = seam(env, cap=50_000, consumed=0)
     for idx in range(1, 4):
         ledger.authorize_dispatch(
@@ -1563,7 +1615,7 @@ def test_d7_reference_without_fine_tune_or_outside_window_cannot_dispatch(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
     clock = Clock()
-    ledger = pc.CredentialLedger(ledger_dir, test_clock=clock)
+    ledger = ledger_at(ledger_dir, clock, env)
     source = seam(env)
     ledger.issue(
         reference(
@@ -1580,7 +1632,7 @@ def test_d7_reference_without_fine_tune_or_outside_window_cannot_dispatch(
     assert refusal(lambda: ledger.authorize_dispatch(unknown, mandates=source, actor=WORKER)) == (
         "reference_unknown"
     )
-    other = pc.CredentialLedger(ledger_dir.parent / "other", test_clock=clock)
+    other = ledger_at(ledger_dir.parent / "other", env=env)
     other.issue(reference(store / "acct-0002.secret"))
     other.activate("pcref-0001")
     clock.now = NOW + 86_400
@@ -1592,7 +1644,7 @@ def test_d7_reference_without_fine_tune_or_outside_window_cannot_dispatch(
 def test_d8_withdrawing_the_mandate_holds_new_dispatch(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
-    ledger = active_ledger(ledger_dir, store, sentinel())
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
     source = seam(env)
     dispatch = request(env)
     env.mandates.withdraw(MANDATE, actor=OWNER)
@@ -1605,7 +1657,7 @@ def test_d9_the_mandate_expiry_is_checked_against_this_ledger_clock(
     ledger_dir: Path, store: Path, env: MandateEnv
 ) -> None:
     clock = Clock()
-    ledger = active_ledger(ledger_dir, store, sentinel(), clock)
+    ledger = active_ledger(ledger_dir, store, sentinel(), clock, env=env)
     source = seam(env)
     dispatch = request(env)
     clock.now = NOW + 4_000  # past the mandate's expiry, inside the reference window
@@ -1614,16 +1666,207 @@ def test_d9_the_mandate_expiry_is_checked_against_this_ledger_clock(
     )
 
 
-# ================================================================= seams and scope
-def test_s1_test_seams_cannot_be_enabled_without_pytest() -> None:
+# ================================================================= pinned mandate store
+def _copy_store(env: MandateEnv, name: str) -> Path:
+    copy = env.directory.parent / name
+    shutil.copytree(env.directory, copy)
+    copy.chmod(0o700)
+    return copy
+
+
+def test_p1_a_copied_store_cannot_release_the_value_after_withdrawal(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    """PX3: authorize, copy the mandate directory, withdraw the original."""
+    value = sentinel()
+    ledger, source, auth, resolver = authorized(ledger_dir, store, env, value)
+    copy = _copy_store(env, env.directory.name + "-copy")
+    env.mandates.withdraw(MANDATE, actor=OWNER)
+    copied = lm.LearningMandates(copy, ORG, env.engagement)
+    assert copied.inspect(MANDATE, actor=OWNER)["withdrawn"] is False  # the copy still says active
+    on_copy = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=copied)
+    assert refusal(on_copy.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_store_mismatch"
+    )
+    copy_seam = seams.ProviderCapTestSeam(
+        copied, cap_minor_units=50_000, provider=PROVIDER, account_id=ACCOUNT
+    )
+    on_copy_seam = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=copy_seam)
+    assert refusal(on_copy_seam.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_store_mismatch"
+    )
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_not_active"
+    )
+    status, body, output = _probe(ledger_dir, env, auth.authorization_id, "job-0001", copy)
+    assert (status, body["result"]) == (2, "mandate_store_mismatch") and value not in output
+    status, body, _ = _probe(ledger_dir, env, auth.authorization_id, "job-0001")
+    assert (status, body["result"]) == (2, "mandate_not_active")
+    dispatch = request(env, "job-0002", reservation={})
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=copy_seam, actor=WORKER) == (
+        "mandate_store_mismatch"
+    )
+    del source
+
+
+def _recreate_at_same_path(env: MandateEnv) -> None:
+    moved = env.directory.parent / (env.directory.name + "-moved")
+    env.directory.rename(moved)
+    shutil.copytree(moved, env.directory)
+    env.directory.chmod(0o700)
+
+
+def _replace_database(env: MandateEnv) -> None:
+    database = env.directory / "learning-mandates.sqlite3"
+    staged = env.directory / "staged.sqlite3"
+    shutil.copy2(database, staged)
+    os.replace(staged, database)
+
+
+def _new_store_id(env: MandateEnv) -> None:
+    with sqlite3.connect(env.directory / "learning-mandates.sqlite3") as db:
+        db.execute("UPDATE provider_credential_store SET store_id=?", (secrets.token_hex(16),))
+
+
+def _drop_store_id(env: MandateEnv) -> None:
+    with sqlite3.connect(env.directory / "learning-mandates.sqlite3") as db:
+        db.execute("DELETE FROM provider_credential_store")
+
+
+STORE_CHANGES: dict[str, Callable[[MandateEnv], None]] = {
+    "recreated-same-path": _recreate_at_same_path,
+    "database-replaced": _replace_database,
+    "store-id-changed": _new_store_id,
+    "store-id-removed": _drop_store_id,
+}
+
+
+@pytest.mark.parametrize("change", sorted(STORE_CHANGES))
+def test_p2_a_store_recreated_or_replaced_in_place_is_refused(
+    ledger_dir: Path, store: Path, env: MandateEnv, change: str
+) -> None:
+    ledger, _, auth, _ = authorized(ledger_dir, store, env, sentinel())
+    STORE_CHANGES[change](env)
+    reopened = lm.LearningMandates(env.directory, ORG, env.engagement)
+    resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=reopened)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_store_mismatch"
+    )
+    status, body, _ = _probe(ledger_dir, env, auth.authorization_id, "job-0001")
+    assert (status, body["result"]) == (2, "mandate_store_mismatch")
+    dispatch = request(env, "job-0002") if change != "recreated-same-path" else None
+    if dispatch is not None:
+        assert refusal(ledger.authorize_dispatch, dispatch, mandates=reopened, actor=WORKER) == (
+            "mandate_store_mismatch"
+        )
+
+
+def test_p3_another_scope_in_the_same_store_is_refused(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    ledger, _, auth, _ = authorized(ledger_dir, store, env, sentinel())
+    other_scope = lm.LearningMandates(env.directory, "other-org", env.engagement, owner=OWNER)
+    resolver = pc.CredentialResolver(ledger, expected_uid=os.getuid(), mandates=other_scope)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_store_mismatch"
+    )
+
+
+def test_p4_the_store_is_bound_once_and_required(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    unbound = active_ledger(ledger_dir, store, sentinel())
+    dispatch = request(env)
+    source = seam(env)
+    assert refusal(unbound.authorize_dispatch, dispatch, mandates=source, actor=WORKER) == (
+        "mandate_store_unbound"
+    )
+    digest_value = unbound.bind_mandate_store(env.mandates)
+    assert refusal(unbound.bind_mandate_store, env.mandates) == "mandate_store_already_bound"
+    auth = unbound.authorize_dispatch(dispatch, mandates=source, actor=WORKER)
+    body = unbound._fold().jobs["job-0001"].body
+    assert body["mandate_store"] == digest_value
+    # The store identity is inside the authorization id: changing it breaks the record.
+    forged = dict(body, job_ref="job-0002", mandate_store="e" * 64)
+    forged["authorization_id"] = pc._authorization_id(forged)
+    forge(unbound, "dispatch_authorized", forged)
+    assert refusal(unbound.status, "pcref-0001") == "credential_ledger_corrupt"
+    del auth
+
+
+# ================================================================= registry, clock, scope
+SEAM_SURFACE = ("enable_test_seams", "ProviderCapTestSeam", "_TEST_SEAMS", "_seam")
+
+
+def registry_writes(source: str) -> list[int]:
+    """Lines that write ``_SOURCE_REGISTRY`` other than its empty definition, or read it other
+    than through ``.get``."""
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    offending = []
+    for node in ast.walk(tree):
+        named = (
+            (isinstance(node, ast.Name) and node.id == "_SOURCE_REGISTRY")
+            or (isinstance(node, ast.Attribute) and node.attr == "_SOURCE_REGISTRY")
+            or (isinstance(node, ast.Constant) and node.value == "_SOURCE_REGISTRY")
+        )
+        if not named:
+            continue
+        parent = parents.get(node)
+        if (
+            isinstance(parent, ast.AnnAssign)
+            and parent.target is node
+            and isinstance(parent.value, ast.Dict)
+            and not parent.value.keys
+        ):
+            continue
+        if isinstance(parent, ast.Attribute) and parent.attr == "get":
+            continue
+        offending.append(node.lineno)
+    return offending
+
+
+def test_s1_the_source_registry_is_written_only_from_the_tests_tree() -> None:
+    root = SRC.parents[2]
+    skip = {".git", ".venv", "node_modules", "tests", "__pycache__", ".claude"}
+    checked = 0
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if any(part in skip for part in relative.parts):
+            continue
+        text = path.read_text(errors="replace")
+        checked += 1
+        if path.resolve() == Path(pc.__file__).resolve():
+            assert registry_writes(text) == [], relative
+            definitions = re.findall(r"^_SOURCE_REGISTRY: .*$", text, flags=re.M)
+            assert definitions == ["_SOURCE_REGISTRY: dict[type, _SourceHooks] = {}"]
+            assert not any(name in text for name in SEAM_SURFACE)
+        else:
+            assert "_SOURCE_REGISTRY" not in text and "provider_credential_seams" not in text, (
+                relative
+            )
+    assert checked > 50
+    # Positive controls: every write form is caught.
+    for write in (
+        "pc._SOURCE_REGISTRY[object] = hooks",
+        "pc._SOURCE_REGISTRY.update({object: hooks})",
+        "pc._SOURCE_REGISTRY.setdefault(object, hooks)",
+        "_SOURCE_REGISTRY = {object: hooks}",
+        "setattr(pc, '_SOURCE_REGISTRY', {})",
+        "registry = pc._SOURCE_REGISTRY",
+    ):
+        assert registry_writes(write), write
+    assert registry_writes("x = pc._SOURCE_REGISTRY.get(kind)") == []
+    assert registry_writes("_SOURCE_REGISTRY: dict[type, _SourceHooks] = {}") == []
+
+
+def test_s2_a_fresh_process_has_no_seams_and_an_empty_registry() -> None:
     script = (
+        "import sys, types\n"
+        "sys.modules['pytest'] = types.ModuleType('pytest')\n"
         "from opentour_cell.pilot import provider_credential as pc\n"
-        "for action in (pc.enable_test_seams, lambda: pc.CredentialLedger('/nonexistent', "
-        "test_clock=lambda: 0.0)):\n"
-        "    try:\n"
-        "        action()\n"
-        "    except pc.CredentialError as exc:\n"
-        "        print(exc.code)\n"
+        "print(len(pc._SOURCE_REGISTRY))\n"
+        f"print(any(hasattr(pc, n) for n in {SEAM_SURFACE!r}))\n"
     )
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -1633,12 +1876,12 @@ def test_s1_test_seams_cannot_be_enabled_without_pytest() -> None:
         timeout=60,
         check=False,
     )
-    assert completed.stdout.split() == ["test_seams_refused", "test_seam_refused_outside_tests"]
+    assert completed.stdout.split() == ["0", "False"], completed.stderr
 
 
-def test_s2_production_ledger_uses_only_its_own_clock(ledger_dir: Path) -> None:
+def test_s3_production_ledger_has_no_clock_parameter(ledger_dir: Path) -> None:
+    assert list(inspect.signature(pc.CredentialLedger).parameters) == ["directory"]
     ledger = pc.CredentialLedger(ledger_dir)
-    assert ledger._clock is time.time
     assert abs(ledger._now() - time.time()) < 5
 
 
@@ -1668,5 +1911,8 @@ def test_e1_evidence_tier_gates_and_the_not_proven_document() -> None:
         "copying an old value",
         "caller's statement",
         "providercaptestseam",
+        "mandate_store_mismatch",
+        "ope-566",
+        "reenrolment_requires_signed_owner_record",
     ):
         assert phrase in text, phrase

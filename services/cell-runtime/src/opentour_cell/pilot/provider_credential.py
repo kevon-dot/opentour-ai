@@ -19,13 +19,17 @@ authorization this module issued, and hands it to the caller wrapped in a redact
   mandate's revision, owner, payer or cap. The current mandate schema forces
   ``max_cost_cents == 0``, so every real dispatch holds with ``mandate_cap_required`` until
   OPE-426 records a provider cap.
-* Rotation retires the previous reference; revocation and withdrawal fence in-flight jobs; a
-  withdrawn account stays withdrawn until an explicit, journaled re-enrolment. A fenced job's
-  outcome stays unrecorded until a caller records what was observed. It is never assumed.
+* The mandate store is pinned in the ledger (``bind_mandate_store``): its scope, directory
+  path, directory and database device/inode and a random store id written into it. Every
+  authorization binds that identity, and dispatch and resolution refuse any other store.
+* Rotation retires the previous reference; revocation and withdrawal fence in-flight jobs. A
+  withdrawn account stays withdrawn: re-enrolment is refused until signed owner records
+  (OPE-566) exist. A fenced job's outcome stays unrecorded until a caller records what was
+  observed. It is never assumed.
 
-Test seams (``test_clock``, ``ProviderCapTestSeam``) are refused unless ``enable_test_seams`` was
-called in a process that has loaded pytest. Production uses only ``time.time`` and an exact
-``LearningMandates``.
+There are no test seams here. Time is ``time.time``. A mandate source is an exact
+``LearningMandates`` or a type in ``_SOURCE_REGISTRY``, which is empty in this module; only the
+tests tree registers into it, and a repository test enforces that.
 
 Not proven (see ``services/cell-runtime/docs/pilot-provider-credential.md``): no provider call is
 made, no provider-side revocation or refusal is witnessed, no provider-side budget is set, and the
@@ -43,6 +47,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import sqlite3
 import stat
 import sys
@@ -88,6 +93,7 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _RESERVATION = re.compile(r"fit-[0-9a-f]{40}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_STORE_ID = re.compile(r"[0-9a-f]{32}")
 # Known credential prefixes, matched case-insensitively at a token boundary.
 _PREFIXES = re.compile(
     r"(?i)(?:^|[^a-z0-9])(?:sk-|sk_|rk_|pk_live|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|"
@@ -113,23 +119,8 @@ def _need(check: object, code: str) -> None:
         _fail(code)
 
 
-# --------------------------------------------------------------------------- test seams
-_TEST_SEAMS = False
-
-
-def enable_test_seams() -> None:
-    """Allow the clock and provider-cap seams. Tests only: refused unless pytest is loaded.
-
-    This is a guard against accidental production use, not a security boundary: code running as
-    the same uid can do anything this module can.
-    """
-    global _TEST_SEAMS
-    _need("pytest" in sys.modules, "test_seams_refused")
-    _TEST_SEAMS = True
-
-
-def _seam() -> None:
-    _need(_TEST_SEAMS, "test_seam_refused_outside_tests")
+def _wall_clock() -> float:
+    return time.time()
 
 
 class Scope(StrEnum):
@@ -474,81 +465,105 @@ class _State:
     active: dict[tuple[str, str], str] = field(default_factory=dict)
     withdrawn: set[tuple[str, str]] = field(default_factory=set)
     jobs: dict[str, _Job] = field(default_factory=dict)
+    store: dict[str, Any] | None = None
+    store_digest: str | None = None
     tail: str = _GENESIS
     seq: int = 0
 
 
 # --------------------------------------------------------------------------- mandate source
-class ProviderCapTestSeam:
-    """TESTS ONLY. Wraps a real ``LearningMandates`` and supplies what its schema cannot hold.
+@dataclass(frozen=True)
+class _SourceHooks:
+    """How a registered mandate source exposes its real store and reserves budget."""
 
-    ``learning_mandate`` forces ``max_cost_cents == 0`` and records no provider account or cost
-    usage, so a real mandate can never authorize a paid provider dispatch. This seam adds a cap,
-    a provider account and an in-memory cost tally on top of the real ledger's verified identity,
-    revision, expiry, withdrawal state and fit/seconds reservation. ``receipt_overrides`` and
-    ``scope_overrides`` exist to test malformed ledger values. Refused outside tests.
-    """
-
-    def __init__(
-        self,
-        mandates: LearningMandates,
-        *,
-        cap_minor_units: int,
-        provider: str,
-        account_id: str,
-        consumed_minor_units: int = 0,
-        receipt_overrides: Mapping[str, Any] | None = None,
-        scope_overrides: Mapping[str, Any] | None = None,
-    ) -> None:
-        _seam()
-        _need(type(mandates) is LearningMandates, "mandate_source_untrusted")
-        self.mandates = mandates
-        self.cap_minor_units = cap_minor_units
-        self.provider, self.account_id = provider, account_id
-        self.consumed_minor_units = consumed_minor_units
-        self.receipt_overrides = dict(receipt_overrides or {})
-        self.scope_overrides = dict(scope_overrides or {})
-        self.costs: dict[str, int] = {}
-
-    def inspect(self, mandate_id: str, *, actor: str | None = None) -> dict[str, Any]:
-        _seam()
-        receipt = dict(self.mandates.inspect(mandate_id, actor=actor))
-        scope = dict(receipt["scope"], max_cost_cents=self.cap_minor_units)
-        scope.update(self.scope_overrides)
-        consumed: Any = self.consumed_minor_units
-        if self.costs:
-            consumed = consumed + sum(self.costs.values())
-        receipt.update(
-            scope=scope,
-            provider=self.provider,
-            provider_account_id=self.account_id,
-            cumulative_reserved_cost_cents=consumed,
-        )
-        receipt.update(self.receipt_overrides)
-        return receipt
-
-    def reserve(
-        self, mandate_id: str, request: Mapping[str, Any], *, actor: str, cost_minor_units: int
-    ) -> dict[str, Any]:
-        _seam()
-        used = self.consumed_minor_units + sum(self.costs.values())
-        if used + cost_minor_units > self.cap_minor_units:
-            raise MandateError("standing_cost_budget_exhausted")
-        result = dict(self.mandates.reserve(mandate_id, request, actor=actor))
-        self.costs.setdefault(str(result.get("reservation_id")), cost_minor_units)
-        return result
+    underlying: Callable[[Any], LearningMandates]
+    reserve: Callable[[Any, str, Mapping[str, Any], str, int], Mapping[str, Any]]
 
 
-MandateSource = LearningMandates | ProviderCapTestSeam
+# Empty in this module and in every non-test module. Only the tests tree registers a type here
+# (a repository test enforces it). Python cannot stop same-process code from writing it.
+_SOURCE_REGISTRY: dict[type, _SourceHooks] = {}
 
 
-def _trusted_source(source: object) -> MandateSource:
+def _trusted_source(source: object) -> Any:
     if type(source) is LearningMandates:
         return source
-    if type(source) is ProviderCapTestSeam:
-        _seam()
+    _need(_SOURCE_REGISTRY.get(type(source)) is not None, "mandate_source_untrusted")
+    _underlying(source)
+    return source
+
+
+def _underlying(source: object) -> LearningMandates:
+    if type(source) is LearningMandates:
         return source
-    _fail("mandate_source_untrusted")
+    hooks = _SOURCE_REGISTRY.get(type(source))
+    _need(hooks is not None, "mandate_source_untrusted")
+    assert hooks is not None
+    mandates = hooks.underlying(source)
+    _need(type(mandates) is LearningMandates, "mandate_source_untrusted")
+    return mandates
+
+
+_STORE_TABLE = "provider_credential_store"
+_STORE_KEYS = {
+    "scope",
+    "directory_sha256",
+    "directory_device",
+    "directory_inode",
+    "database_device",
+    "database_inode",
+    "store_id",
+}
+
+
+def _store_identity(mandates: LearningMandates, *, create: bool) -> dict[str, Any]:
+    """The mandate store's identity: scope, path, directory/database inode and a random id.
+
+    ``create`` writes the random store id into the store's database once (as owner settings add
+    metadata tables to the same ledger). A copy keeps the id but not the path or inodes; a store
+    recreated at the same path gets a new id even if an inode number is reused.
+    """
+    code: str | None = None
+    store_id: object = None
+    try:
+        directory = os.path.realpath(mandates.directory)
+        dir_info = os.stat(directory)
+        db_info = os.stat(mandates.path)
+        with mandates._db(write=create) as db:
+            if create:
+                db.execute(
+                    f"CREATE TABLE IF NOT EXISTS {_STORE_TABLE} "
+                    "(singleton INTEGER PRIMARY KEY CHECK (singleton = 1), store_id TEXT NOT NULL)"
+                )
+                db.execute(
+                    f"INSERT OR IGNORE INTO {_STORE_TABLE} VALUES (1, ?)", (secrets.token_hex(16),)
+                )
+            present = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_STORE_TABLE,)
+            ).fetchone()
+            if present is not None:
+                row = db.execute(
+                    f"SELECT store_id FROM {_STORE_TABLE} WHERE singleton=1"
+                ).fetchone()
+                store_id = None if row is None else row[0]
+    except (OSError, sqlite3.Error, MandateError):
+        code = "mandate_store_unavailable"
+    if code is not None:
+        _fail(code)
+    _need(isinstance(store_id, str) and _STORE_ID.fullmatch(store_id), "mandate_store_mismatch")
+    return {
+        "scope": _digest_from(mandates.scope, _HEX64, "mandate_store_unavailable"),
+        "directory_sha256": hashlib.sha256(directory.encode()).hexdigest(),
+        "directory_device": dir_info.st_dev,
+        "directory_inode": dir_info.st_ino,
+        "database_device": db_info.st_dev,
+        "database_inode": db_info.st_ino,
+        "store_id": store_id,
+    }
+
+
+def _store_digest(identity: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical([VERSION, "mandate-store", dict(identity)])).hexdigest()
 
 
 def _mandate_code(exc: BaseException) -> str:
@@ -560,8 +575,9 @@ def _mandate_code(exc: BaseException) -> str:
     )
 
 
-def _inspect(source: MandateSource, mandate_id: str, actor: str) -> dict[str, Any]:
+def _inspect(source: Any, mandate_id: str, actor: str) -> dict[str, Any]:
     code: str | None = None
+    receipt: object = None
     try:
         receipt = source.inspect(mandate_id, actor=actor)
     except CredentialError:
@@ -570,7 +586,8 @@ def _inspect(source: MandateSource, mandate_id: str, actor: str) -> dict[str, An
         code = _mandate_code(exc)
     if code is not None:
         _fail(code)
-    _need(isinstance(receipt, dict), "mandate_view_invalid")
+    if not isinstance(receipt, dict):
+        _fail("mandate_view_invalid")
     return receipt
 
 
@@ -615,9 +632,10 @@ _BODY_KEYS: dict[str, set[str]] = {
     "activated": {"reference_id", "supersedes"},
     "revoked": {"reference_ids", "cause", "fenced_job_refs", "provider_side"},
     "withdrawn": {"provider", "account_id", "reference_ids", "fenced_job_refs", "provider_side"},
-    "reenrolled": {"provider", "account_id", "owner_ref"},
+    "store_bound": _STORE_KEYS,
     "dispatch_authorized": {
         "authorization_id",
+        "mandate_store",
         "job_ref",
         "reference_id",
         "mandate_id",
@@ -648,13 +666,8 @@ class CredentialLedger:
     rewrite it: it is tamper-evident storage that only this module should write.
     """
 
-    def __init__(
-        self, directory: str | Path, *, test_clock: Callable[[], float] | None = None
-    ) -> None:
-        if test_clock is not None:
-            _seam()
+    def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
-        self._clock: Callable[[], float] = test_clock or time.time
         if not os.path.lexists(self.directory):
             os.mkdir(self.directory, 0o700)
         info = os.lstat(self.directory)
@@ -670,7 +683,7 @@ class CredentialLedger:
         return f"CredentialLedger({str(self.directory)!r})"
 
     def _now(self) -> int:
-        return int(self._clock())
+        return int(_wall_clock())
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -792,15 +805,19 @@ class CredentialLedger:
                 state.jobs[job_ref].fenced = True
             if kind == "withdrawn":
                 state.withdrawn.add((body["provider"], body["account_id"]))
-        elif kind == "reenrolled":
-            account = (body["provider"], body["account_id"])
-            _need(account in state.withdrawn, "account_not_withdrawn")
-            _need(
-                body["owner_ref"]
-                in {r.owner_ref for r in state.references.values() if r.account == account},
-                "reenrolment_owner_mismatch",
-            )
-            state.withdrawn.discard(account)
+        elif kind == "store_bound":
+            _need(state.store is None, "mandate_store_already_bound")
+            for name in ("scope", "directory_sha256"):
+                _digest_from(body[name], _HEX64, "credential_ledger_corrupt")
+            for name in (
+                "directory_device",
+                "directory_inode",
+                "database_device",
+                "database_inode",
+            ):
+                _count(body[name], "credential_ledger_corrupt")
+            _digest_from(body["store_id"], _STORE_ID, "credential_ledger_corrupt")
+            state.store, state.store_digest = dict(body), _store_digest(body)
         elif kind == "dispatch_authorized":
             for name in ("job_ref", "reference_id", "mandate_id", "actor", "currency"):
                 _ident(body[name])
@@ -808,6 +825,10 @@ class CredentialLedger:
             _digest_from(body["reservation_id"], _RESERVATION, "credential_ledger_corrupt")
             _count(body["max_minor_units"], "credential_ledger_corrupt", positive=True)
             _need(body["authorization_id"] == _authorization_id(body), "credential_ledger_corrupt")
+            _need(
+                state.store_digest is not None and body["mandate_store"] == state.store_digest,
+                "mandate_store_mismatch",
+            )
             _need(body["job_ref"] not in state.jobs, "job_already_authorized")
             ref = state.references[body["reference_id"]]
             _need(state.status[ref.reference_id] == "active", "reference_not_active")
@@ -942,24 +963,43 @@ class CredentialLedger:
             )
         return RevocationReceipt(tuple(ids), RevocationCause.WITHDRAWAL, tuple(fenced))
 
-    def reenroll(self, provider: str, account_id: str, *, owner_ref: str) -> None:
-        """Journal an explicit re-enrolment of a withdrawn account by its account owner."""
-        body = {
-            "provider": _ident(provider),
-            "account_id": _ident(account_id),
-            "owner_ref": _ident(owner_ref),
-        }
+    def reenroll(self, provider: str, account_id: str, **_: object) -> NoReturn:
+        """Refused. Withdrawal is final in this ledger until signed owner records exist.
+
+        The mandate store cannot express that the owner authorized re-enrolment after this
+        withdrawal: its actor strings are asserted by the caller, it records no enrolment time,
+        and an owner reference can be read back from this ledger. OPE-566 signed mandate records
+        are the prerequisite. A new account onboarding uses a new credential ledger.
+        """
+        _fail("reenrolment_requires_signed_owner_record")
+
+    def bind_mandate_store(self, mandates: object) -> str:
+        """Pin the mandate store this ledger trusts, once, at enrolment. Returns its digest."""
+        store = _underlying(_trusted_source(mandates))
         with self._locked():
-            self._append(self._fold(), "reenrolled", body)
+            state = self._fold()
+            _need(state.store is None, "mandate_store_already_bound")
+            self._append(state, "store_bound", _store_identity(store, create=True))
+            assert state.store_digest is not None
+            return state.store_digest
+
+    @staticmethod
+    def _check_store(state: _State, source: object) -> str:
+        _need(state.store is not None and state.store_digest is not None, "mandate_store_unbound")
+        current = _store_identity(_underlying(source), create=False)
+        _need(current == state.store, "mandate_store_mismatch")
+        assert state.store_digest is not None
+        return state.store_digest
 
     def authorize_dispatch(
-        self, request: DispatchRequest, *, mandates: MandateSource, actor: str
+        self, request: DispatchRequest, *, mandates: object, actor: str
     ) -> DispatchAuthorization:
         """Bind a dispatch to an active reference and the verified standing mandate.
 
-        The mandate is read here from ``mandates`` (an exact ``LearningMandates``) and the budget
-        is reserved through it; nothing about the mandate is taken from the caller. The
-        authorization is journaled so a revocation can fence the job and ``resolve`` can check it.
+        The mandate is read here from ``mandates``, which must be the store pinned by
+        ``bind_mandate_store``, and the budget is reserved through it; nothing about the mandate
+        is taken from the caller. The authorization binds the store's identity and is journaled
+        so a revocation can fence the job and ``resolve`` can check it.
         """
         _need(isinstance(request, DispatchRequest), "invalid_dispatch_request")
         for name in ("job_ref", "reference_id", "mandate_id", "owner_id", "payer", "currency"):
@@ -969,6 +1009,7 @@ class CredentialLedger:
         source = _trusted_source(mandates)
         with self._locked():
             state = self._fold()
+            store = self._check_store(state, source)
             ref = state.references.get(request.reference_id)
             _need(ref is not None, "reference_unknown")
             assert ref is not None
@@ -1020,6 +1061,7 @@ class CredentialLedger:
             )
             reservation_id = self._reserve(source, request, actor, bound)
             body: dict[str, Any] = {
+                "mandate_store": store,
                 "job_ref": request.job_ref,
                 "reference_id": request.reference_id,
                 "mandate_id": request.mandate_id,
@@ -1034,14 +1076,13 @@ class CredentialLedger:
         return state.jobs[request.job_ref].authorization()
 
     @staticmethod
-    def _reserve(source: MandateSource, request: DispatchRequest, actor: str, cost: int) -> str:
+    def _reserve(source: Any, request: DispatchRequest, actor: str, cost: int) -> str:
         code: str | None = None
         result: Any = None
+        hooks = _SOURCE_REGISTRY.get(type(source))
         try:
-            if isinstance(source, ProviderCapTestSeam):
-                result = source.reserve(
-                    request.mandate_id, request.reservation, actor=actor, cost_minor_units=cost
-                )
+            if hooks is not None:
+                result = hooks.reserve(source, request.mandate_id, request.reservation, actor, cost)
             else:  # pragma: no cover - unreachable until the mandate schema holds a cost cap
                 result = source.reserve(request.mandate_id, request.reservation, actor=actor)
         except CredentialError:
@@ -1193,13 +1234,12 @@ def _read_open(fd: int, expected_uid: int) -> tuple[str | None, str | None]:
 class CredentialResolver:
     """Reads the value at the moment of use, for one journaled, unfenced authorization only.
 
-    Never logs, keeps or persists the value. Re-reads the mandate ledger and refuses when the
-    mandate was withdrawn, expired or changed revision since the authorization.
+    Never logs, keeps or persists the value. Refuses a mandate store other than the one the
+    ledger pinned, and re-reads the mandate, refusing when it was withdrawn, expired or changed
+    revision since the authorization.
     """
 
-    def __init__(
-        self, ledger: CredentialLedger, *, expected_uid: int, mandates: MandateSource
-    ) -> None:
+    def __init__(self, ledger: CredentialLedger, *, expected_uid: int, mandates: object) -> None:
         self.ledger = ledger
         self.expected_uid = expected_uid
         self.mandates = _trusted_source(mandates)
@@ -1211,12 +1251,14 @@ class CredentialResolver:
         _ident(job_ref)
         _digest_from(authorization_id, _HEX64, "dispatch_authorization_required")
         state = self.ledger._fold()
+        store = self.ledger._check_store(state, self.mandates)
         job = state.jobs.get(job_ref)
         _need(
             job is not None and job.body["authorization_id"] == authorization_id,
             "dispatch_authorization_required",
         )
         assert job is not None
+        _need(job.body["mandate_store"] == store, "mandate_store_mismatch")
         _need(not job.fenced, "dispatch_fenced")
         _need(job.outcome is None, "dispatch_settled")
         reference_id = job.reference_id
