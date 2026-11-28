@@ -39,6 +39,10 @@ NEXT_EVIDENCE: dict[str, str] = {
     "exposure_log_scope_mismatch": (
         "Supply the exposure guard's release history for every protected family in this audit."
     ),
+    "caller_assertion_malformed": (
+        "Resubmit caller-asserted exposure as a frozenset of family ids and the unlogged "
+        "disclosure count as a non-negative integer."
+    ),
     "duplicate_family_id": (
         "Resolve duplicate family identifiers and reconcile the denominator flow."
     ),
@@ -86,6 +90,9 @@ ALERT_EVIDENCE: dict[str, str] = {
     "exposure_not_derived_from_covering_history": (
         "Supply the exposure guard's release history covering every protected family so the "
         "worker derives exposure itself."
+    ),
+    "claim_rests_on_caller_assertions": (
+        "Replace each caller-asserted dependency listed in the receipt with worker-held evidence."
     ),
     "evidence_origin_not_observed": (
         "Audit an observed population; generated evidence cannot enable the alert."

@@ -166,7 +166,7 @@ class ReleaseEntry:
     """One cell the exposure guard actually released, as the guard recorded it."""
 
     cell: frozenset[str]
-    protected_role: bool  # the request's roles included selector or evaluator
+    protected_role: bool  # the guard treated the roles as protected (informational in replay)
     authorized_by: str | None = None
 
 

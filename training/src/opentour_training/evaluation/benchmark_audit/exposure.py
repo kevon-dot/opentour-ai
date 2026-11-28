@@ -1,20 +1,23 @@
 """Protected-answer exposure controls for charts, text, exports, tooltips and filters.
 
-Every release path (private Slack and worker UI alike) goes through one guard. Any request whose
-roles include selector or evaluator must not receive a cell, or a complementary/differencing
-combination of cells, that isolates one protected family, unless the release is a logged,
-authorized disclosure that retires the affected families. Whether a release is
-answer-revealing depends on the cell released, not on whether a family is newly isolated: a
+Every release path (private Slack and worker UI alike) goes through one guard. Roles come from a
+closed set: a role that is not exactly one of the known canonical names is treated as protected.
+A protected request (selector, evaluator or unknown) must not receive a cell, or a
+complementary/differencing combination of cells, that isolates one protected family, unless the
+release is a logged, authorized disclosure that retires the affected families. Whether a release
+is answer-revealing depends on the cell released, not on whether a family is newly isolated: a
 repeat release of an already-isolated cell is suppressed or logged like the first one.
-Suppression and authorized disclosure are both logged; earlier as-of manifests are never
-mutated.
 
 Adversary model: released cell counts are pooled knowledge shared by every viewer, and answers
-combine linearly. Per-viewer knowledge and bounds on 0/1 answers are not modelled.
+combine linearly. So a revealing release to any role, a reader included, exposes the families it
+isolates once combined with every earlier release, whichever role received those; without
+authorization it is also an unauthorized case-level disclosure. Release order does not matter.
+Per-viewer knowledge and bounds on 0/1 answers are not modelled.
 """
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,7 +29,58 @@ from opentour_training.evaluation.benchmark_audit.model import (
     canonical_digest,
 )
 
-PROTECTED_ROLES = frozenset({"evaluator", "selector"})
+
+class Role(StrEnum):
+    """The closed set of request roles. Anything else is treated as protected."""
+
+    EVALUATOR = "evaluator"
+    SELECTOR = "selector"
+    READER = "reader"
+
+
+PROTECTED_ROLES = frozenset({Role.EVALUATOR.value, Role.SELECTOR.value})
+UNPROTECTED_ROLES = frozenset({Role.READER.value})
+_KNOWN_ROLES = frozenset(m.value for m in Role)
+
+
+def _canonical_role(role: object) -> str | None:
+    """The canonical name of a known role, or None for anything unknown or non-canonical."""
+    if type(role) is Role:
+        return role.value
+    if type(role) is str and role.isascii() and role in _KNOWN_ROLES:
+        return role
+    return None
+
+
+def is_protected(roles: object) -> bool:
+    """Fail closed: protected unless every role is a known, canonical, unprotected role."""
+    if type(roles) not in (frozenset, set, tuple, list) or not roles:
+        return True
+    names = [_canonical_role(r) for r in roles]  # type: ignore[attr-defined]
+    return any(n is None or n not in UNPROTECTED_ROLES for n in names)
+
+
+def well_formed_cell(cell: object, universe: frozenset[str]) -> bool:
+    return (
+        type(cell) is frozenset
+        and bool(cell)
+        and all(type(f) is str for f in cell)
+        and cell <= universe
+    )
+
+
+def valid_identity(value: object) -> bool:
+    """An identity field must be an exact, non-blank ``str`` (no subclass can lie about it)."""
+    return type(value) is str and bool(value.strip())
+
+
+# Records issued by a guard instance in this process. Identity, not equality, decides: an equal
+# record that a caller constructs is not one the worker issued.
+_ISSUED: weakref.WeakValueDictionary[int, ExposureRecord] = weakref.WeakValueDictionary()
+
+
+def issued_by_guard(record: ExposureRecord) -> bool:
+    return _ISSUED.get(id(record)) is record
 
 
 class Surface(StrEnum):
@@ -128,7 +182,7 @@ def revealed_families(
     (complementary, nested and non-nested differencing) plus every family the cell isolates on
     its own with the universe total. A malformed cell is treated as revealing everything.
     """
-    if not cell or not cell <= universe:
+    if not well_formed_cell(cell, universe):
         return universe
     others = [c for c in prior if c != cell]
     with_cell = isolated_families([*others, cell], universe)
@@ -137,22 +191,21 @@ def revealed_families(
 
 
 def replay_exposure(record: ExposureRecord) -> tuple[frozenset[str], int]:
-    """Re-derive exposed families and unlogged disclosures from a guard's release history.
+    """Re-derive exposed families and unauthorized disclosures from a release history.
 
-    An authorized release exposes what it revealed. A release to a selector or evaluator that
-    revealed a family without authorization is an unlogged case-level disclosure, and its
-    families are exposed too.
+    Any release that reveals a family, to any role, exposes what it reveals once combined with
+    every earlier release. Without a valid named authorizer it is also an unauthorized
+    (unlogged) case-level disclosure. A malformed cell reveals everything.
     """
     released: list[frozenset[str]] = []
     exposed: set[str] = set()
     unlogged = 0
     for entry in record.releases:
         revealed = revealed_families(released, entry.cell, record.universe)
-        if entry.authorized_by:
+        if revealed:
             exposed.update(revealed)
-        elif entry.protected_role and revealed:
-            unlogged += 1
-            exposed.update(revealed)
+            if not valid_identity(entry.authorized_by):
+                unlogged += 1
         released.append(entry.cell)
     return frozenset(exposed), unlogged
 
@@ -167,6 +220,7 @@ class ExposureGuard:
         self._history: list[ReleaseEntry] = []
         self._log: list[LogEntry] = []
         self._exposed: set[str] = set()
+        self._unauthorized = 0
 
     @property
     def log(self) -> tuple[LogEntry, ...]:
@@ -176,9 +230,16 @@ class ExposureGuard:
     def exposed_families(self) -> frozenset[str]:
         return frozenset(self._exposed)
 
+    @property
+    def unauthorized_disclosures(self) -> int:
+        """Revealing releases made without authorization (to an unprotected role)."""
+        return self._unauthorized
+
     def record(self) -> ExposureRecord:
-        """The release history the audit replays to derive exposure itself."""
-        return ExposureRecord(self._universe, tuple(self._history))
+        """The release history the audit replays; registered as issued by this process."""
+        issued = ExposureRecord(self._universe, tuple(self._history))
+        _ISSUED[id(issued)] = issued
+        return issued
 
     def _record(self, request: QueryRequest, decision: str, reason: str, by: str | None) -> int:
         index = len(self._log)
@@ -188,7 +249,7 @@ class ExposureGuard:
                 request.query_id,
                 request.surface.value,
                 request.channel.value,
-                canonical_digest(sorted(request.cell)),
+                _cell_digest(request.cell),
                 decision,
                 reason,
                 by,
@@ -201,13 +262,14 @@ class ExposureGuard:
 
     def _append(self, request: QueryRequest, by: str | None) -> None:
         self._released.append(request.cell)
-        protected = bool(request.roles & PROTECTED_ROLES)
-        self._history.append(ReleaseEntry(request.cell, protected, by))
+        self._history.append(ReleaseEntry(request.cell, is_protected(request.roles), by))
 
     def evaluate(self, request: QueryRequest) -> QueryDecision:
-        protected = bool(request.roles & PROTECTED_ROLES)
+        protected = is_protected(request.roles)
         revealed = self._revealed(request)
-        malformed = not request.cell or not request.cell <= self._universe
+        malformed = not well_formed_cell(request.cell, self._universe) or (
+            type(request.query_id) is not str
+        )
         if malformed or (protected and revealed):
             if malformed:
                 reason = "suppressed_malformed_cell"
@@ -220,7 +282,10 @@ class ExposureGuard:
             return QueryDecision(False, reason, digest, index)
         self._append(request, None)
         if revealed:
-            # Neither selector nor evaluator: released, and the isolating release is logged.
+            # Known unprotected role: released, but under the pooled-knowledge model the families
+            # it isolates are exposed, and the release counts as an unauthorized disclosure.
+            self._exposed.update(revealed)
+            self._unauthorized += 1
             reason = "released_isolating_cell_to_unprotected_role"
             index = self._record(request, "released", reason, None)
             return QueryDecision(True, reason, canonical_digest(sorted(revealed)), index)
@@ -228,8 +293,8 @@ class ExposureGuard:
 
     def authorize_disclosure(self, request: QueryRequest, authorized_by: str) -> QueryDecision:
         """Release an isolating cell with a logged authorization; affected families retire."""
-        if not authorized_by.strip():
-            raise ValueError("authorization requires a named authorizer")
+        if not valid_identity(authorized_by):
+            raise ValueError("authorization requires a named authorizer of type str")
         revealed = self._revealed(request)
         self._append(request, authorized_by)
         self._exposed.update(revealed)
@@ -244,6 +309,12 @@ class ExposureGuard:
         """Run ``compute`` only for an allowed request, so suppression never touches answers."""
         decision = self.evaluate(request)
         return decision, (compute(request.cell) if decision.allowed else None)
+
+
+def _cell_digest(cell: object) -> str:
+    if type(cell) is frozenset and all(type(f) is str for f in cell):
+        return canonical_digest(sorted(cell))
+    return canonical_digest(["malformed", repr(type(cell).__name__)])
 
 
 def successor_protected_manifest(

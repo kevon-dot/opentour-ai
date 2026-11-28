@@ -18,7 +18,9 @@ from opentour_training.evaluation.benchmark_audit.exposure import (
     ExposureGuard,
     ProtectedManifest,
     QueryRequest,
+    Role,
     Surface,
+    is_protected,
     isolated_families,
     replay_exposure,
     successor_protected_manifest,
@@ -405,7 +407,7 @@ def test_caller_asserting_no_exposure_cannot_override_the_release_history() -> N
     assert derived["verdict"] == Verdict.CLAIM_LIMITED.value
     assert derived["coverage"]["critical"]["label"] == "3/4"
     assert derived["excluded_reasons"] == ["exposed_answer_key_retired"]
-    assert derived["provenance"]["exposed_families"] == "worker_derived_from_exposure_log"
+    assert derived["provenance"]["exposed_families"] == "worker_derived_from_guard_instance"
 
 
 def test_caller_asserting_zero_unlogged_disclosures_cannot_override_the_release_history() -> None:
@@ -426,7 +428,7 @@ def test_caller_asserting_zero_unlogged_disclosures_cannot_override_the_release_
     assert clean.evaluate(request("ok", {"generated-r01", "generated-r02"}, roles=SELECTOR)).allowed
     allowed = audit(inputs_for(baseline_records(), exposure_record=clean.record()))
     assert allowed["verdict"] == Verdict.EVALUATION_ALLOWED.value
-    assert allowed["provenance"]["unlogged_disclosures"] == "worker_derived_from_exposure_log"
+    assert allowed["provenance"]["unlogged_disclosures"] == "worker_derived_from_guard_instance"
 
 
 def test_exposure_log_that_does_not_cover_every_protected_family_holds() -> None:
@@ -436,3 +438,209 @@ def test_exposure_log_that_does_not_cover_every_protected_family_holds() -> None
     assert [r["code"] for r in receipt["reasons"]] == ["exposure_log_scope_mismatch"]
     assert receipt["provenance"]["exposure_log_covers_protected_families"] is False
     assert receipt["next_evidence_request"]
+
+
+# ---- M1: closed role set; anything unknown or non-canonical is protected ----
+
+
+class _NeverEqual(str):
+    """A str subclass that equals nothing, so set membership tests miss it."""
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+class _AlwaysEqual(str):
+    """A str subclass that equals everything."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    __hash__ = str.__hash__
+
+
+NON_CANONICAL_ROLES = {
+    "title_case": frozenset({"Selector"}),
+    "upper_case": frozenset({"SELECTOR"}),
+    "leading_space": frozenset({" selector"}),
+    "trailing_space": frozenset({"selector "}),
+    "zero_width_space": frozenset({"evaluator​"}),
+    "cyrillic_homoglyph": frozenset({"ѕelector"}),
+    "unknown_compound": frozenset({"model_selector"}),
+    "never_equal_subclass": frozenset({_NeverEqual("selector")}),
+    "always_equal_subclass_reader": frozenset({_AlwaysEqual("reader")}),
+    "reader_plus_unknown": frozenset({"reader", "auditor"}),
+    "empty": frozenset(),
+    # Non-canonical spellings of the one unprotected role must not be normalised into it.
+    "reader_title_case": frozenset({"Reader"}),
+    "reader_upper_case": frozenset({"READER"}),
+    "reader_padded": frozenset({" reader "}),
+    "reader_zero_width": frozenset({"reader​"}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(NON_CANONICAL_ROLES))
+def test_unknown_or_non_canonical_roles_fail_closed_as_protected(name: str) -> None:
+    roles = NON_CANONICAL_ROLES[name]
+    g = guard()
+    decision = g.evaluate(request("q", {DISAGREE}, roles=roles))
+    assert not decision.allowed, decision.reason
+    assert decision.reason == "suppressed_answer_revealing_arm_disagreement"
+    assert g.record().releases == () and g.exposed_families == frozenset()
+    assert is_protected(roles)
+
+
+def test_roles_that_are_not_a_collection_fail_closed() -> None:
+    for roles in ("reader", None, 7):
+        assert is_protected(roles)
+        g = guard()
+        query = QueryRequest("q", Surface.CHART, Channel.WORKER_UI, frozenset({DISAGREE}), roles)  # type: ignore[arg-type]
+        assert not g.evaluate(query).allowed
+
+
+def test_only_the_exact_known_reader_role_is_unprotected() -> None:
+    for roles in (READER, frozenset({Role.READER}), [Role.READER.value]):
+        assert not is_protected(roles)
+    for roles in (
+        SELECTOR,
+        EVALUATOR,
+        frozenset({Role.SELECTOR}),
+        frozenset({"reader", "selector"}),
+    ):
+        assert is_protected(roles)
+
+
+# ---- M2: pooled knowledge; a revealing release to any role is exposure, in any order ----
+
+P0, P1, P2 = "generated-f01", "generated-f02", "generated-f04"
+
+
+def test_selector_first_then_reader_differencing_is_exposure_and_an_unlogged_disclosure() -> None:
+    g = guard()
+    assert g.evaluate(request("s", {P0, P1}, roles=SELECTOR)).allowed
+    reader = g.evaluate(request("r", {P0}, roles=READER))
+    assert reader.allowed and reader.reason == "released_isolating_cell_to_unprotected_role"
+    assert g.exposed_families == {P0, P1}
+    assert g.unauthorized_disclosures == 1
+    assert replay_exposure(g.record()) == (frozenset({P0, P1}), 1)
+
+
+def test_reader_first_then_selector_differencing_is_exposure_and_the_selector_is_suppressed() -> (
+    None
+):
+    g = guard()
+    assert g.evaluate(request("r", {P0}, roles=READER)).allowed
+    assert g.exposed_families == {P0} and g.unauthorized_disclosures == 1
+    selector = g.evaluate(request("s", {P0, P1}, roles=SELECTOR))
+    assert not selector.allowed and selector.reason == "suppressed_single_family_isolation"
+    assert replay_exposure(g.record()) == (frozenset({P0}), 1)
+
+
+def test_three_release_chain_exposes_every_family_it_pins_down() -> None:
+    g = guard()
+    assert g.evaluate(request("s1", {P0, P1}, roles=SELECTOR)).allowed
+    assert g.evaluate(request("s2", {P1, P2}, roles=SELECTOR)).allowed
+    assert not g.evaluate(request("s3", {P0, P2}, roles=SELECTOR)).allowed
+    assert g.exposed_families == frozenset()
+    reader = g.evaluate(request("r3", {P0, P2}, roles=READER))
+    assert reader.allowed
+    assert g.exposed_families == {P0, P1, P2}
+    assert replay_exposure(g.record()) == (frozenset({P0, P1, P2}), 1)
+
+
+def test_order_of_a_differencing_pair_does_not_change_what_is_exposed() -> None:
+    first, second = guard(), guard()
+    first.evaluate(request("s", {P0, P1}, roles=SELECTOR))
+    first.evaluate(request("r", {P0}, roles=READER))
+    second.evaluate(request("r", {P0}, roles=READER))
+    second.evaluate(request("r2", {P0, P1}, roles=READER))
+    assert first.exposed_families == second.exposed_families == {P0, P1}
+
+
+def test_selector_reader_differencing_makes_the_audit_invalid() -> None:
+    g = ExposureGuard(BASELINE_PROTECTED, frozenset())
+    assert g.evaluate(request("s", {"generated-r01", "generated-r02"}, roles=SELECTOR)).allowed
+    assert g.evaluate(request("r", {"generated-r01"}, roles=READER)).allowed
+    receipt = audit(inputs_for(baseline_records(), exposure_record=g.record()))
+    assert receipt["verdict"] == Verdict.INVALID.value
+    assert {"code": "unlogged_case_level_disclosure", "detail": "1"} in receipt["reasons"]
+    assert receipt["denominator_flow"]["excluded"] == 2
+
+
+# ---- Malformed cells and identities inside a history; caller additions with a history ----
+
+
+def test_malformed_cell_inside_a_replayed_or_authorized_history_reveals_everything() -> None:
+    bad = frozenset({"generated-unknown"})
+    authorized = ExposureRecord(UNIVERSE, (ReleaseEntry(bad, False, "generated-owner"),))
+    assert replay_exposure(authorized) == (UNIVERSE, 0)
+    unauthorized = ExposureRecord(UNIVERSE, (ReleaseEntry(bad, False, None),))
+    assert replay_exposure(unauthorized) == (UNIVERSE, 1)
+    g = guard()
+    assert g.authorize_disclosure(request("auth", {"generated-unknown"}), "generated-owner").allowed
+    assert g.exposed_families == UNIVERSE
+    assert replay_exposure(g.record()) == (UNIVERSE, 0)
+
+
+class _Hollow(str):
+    """A str subclass that reports zero length."""
+
+    def __len__(self) -> int:
+        return 0
+
+
+@pytest.mark.parametrize(
+    "authorizer", [_Hollow("generated-owner"), _NeverEqual("generated-owner"), 7, None, " "]
+)
+def test_authorizer_must_be_an_exact_non_blank_str_in_the_guard_and_in_replay(
+    authorizer: object,
+) -> None:
+    g = guard()
+    with pytest.raises(ValueError):
+        g.authorize_disclosure(request("auth", {DISAGREE}), authorizer)  # type: ignore[arg-type]
+    assert g.record().releases == ()
+    entry = ReleaseEntry(frozenset({DISAGREE}), True, authorizer)  # type: ignore[arg-type]
+    assert replay_exposure(ExposureRecord(UNIVERSE, (entry,))) == (frozenset({DISAGREE}), 1)
+
+
+def test_query_id_must_be_an_exact_str() -> None:
+    g = guard()
+    query = QueryRequest(
+        _Hollow("q"), Surface.CHART, Channel.WORKER_UI, frozenset({P0, P1}), READER
+    )
+    decision = g.evaluate(query)
+    assert not decision.allowed and decision.reason == "suppressed_malformed_cell"
+
+
+class _PlainSub(str):
+    """A str subclass that behaves like its value; still not an exact str identity."""
+
+
+def test_cell_family_ids_must_be_exact_str() -> None:
+    g = guard()
+    cell = frozenset({_PlainSub(P0), P1})
+    assert cell <= UNIVERSE  # equality alone would admit it
+    query = QueryRequest("q", Surface.CHART, Channel.WORKER_UI, cell, READER)
+    decision = g.evaluate(query)
+    assert not decision.allowed and decision.reason == "suppressed_malformed_cell"
+    assert g.record().releases == ()
+
+
+def test_caller_values_still_add_when_a_guard_history_is_supplied() -> None:
+    g = ExposureGuard(BASELINE_PROTECTED, frozenset())
+    assert g.evaluate(request("ok", {"generated-r01", "generated-r02"}, roles=SELECTOR)).allowed
+    history = g.record()
+    added = audit(
+        inputs_for(
+            baseline_records(),
+            exposure_record=history,
+            exposed_families=frozenset({"generated-c01"}),
+        )
+    )
+    assert added["excluded_reasons"] == ["exposed_answer_key_retired"]
+    assert added["coverage"]["critical"]["label"] == "3/4"
+    counted = audit(inputs_for(baseline_records(), exposure_record=history, unlogged_disclosures=2))
+    assert counted["verdict"] == Verdict.INVALID.value
+    assert {"code": "unlogged_case_level_disclosure", "detail": "2"} in counted["reasons"]

@@ -17,7 +17,11 @@ from opentour_training.evaluation.benchmark_audit.evidence_requests import (
     ALERT_EVIDENCE,
     NEXT_EVIDENCE,
 )
-from opentour_training.evaluation.benchmark_audit.exposure import replay_exposure
+from opentour_training.evaluation.benchmark_audit.exposure import (
+    issued_by_guard,
+    replay_exposure,
+    valid_identity,
+)
 from opentour_training.evaluation.benchmark_audit.inference import (
     design_weighted_error,
     families_needed_for_ceiling,
@@ -72,13 +76,21 @@ def draw_audit_sample(
     return frozenset(chosen)
 
 
+def _distinct_adjudicator(r: FamilyRecord) -> bool:
+    """Exact ``str`` identities only, so no subclass can fake inequality."""
+    return (
+        valid_identity(r.adjudicator_id)
+        and valid_identity(r.first_labeler_id)
+        and r.adjudicator_id != r.first_labeler_id
+    )
+
+
 def _verifier(r: FamilyRecord) -> tuple[str | None, str | None]:
-    if r.independent_source and r.independent_label_digest:
+    if valid_identity(r.independent_source) and r.independent_label_digest:
         return "independent_record", r.independent_label_digest
     if (
-        r.adjudicator_id
-        and r.adjudicator_label_digest
-        and r.adjudicator_id != r.first_labeler_id
+        r.adjudicator_label_digest
+        and _distinct_adjudicator(r)
         and not r.adjudicator_saw_first_label
         and not r.adjudicator_saw_predictions
     ):
@@ -86,14 +98,16 @@ def _verifier(r: FamilyRecord) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _classify(inputs: AuditInputs, exposed: frozenset[str]) -> list[_Row]:
+def _classify(
+    inputs: AuditInputs, exposed: frozenset[str], *, honor_caller_exclusions: bool = True
+) -> list[_Row]:
     prereg = inputs.prereg
     rows: list[_Row] = []
     for r in inputs.records:
         if r.split != "protected":
             continue
         excluded = (
-            r.excluded_reason is not None
+            (honor_caller_exclusions and r.excluded_reason is not None)
             or r.decided_day > prereg.temporal_cutoff_day
             or r.family_id in exposed
         )
@@ -144,7 +158,9 @@ def _overlaps(records: Sequence[FamilyRecord]) -> tuple[dict[str, int], int]:
     return found, unknown
 
 
-_WORKER_DERIVED = "worker_derived_from_exposure_log"
+_GUARD_DERIVED = "worker_derived_from_guard_instance"
+_SUPPLIED_HISTORY = "replayed_from_supplied_unsigned_history"
+_CALLER = "caller_asserted"
 
 
 def _upstream_receipt_verified_by_worker(snapshot: CandidateSnapshotBinding | None) -> bool:
@@ -165,26 +181,44 @@ class _Exposure:
     unlogged: int
     basis: str
     scope_ok: bool
+    history_nonempty: bool
+    malformed: tuple[str, ...]
+
+    @property
+    def worker_held(self) -> bool:
+        """Derived by a guard instance in this process, covering every family, not empty."""
+        return self.basis == _GUARD_DERIVED and self.scope_ok and self.history_nonempty
 
 
 def _exposure(inputs: AuditInputs) -> _Exposure:
-    """Exposure the worker derives from the guard's release history, plus caller additions.
+    """Exposure replayed from the release history, plus caller additions.
 
     A caller's list or count can only add to what the replayed history implies. Without a
-    history, exposure is caller-asserted and the receipt says so.
+    history, exposure is caller-asserted. A history counts as worker-derived only when a guard
+    instance in this process issued that exact record; any other history is replayed but stays
+    a supplied, unsigned history. Malformed caller values are reported and fail closed.
     """
+    malformed: list[str] = []
+    caller_unlogged = inputs.unlogged_disclosures
+    if type(caller_unlogged) is not int or caller_unlogged < 0:
+        malformed.append("unlogged_disclosures")
+        caller_unlogged = 0
+    caller_exposed = inputs.exposed_families
+    if type(caller_exposed) is not frozenset or not all(type(f) is str for f in caller_exposed):
+        malformed.append("exposed_families")
+        caller_exposed = frozenset()
     record = inputs.exposure_record
     if record is None:
-        return _Exposure(
-            inputs.exposed_families, inputs.unlogged_disclosures, "caller_asserted", True
-        )
+        return _Exposure(caller_exposed, caller_unlogged, _CALLER, True, False, tuple(malformed))
     derived, unlogged = replay_exposure(record)
     protected = {r.family_id for r in inputs.records if r.split == "protected"}
     return _Exposure(
-        inputs.exposed_families | derived,
-        max(inputs.unlogged_disclosures, unlogged),
-        _WORKER_DERIVED,
+        caller_exposed | derived,
+        max(caller_unlogged, unlogged),
+        _GUARD_DERIVED if issued_by_guard(record) else _SUPPLIED_HISTORY,
         protected <= record.universe,
+        bool(record.releases),
+        tuple(malformed),
     )
 
 
@@ -193,9 +227,7 @@ def _independence(rows: Sequence[_Row]) -> tuple[str, dict[str, int]]:
     adjudicated = [r.record for r in rows if r.record.adjudicator_id]
     counts = {
         "adjudicated": len(adjudicated),
-        "distinct_from_first_labeler": sum(
-            1 for r in adjudicated if r.adjudicator_id != r.first_labeler_id
-        ),
+        "distinct_from_first_labeler": sum(1 for r in adjudicated if _distinct_adjudicator(r)),
         "recorded_blind_to_first_label": sum(
             1 for r in adjudicated if not r.adjudicator_saw_first_label
         ),
@@ -240,7 +272,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         by_status[row.status].append(row)
     # Label-quality gates read every protected family, exposure-retired or not: retiring a
     # family must not launder its disputed label or its unresolved ambiguity.
-    gate_rows = _classify(inputs, frozenset())
+    # Caller-set exclusions are honoured for the denominator but not for these gates either.
+    gate_rows = _classify(inputs, frozenset(), honor_caller_exclusions=False)
     gate_verified = [r for r in gate_rows if r.status == "verified"]
     gate_unresolved = sum(1 for r in gate_rows if r.status == "unresolved")
     verified = by_status["verified"]
@@ -280,6 +313,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         invalid.append(Reason("preprocessing_fit_on_protected", pre.revision))
     elif pre is not None and pre.applied_to_protected_revision != pre.revision:
         invalid.append(Reason("preprocessing_not_verified", pre.revision))
+    if exposure.malformed:
+        invalid.append(Reason("caller_assertion_malformed", ",".join(exposure.malformed)))
     if exposure.unlogged > 0:
         invalid.append(Reason("unlogged_case_level_disclosure", str(exposure.unlogged)))
     if p.sampling_design is SamplingDesign.STRATIFIED_RANDOM:
@@ -417,8 +452,17 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     matches = sum(1 for r in verified if not r.mismatch)
     independence, independence_counts = _independence(rows)
     eligible = verdict is Verdict.EVALUATION_ALLOWED and real and precision_ok
+    # Caller assertions an eligible claim rests on; the worker cannot verify these.
+    dependencies: set[str] = set()
+    if eligible:
+        if not exposure.worker_held:
+            dependencies.update({"exposed_families", "unlogged_disclosures"})
+        if any(r.verifier == "blinded_adjudicator" for r in verified):
+            dependencies.add("adjudicator_blinding_flags")
+        if any(r.record.excluded_reason is not None for r in rows):
+            dependencies.add("excluded_reason")
     # The alert needs worker-held evidence, never a caller boolean: an upstream receipt the
-    # worker verified itself and exposure replayed from a history covering every family.
+    # worker verified itself and exposure replayed from a covering, non-empty guard history.
     alert_blockers: list[str] = []
     if not eligible:
         alert_blockers.append("overall_accuracy_not_eligible")
@@ -426,20 +470,21 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         alert_blockers.append("evidence_origin_not_observed")
     if not _upstream_receipt_verified_by_worker(inputs.candidate_snapshot):
         alert_blockers.append("upstream_receipt_not_worker_verified")
-    if exposure.basis != _WORKER_DERIVED or not exposure.scope_ok:
+    if not exposure.worker_held:
         alert_blockers.append("exposure_not_derived_from_covering_history")
+    if dependencies:
+        alert_blockers.append("claim_rests_on_caller_assertions")
     alert_ok = not alert_blockers
     if eligible:
         requests.extend(ALERT_EVIDENCE[b] for b in alert_blockers if b in ALERT_EVIDENCE)
-    # Caller assertions a permitted claim currently rests on; the worker cannot verify these.
-    dependencies: set[str] = set()
-    if eligible or alert_ok:
-        if exposure.basis == "caller_asserted":
-            dependencies.update({"exposed_families", "unlogged_disclosures"})
-        if any(r.verifier == "blinded_adjudicator" for r in verified):
-            dependencies.add("adjudicator_blinding_flags")
     if alert_ok:
         dependencies.add("evidence_origin")
+    if not eligible:
+        overall_claim = "not_established"
+    elif dependencies:
+        overall_claim = "claim_limited_caller_asserted"
+    else:
+        overall_claim = "eligible_pending_upstream_receipt"
     receipt: dict[str, Any] = {
         "schema_version": RECEIPT_SCHEMA,
         "verdict": verdict.value,
@@ -522,9 +567,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
                 if critical_required or not critical_verified
                 else "permitted_if_precision_met"
             ),
-            "overall_accuracy_claim": (
-                "eligible_pending_upstream_receipt" if eligible else "not_established"
-            ),
+            "overall_accuracy_claim": overall_claim,
             "overall_accuracy_alerts_emitted": 0,
             "broad_improvement_alerts_emitted": 0,
             "customer_accuracy_alert_permitted": alert_ok,
@@ -556,6 +599,9 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
             "exposed_families": exposure.basis,
             "unlogged_disclosures": exposure.basis,
             "exposure_log_covers_protected_families": exposure.scope_ok,
+            "exposure_history_nonempty": exposure.history_nonempty,
+            "exposure_history_signed": False,
+            "excluded_reason": "caller_asserted",
             "upstream_snapshot_verified": "caller_asserted",
             "evidence_origin": "caller_asserted",
             "adjudicator_blinding_flags": "caller_asserted",
