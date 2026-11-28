@@ -328,7 +328,7 @@ class _Page:
         if not action:
             catalog = self._catalog(binding, service)
         authorize()
-        status["may_preview"] = True
+        status["may_preview"] = receipt is None
         status["source_pairs"] = (
             [
                 {

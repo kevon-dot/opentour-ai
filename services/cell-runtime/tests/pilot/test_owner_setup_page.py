@@ -173,6 +173,8 @@ def test_signed_in_owner_selects_catalog_and_commits_exact_dual_signed_settings(
     status, _, result = page.request(form=submit)
     current = page.setup.service.inspect(actor=page.setup.owner)["current"]
     assert status == 200 and "Saved settings" in result and current["revision"] in result
+    assert 'href="/owner/setup">Review current settings</a>' in result
+    assert "<form" not in result and "source_pair" not in result
     assert current["workflow_owner"] == _OWNER and current["actor"] == page.setup.owner
     assert current["binding"]["pair_revision"] == form["source_pair"]
     assert page.request(form=submit)[0] == 200
