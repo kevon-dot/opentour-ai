@@ -66,6 +66,7 @@ COPY --from=build /opt/venv /opt/venv
 # Driver floor, made mechanical: remove the base image's CUDA forward-compatibility libcuda so it
 # can never be selected, and (below) require CUDA 13.0 from the host driver with no brand
 # exceptions, so the container toolkit refuses hosts on the 535-575 driver branches.
+# This RUN stays after the last COPY/ADD of the stage, so nothing copied later restores compat.
 RUN rm -rf /usr/local/cuda/compat /usr/local/cuda-13.0/compat \
  && ldconfig \
  && test ! -e /usr/local/cuda/compat
