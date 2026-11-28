@@ -12,6 +12,7 @@ from opentour_cell.pilot.capture_streams import (
     CaptureGrant,
     CaptureStreams,
     EventRef,
+    ProjectionSpec,
     RequestMetadata,
     ResponseMetadata,
 )
@@ -382,3 +383,315 @@ def test_current_counts_use_newest_revision_and_retain_prior_attempts(tmp_path, 
     assert {item["attempt_ref"] for item in view["attempts"]} == {
         attempt.attempt_ref for attempt in (first, newer, other, dispute)
     }
+
+
+# Follow-through tests for sealed rows, the missing-chunk control and exact projections.
+# Labels: MC is the ticket's missing-chunk and denominator control, CU custody and failure.
+
+
+def _streams(tmp_path):
+    from capture_fixtures import ledger
+
+    return ledger(tmp_path / "owner")
+
+
+def _gap_stream(capture, operation="op-d1", *, chunks=(0, 2)):
+    from capture_fixtures import NOW, REQUEST_PROJECTION, STREAM, WORKFLOW
+
+    attempt = CapturedAttempt(operation, "a1", "case-d1", "family-d1", "D1", 1)
+
+    def event(source, name, when):
+        return EventRef(source, name, 1, when)
+
+    capture.started(
+        "gateway-collector",
+        WORKFLOW,
+        attempt,
+        event("gateway-log", operation + "-start", 100),
+        metadata=RequestMetadata("invoice-alias", "projection-v1", "P7"),
+        request_projection=REQUEST_PROJECTION,
+    )
+    for index in chunks:
+        capture.observed_chunk(
+            "gateway-collector",
+            WORKFLOW,
+            attempt,
+            event("gateway-log", f"{operation}-chunk-{index}", 101 + index),
+            index,
+            STREAM[index],
+        )
+    capture.terminal(
+        "gateway-collector",
+        WORKFLOW,
+        attempt,
+        event("gateway-log", operation + "-terminal", 104),
+        "finished",
+        3,
+        metadata=ResponseMetadata("receipt-1", None, "SUPPLIES", "parser-v1"),
+    )
+    assert NOW > 104
+    return attempt
+
+
+def test_mc_copied_or_edited_rows_cannot_fill_a_gap_or_invent_a_commit(tmp_path):
+    from capture_fixtures import WORKFLOW
+
+    capture, _ = _streams(tmp_path)
+    _gap_stream(capture, "op-full", chunks=(0, 1, 2))
+    _gap_stream(capture, "op-gap")
+    assert capture.inspect("owner", WORKFLOW, "op-gap")["attempts"][0]["exact_stream"] is False
+    with capture.store._db(write=True) as db:
+        db.execute(
+            "INSERT INTO decision_capture_streams SELECT tenant,epoch,workflow,grant_revision,"
+            "policy_revision,'op-gap',replace(attempt,'op-full','op-gap'),decision_ref,"
+            "decision_revision,source_ref,'copied-chunk',event_revision,observed_at,kind,payload "
+            "FROM decision_capture_streams WHERE operation_ref='op-full' AND kind='chunk' "
+            "AND json_extract(payload,'$.index')=1"
+        )
+    with pytest.raises(CaptureError, match="decision_capture_unavailable"):
+        capture.inspect("owner", WORKFLOW, "op-gap")
+    with capture.store._db(write=True) as db:
+        db.execute("DELETE FROM decision_capture_streams WHERE event_ref='copied-chunk'")
+        db.execute(
+            "INSERT INTO decision_capture_streams SELECT tenant,epoch,workflow,grant_revision,"
+            "policy_revision,operation_ref,attempt,decision_ref,decision_revision,"
+            "'decision-journal','forged-commit',1,observed_at,'commit',"
+            "json_object('commit_ref','forged','decision_payload_ref','forged','seal',"
+            "json_extract(payload,'$.seal')) "
+            "FROM decision_capture_streams WHERE operation_ref='op-gap' AND kind='chunk' LIMIT 1"
+        )
+    with pytest.raises(CaptureError, match="decision_capture_unavailable"):
+        capture.inspect("owner", WORKFLOW, "op-gap")
+    with capture.store._db(write=True) as db:
+        db.execute("DELETE FROM decision_capture_streams WHERE event_ref='forged-commit'")
+    assert capture.inspect("owner", WORKFLOW, "op-gap")["committed_decisions"] == 0
+
+
+def test_mc_final_body_from_another_source_or_actor_is_refused(tmp_path):
+    from capture_fixtures import STREAM, WORKFLOW
+
+    capture, _ = _streams(tmp_path)
+    attempt = _gap_stream(capture)
+    for actor, source in (
+        ("journal-collector", "decision-journal"),
+        ("gateway-collector", "transcript-export"),
+        ("owner", "gateway-log"),
+    ):
+        with pytest.raises(CaptureError):
+            capture.final_body(
+                actor,
+                WORKFLOW,
+                attempt,
+                EventRef(source, "body", 1, 105),
+                b"".join(STREAM),
+                tuple(len(part) for part in STREAM),
+            )
+    with pytest.raises(CaptureError):
+        capture.final_body(
+            "gateway-collector",
+            WORKFLOW,
+            attempt,
+            EventRef("gateway-log", "body", 1, 105),
+            b"".join(STREAM),
+            (1, 2, 3),
+        )
+    assert capture.inspect("owner", WORKFLOW, "op-d1")["attempts"][0]["exact_stream"] is False
+
+
+def test_mc_request_projection_verifies_in_a_fresh_process(tmp_path):
+    import subprocess
+    import sys
+
+    from capture_fixtures import COMPONENTS, NOW, REQUEST_PROJECTION, WORKFLOW, install_local
+
+    capture, _ = _streams(tmp_path)
+    capture.authority = install_local(capture)
+    saved = tmp_path / "saved-projection.json"
+    saved.write_bytes(REQUEST_PROJECTION)
+    script = (
+        "import json,sys\n"
+        "from pathlib import Path\n"
+        "from opentour_cell.pilot.capture_streams import CaptureStreams, ProjectionSpec\n"
+        "from opentour_cell.pilot.local_capture_authority import LocalCaptureAuthority\n"
+        "from opentour_cell.pilot.training import LocalTrainingStore\n"
+        "store = LocalTrainingStore(Path(sys.argv[1]), 'org-a', existing_only=True)\n"
+        f"authority = LocalCaptureAuthority(Path(sys.argv[1]).parent, 'org-a', {WORKFLOW!r})\n"
+        f"streams = CaptureStreams(store, authority, lambda: {NOW})\n"
+        "spec = ProjectionSpec('application_request', 'canonical-json-v1', 'projection-v1',"
+        f" {COMPONENTS!r})\n"
+        "saved = Path(sys.argv[2]).read_bytes()\n"
+        "print(json.dumps(streams.verify_projection('owner', "
+        f"{WORKFLOW!r}, 'op-d1', 'a1', spec, saved)))\n"
+    )
+    _gap_stream(capture, chunks=(0, 1, 2))
+
+    def fresh(path):
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(capture.store.path), str(path)],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr[-600:]
+        return json.loads(result.stdout)
+
+    verdict = fresh(saved)
+    assert (verdict["exact_replay"], verdict["reason"]) == ("verified", None)
+    assert (verdict["integrity"], verdict["issuer_authenticated"]) == ("locally_keyed", False)
+    saved.write_bytes(REQUEST_PROJECTION.replace(b"PO-v1", b"PO-v2"))
+    assert fresh(saved)["reason"] == "fingerprint_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda value: {k: v for k, v in value.items() if k != "tools"}, "missing_component"),
+        (lambda value: value | {"extra": 1}, "undeclared_component"),
+        (lambda value: json.dumps(value, sort_keys=False).encode(), "normalization_collision"),
+        (
+            lambda value: json.dumps(value, ensure_ascii=True, sort_keys=True).encode(),
+            "normalization_collision",
+        ),
+        (
+            lambda value: (
+                b'{"tools":[],"tools":[],'
+                + json.dumps(value, separators=(",", ":"), sort_keys=True).encode()[1:]
+            ),
+            "normalization_collision",
+        ),
+        (lambda value: b"[" + b"]", "unparseable_projection"),
+        (lambda value: b"\xff\xfe", "unparseable_projection"),
+    ],
+)
+def test_mc_missing_components_and_normalization_collisions_fail_exact_replay(
+    tmp_path, change, reason
+):
+    from capture_fixtures import COMPONENTS, REQUEST_PROJECTION, WORKFLOW, projection_bytes
+
+    capture, _ = _streams(tmp_path)
+    _gap_stream(capture, chunks=(0, 1, 2))
+    spec = ProjectionSpec("application_request", "canonical-json-v1", "projection-v1", COMPONENTS)
+    value = json.loads(REQUEST_PROJECTION)
+    changed = change(value)
+    saved = changed if isinstance(changed, bytes) else projection_bytes(changed)
+    verdict = capture.verify_projection("owner", WORKFLOW, "op-d1", "a1", spec, saved)
+    assert (verdict["exact_replay"], verdict["reason"]) == ("unavailable", reason)
+    exact = capture.verify_projection("owner", WORKFLOW, "op-d1", "a1", spec, REQUEST_PROJECTION)
+    assert exact["exact_replay"] == "verified"
+    other = ProjectionSpec("application_request", "canonical-json-v1", "projection-v2", COMPONENTS)
+    assert (
+        capture.verify_projection("owner", WORKFLOW, "op-d1", "a1", other, REQUEST_PROJECTION)[
+            "reason"
+        ]
+        == "projection_revision_mismatch"
+    )
+    with pytest.raises(CaptureError):
+        capture.verify_projection("response-inspector", WORKFLOW, "op-d1", "a1", spec, saved)
+
+
+def test_mc_response_bytes_cannot_fill_an_unobserved_chunk(tmp_path):
+    from capture_fixtures import STREAM, WORKFLOW
+
+    capture, _ = _streams(tmp_path)
+    attempt = _gap_stream(capture)
+    spec = ProjectionSpec("provider_response", "raw-chunks-v1", "projection-v1")
+    gap = capture.verify_projection("owner", WORKFLOW, "op-d1", "a1", spec, STREAM)
+    assert (gap["exact_replay"], gap["reason"]) == ("unavailable", "incomplete_stream")
+    capture.final_body(
+        "gateway-collector",
+        WORKFLOW,
+        attempt,
+        EventRef("gateway-log", "final-body", 1, 106),
+        b"".join(STREAM),
+        tuple(len(part) for part in STREAM),
+    )
+    view = capture.inspect("response-inspector", WORKFLOW, "op-d1")["attempts"][0]
+    assert (view["exact_stream"], view["completed_by"], view["received_indices"]) == (
+        True,
+        "final_body",
+        [0, 2],
+    )
+    verified = capture.verify_projection(
+        "response-inspector", WORKFLOW, "op-d1", "a1", spec, STREAM
+    )
+    assert verified["exact_replay"] == "verified"
+    wrong = (STREAM[0], b"PLIERS", STREAM[2])
+    assert capture.verify_projection("owner", WORKFLOW, "op-d1", "a1", spec, wrong)["reason"] == (
+        "fingerprint_mismatch"
+    )
+    assert (
+        capture.verify_projection("owner", WORKFLOW, "op-d1", "a1", spec, STREAM[:2])["reason"]
+        == "missing_component"
+    )
+
+
+def test_cu_receipts_and_dead_letters_are_scoped_and_conflicts_refused(tmp_path):
+    from capture_fixtures import WORKFLOW
+    from opentour_cell.pilot.capture_streams import PageReceipt
+
+    capture, _ = _streams(tmp_path)
+    receipt = PageReceipt(
+        "gateway-log", "collector-1", "projection-v1", "cursor-1", "cursor-2", 1, 1, 0, 100, 200
+    )
+    page = b"generated page bytes"
+    status = capture.page_status(
+        "gateway-collector", WORKFLOW, "provider_response", "gateway-log", "cursor-1", page
+    )
+    assert status == "new"
+    capture.quarantined(
+        "gateway-collector",
+        WORKFLOW,
+        "provider_response",
+        "gateway-log",
+        "cursor-1",
+        3,
+        "malformed_record",
+    )
+    with pytest.raises(CaptureError):
+        capture.quarantined(
+            "gateway-collector",
+            WORKFLOW,
+            "provider_response",
+            "gateway-log",
+            "cursor-1",
+            4,
+            "free text reason",
+        )
+    stored = capture.acknowledge("gateway-collector", WORKFLOW, "provider_response", receipt, page)
+    assert (
+        capture.acknowledge("gateway-collector", WORKFLOW, "provider_response", receipt, page)
+        == stored
+    )
+    assert (
+        capture.page_status(
+            "gateway-collector", WORKFLOW, "provider_response", "gateway-log", "cursor-1", page
+        )
+        == "acknowledged"
+    )
+    for changed in (page + b"!", None):
+        with pytest.raises(CaptureError, match="capture_cursor_conflict"):
+            if changed is None:
+                capture.acknowledge(
+                    "gateway-collector",
+                    WORKFLOW,
+                    "provider_response",
+                    PageReceipt(**{**receipt.__dict__, "admitted": 2}),
+                    page,
+                )
+            else:
+                capture.page_status(
+                    "gateway-collector",
+                    WORKFLOW,
+                    "provider_response",
+                    "gateway-log",
+                    "cursor-1",
+                    changed,
+                )
+    last = capture.last_receipt("gateway-collector", WORKFLOW, "provider_response", "gateway-log")
+    assert last["next_cursor"] == "cursor-2" and len(last["page_ref"]) == 64
+    owner = capture.receipts("owner", WORKFLOW)
+    assert owner["provider_response"]["quarantined"] == {"malformed_record": 1}
+    assert "page_ref" not in owner["provider_response"]["pages"][0]
+    assert set(capture.receipts("response-inspector", WORKFLOW)) == {"provider_response"}
+    with pytest.raises(CaptureError):
+        capture.last_receipt("owner", WORKFLOW, "provider_response", "gateway-log")

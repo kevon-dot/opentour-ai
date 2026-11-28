@@ -8,14 +8,14 @@ import re
 from pathlib import Path
 from typing import cast
 
-from opentour_cell.pilot.capture_streams import Action, Boundary, CaptureGrant
+from opentour_cell.pilot.capture_streams import BOUNDARIES, Action, Boundary, CaptureGrant
 from opentour_cell.pilot.intake_mcp import require_ref
 from opentour_cell.pilot.onboarding_mcp import _read_private
 from opentour_cell.pilot.operating_point import canonical, digest
 
 SCHEMA = "opentour.pilot.capture-authority.v1"
 PURPOSE = "private_decision_capture_metadata"
-_BOUNDARIES = {"application_request", "provider_response", "application_commit"}
+_BOUNDARIES = BOUNDARIES
 _FIELDS = {
     "schema_version",
     "purpose",
