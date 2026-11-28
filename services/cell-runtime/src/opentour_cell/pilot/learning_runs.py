@@ -738,8 +738,7 @@ class LearningRuns:
                     "can_improve": allowed
                     and mandate.training
                     and plan.training_capable
-                    and self._budget_hold(db, scope, mandate, "evaluate_and_improve")
-                    is None,
+                    and self._budget_hold(db, scope, mandate, "evaluate_and_improve") is None,
                     "can_cancel": "cancel" in scope.permissions,
                     "current_run": latest["run_ref"] if latest else None,
                 }
@@ -1311,15 +1310,6 @@ class LearningRuns:
                 row["effective"] == "evaluate_and_improve" and row["state"] in WORKING,
                 "fit_outside_run_scope",
             )
-            if row["fit_reservation"] is not None:
-                return {
-                    "state": "reserved",
-                    "reservation_ref": row["fit_reservation"],
-                    "reserved_units": row["reserved_units"],
-                }
-            if self.ledger is None:
-                self._fit_hold(db, row, "fit_ledger_unavailable")
-                return {"state": "held", "reason_code": "fit_ledger_unavailable"}
             plan = LearningPlan.from_document(json.loads(row["plan"]))
             intent = FitIntent(
                 row["tenant"],
@@ -1332,9 +1322,24 @@ class LearningRuns:
                 residual_ref,
                 max_units,
             )
+            # The cross-key fit identity intentionally omits the residual and cap. A retry
+            # must also match the original request, including after a lost ledger reply.
+            binding = "v1:" + digest(asdict(intent))
             prior = row["fit_intent"]
-            _need(prior is None or prior == intent.identity, "fit_intent_changed")
-            self._set(db, row, fit_intent=intent.identity)
+            if prior is not None and not prior.startswith("v1:"):
+                self._fit_hold(db, row, "fit_intent_requires_reconciliation")
+                return {"state": "held", "reason_code": "fit_intent_requires_reconciliation"}
+            _need(prior is None or prior == binding, "fit_intent_changed")
+            if row["fit_reservation"] is not None:
+                return {
+                    "state": "reserved",
+                    "reservation_ref": row["fit_reservation"],
+                    "reserved_units": row["reserved_units"],
+                }
+            if self.ledger is None:
+                self._fit_hold(db, row, "fit_ledger_unavailable")
+                return {"state": "held", "reason_code": "fit_ledger_unavailable"}
+            self._set(db, row, fit_intent=binding)
         # Never call the ledger inside the grant guard; reconcile an earlier attempt first.
         try:
             reservation = self.ledger.lookup(intent) or self.ledger.reserve(
@@ -1396,6 +1401,10 @@ class LearningRuns:
         """Record trainer-submission intent before the call; return its deterministic key."""
         with self._leased(principal, claim) as (db, row):
             _need(row["fit_reservation"] is not None, "fit_reservation_required")
+            _need(
+                isinstance(row["fit_intent"], str) and row["fit_intent"].startswith("v1:"),
+                "fit_intent_requires_reconciliation",
+            )
             _need(row["submission"] != "submitted", "trainer_job_exists")
             _need(row["submission"] is None, "trainer_submission_uncertain")
             self._set(db, row, submission="pending")

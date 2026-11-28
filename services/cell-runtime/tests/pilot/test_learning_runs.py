@@ -1164,3 +1164,37 @@ def test_missing_mandate_after_admission_denies_disclosure_cancellation_and_repl
     held = submit(service, owner, ref, "retry")
     assert held["reason_code"] == "standing_mandate_unavailable" and "run_ref" not in held
     assert counts() == before
+
+
+@pytest.mark.parametrize(
+    "field,changed",
+    [
+        ("residual_ref", "residual-2"),
+        ("model_digest", "changed-model"),
+        ("max_units", 91),
+    ],
+)
+def test_fit_retry_rechecks_every_immutable_input_after_restart(site, field, changed):
+    path = site.authorize("schedule", role="scheduler", channel="schedule")
+    scheduler, worker = site.open(path)
+    site.publish()
+    worker.schedule_tick(scheduler)
+    claim = worker.claim(scheduler)
+    args = dict(residual_ref="residual-1", model_digest="base-digest-1", max_units=90)
+    first = worker.reserve_fit(scheduler, claim, **args)
+    scheduler, reopened = site.open(path)
+    with pytest.raises(lr.LearningRunError, match="fit_intent_changed"):
+        reopened.reserve_fit(scheduler, claim, **(args | {field: changed}))
+    assert reopened.reserve_fit(scheduler, claim, **args) == first
+    assert site.ledger.reserve_calls == 1
+    # A historical bare identity did not bind residual or units. Keep it readable, hold
+    # reuse, and preserve the recorded reservation for subsequent settlement.
+    with sqlite3.connect(site.directory / lr.DATABASE) as db:
+        db.execute("UPDATE lr_runs SET fit_intent=? WHERE run_ref=?", ("0" * 64, claim.run_ref))
+    assert reopened.reserve_fit(scheduler, claim, **args) == {
+        "state": "held",
+        "reason_code": "fit_intent_requires_reconciliation",
+    }
+    assert site.ledger.reserve_calls == 1
+    with pytest.raises(lr.LearningRunError, match="fit_intent_requires_reconciliation"):
+        reopened.begin_submission(scheduler, claim)
