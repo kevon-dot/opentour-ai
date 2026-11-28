@@ -29,15 +29,19 @@ the journal directory can set ``cap_verified`` or ``maximum_minor_units`` direct
 the journal is trusted storage that only this connector can write. Closing that would need
 authenticated events (an HMAC or signature over each event, keyed outside the state directory).
 
-Over-cap usage is a hard refusal. Every bounded dimension is compared: money against the
-journaled approved maximum, and seconds, rows and steps against the intent's ``FitBound``. A
+Over-cap usage is a hard refusal. Every bounded dimension is compared against the cap journaled
+at dispatch (currency and all four maxima; never the caller's values at release), using the hold
+shared with the other routes (``connector_ext.usage_hold``). An intent bound whose maxima are not
+exactly ``int`` (bool and ``int`` subclasses included) is refused by ``intent_digest``, so it can
+neither dispatch nor be presented later in a receipt. A
 COMPLETED job with any verified dimension above its bound is held with the fixed reason
 ``over_cap``: ``collect`` builds no candidate, and ``handoff_reference`` and
 ``predict_for_replay`` never use its tuned-model id. Usage that cannot be shown to be within
 every bound is held the same way (fail closed), under its own fixed reason:
 ``usage_unverifiable`` when the usage is missing, non-finite, negative, non-integer or bool, or
 has the wrong shape (including when read back from the journal), and ``cap_unverifiable`` when it
-is in a currency other than the cap's or a bound is missing or invalid. A verified excess wins
+is in a currency other than the cap's or a journaled maximum is missing or invalid (an older
+journal without the seconds, rows and steps maxima reads this way). A verified excess wins
 over an unusable bound. Usage exactly at a bound is accepted. ``hold_reason`` reports the specific
 reason, and ``None`` for a job that is not COMPLETED. The receipt state stays the provider's own
 (COMPLETED); the hold is enforced where the result would be released. ``usage`` still returns
@@ -73,7 +77,29 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from opentour_cell.pilot import model_connector as mc
-from opentour_cell.pilot.connector_ext import EvidenceTier, FenceReceipt, Usage, UsageSource
+from opentour_cell.pilot.connector_ext import CAP_OVER as CAP_OVER
+from opentour_cell.pilot.connector_ext import CAP_UNKNOWN as CAP_UNKNOWN
+from opentour_cell.pilot.connector_ext import CAP_WITHIN as CAP_WITHIN
+from opentour_cell.pilot.connector_ext import HOLD_CAP_UNVERIFIABLE as HOLD_CAP_UNVERIFIABLE
+from opentour_cell.pilot.connector_ext import HOLD_OVER_CAP as HOLD_OVER_CAP
+from opentour_cell.pilot.connector_ext import HOLD_USAGE_UNVERIFIABLE as HOLD_USAGE_UNVERIFIABLE
+from opentour_cell.pilot.connector_ext import (
+    CappedUsage,
+    EvidenceTier,
+    FenceReceipt,
+    JournaledCap,
+    Usage,
+    UsageFigures,
+    UsageSource,
+    cap_currency,
+    cap_limit,
+    cap_status,
+    journal_bound,
+    require_exact_bound,
+    usage_document,
+    usage_hold,
+    usage_valid,
+)
 
 VERSION = "opentour.pilot.managed-connector.v1"
 EVIDENCE_TIER = EvidenceTier.FIXTURE
@@ -235,7 +261,13 @@ def _binding_document(binding: mc.ModelBinding) -> dict[str, str]:
 
 
 def intent_digest(intent: mc.FitIntent) -> str:
+    """The journal's binding to one intent. Refuses a bound whose maxima are not exactly ``int``.
+
+    JSON writes an ``int`` subclass exactly like the plain int, so without the refusal such a bound
+    would match the digest while comparing differently (OPE-508 L1).
+    """
     bound = intent.bound
+    require_exact_bound(bound)
     return _sha(
         _canonical(
             [
@@ -257,20 +289,15 @@ def intent_digest(intent: mc.FitIntent) -> str:
     )
 
 
-CAP_WITHIN = "within_cap"
-CAP_OVER = "over_cap"
-CAP_UNKNOWN = "cap_unknown"
-
-
 @dataclass(frozen=True)
-class ReportedUsage(Usage):
+class ReportedUsage(CappedUsage):
     """Provider-reported usage plus a closed-vocabulary comparison to the approved cap.
 
     ``incurred_minor_units`` is always the provider's real figure and is never clamped, so genuine
     overspend stays visible, with the provider's own currency. Every bounded dimension is
-    compared: money against the journaled approved maximum (same currency only; the match is
-    exact and case-sensitive, so ``usd`` is not ``USD``), and seconds, rows and steps against the
-    intent's ``FitBound`` (bound to the journal by the intent digest). ``cap_status`` is
+    compared against the maxima journaled at dispatch: money against the approved maximum (same
+    currency only; the match is exact and case-sensitive, so ``usd`` is not ``USD``), and seconds,
+    rows and steps against their journaled maxima. ``cap_status`` is
     ``over_cap`` when any comparable dimension is above its bound, else ``cap_unknown`` when any
     dimension cannot be compared (no valid bound, no journaled currency, or a different
     currency), else ``within_cap`` (every dimension at or under its bound).
@@ -282,83 +309,12 @@ class ReportedUsage(Usage):
     record) is tracked as OPE-570; this module offers no reconcile step.
     """
 
-    cap_status: str = CAP_UNKNOWN
-    approved_maximum_minor_units: int | None = None
-    approved_currency: str | None = None
 
-    @property
-    def settleable(self) -> bool:
-        return self.cap_status == CAP_WITHIN and super().settleable
-
-
-def _usage_valid(usage: ProviderUsage) -> bool:
-    """Provider-reported usage that is malformed is unknown (``None``), never settleable."""
-    counts = (usage.minor_units, usage.seconds, usage.rows, usage.steps)
-    return (
-        isinstance(usage.currency, str)
-        and bool(usage.currency)
-        and all(type(count) is int and count >= 0 for count in counts)
-    )
-
-
-# Fixed hold reasons. Each holds a COMPLETED result the same way; they differ only in what an
-# operator must investigate: spend above the cap, or spend that cannot be established at all.
-HOLD_OVER_CAP = CAP_OVER  # verified usage above the approved cap
-HOLD_USAGE_UNVERIFIABLE = "usage_unverifiable"  # usage missing or malformed
-HOLD_CAP_UNVERIFIABLE = "cap_unverifiable"  # usage not comparable to the approved cap
-
-
-# Usage dimensions bounded by ``FitBound`` besides money, as (usage field, bound field). Money is
-# compared separately because it also needs a matching currency. Nothing else is compared.
-_BOUNDED_DIMENSIONS = (
-    ("seconds", "maximum_seconds"),
-    ("rows", "maximum_rows"),
-    ("steps", "maximum_steps"),
-)
-_USAGE_FIELDS = frozenset({"currency", "minor_units", "seconds", "rows", "steps"})
-
-
-def _limit(value: object) -> int | None:
-    """A bound is a non-negative ``int`` (never ``bool`` or ``float``); anything else is invalid."""
-    return value if type(value) is int and value >= 0 else None
-
-
-def _approved_cap(view: _View) -> tuple[int | None, str | None]:
-    """The journaled approved maximum and currency, or ``None`` for one that is not valid."""
-    currency = view.currency if isinstance(view.currency, str) and view.currency else None
-    return _limit(view.maximum_minor_units), currency
-
-
-def _cap_status(view: _View, bound: mc.FitBound) -> str | None:
-    """Compare journaled usage to every bound; ``None`` when the usage itself is invalid.
-
-    A verified excess on any dimension is ``over_cap`` even when another dimension cannot be
-    compared; otherwise a dimension that cannot be compared makes the result ``cap_unknown``.
-    """
-    reported = view.usage
-    if reported is None or not _usage_valid(reported):
-        return None
-    approved, approved_currency = _approved_cap(view)
-    # Units differ or are unrecorded (exact, case-sensitive match): money is not comparable.
-    comparable = approved_currency is not None and reported.currency == approved_currency
-    money = approved if comparable else None
-    comparisons = [(reported.minor_units, money)] + [
-        (getattr(reported, used), _limit(getattr(bound, limit)))
-        for used, limit in _BOUNDED_DIMENSIONS
-    ]
-    if any(limit is not None and used > limit for used, limit in comparisons):
-        return CAP_OVER
-    if any(limit is None for _, limit in comparisons):
-        return CAP_UNKNOWN
-    return CAP_WITHIN
-
-
-def _hold(view: _View, bound: mc.FitBound) -> str | None:
-    """A COMPLETED result is released only when its usage is verifiably within every bound.
+def _hold(view: _View) -> str | None:
+    """A COMPLETED result is released only when its usage is verifiably within the journaled cap.
 
     Only a job whose receipt reads COMPLETED is held; a CANCELED or UNKNOWN job never yields a
-    result anyway and reports no hold. Invalid usage is reported first: a malformed record
-    yields no verified figure, so there is nothing to compare whatever the bounds say.
+    result anyway and reports no hold. Both sides come from the journal, never from the caller.
     """
     if not (
         view.terminal
@@ -367,21 +323,7 @@ def _hold(view: _View, bound: mc.FitBound) -> str | None:
         and not view.cancel_requested
     ):
         return None
-    status = _cap_status(view, bound)
-    if status is None:
-        return HOLD_USAGE_UNVERIFIABLE
-    if status == CAP_OVER:
-        return HOLD_OVER_CAP
-    if status == CAP_UNKNOWN:
-        return HOLD_CAP_UNVERIFIABLE
-    return None
-
-
-def _journaled_usage(value: object) -> ProviderUsage | None:
-    """Usage read back from the journal; any other shape is unknown, never an error."""
-    if isinstance(value, dict) and set(value) == _USAGE_FIELDS:
-        return ProviderUsage(**value)
-    return None
+    return usage_hold(view.usage, view.cap)
 
 
 def _append(path: Path, event: Mapping[str, Any]) -> None:
@@ -407,10 +349,24 @@ class _View:
     cap_verified: bool = False
     maximum_minor_units: int | None = None
     currency: str | None = None
+    maximum_seconds: object = None
+    maximum_rows: object = None
+    maximum_steps: object = None
     tuned_model_id: str = ""
-    usage: ProviderUsage | None = None
+    usage: UsageFigures | None = None
     cancel_requested: bool = False
     disposition: str = ""
+
+    @property
+    def cap(self) -> JournaledCap:
+        """The cap journaled at dispatch: the only cap compared at release."""
+        return JournaledCap(
+            self.currency,
+            self.maximum_minor_units,
+            self.maximum_seconds,
+            self.maximum_rows,
+            self.maximum_steps,
+        )
 
 
 class ManagedConnector:
@@ -564,6 +520,10 @@ class ManagedConnector:
                 view.binding = event["binding"]
                 view.maximum_minor_units = event.get("maximum_minor_units")
                 view.currency = event.get("currency")  # absent in older journals
+                # Absent in journals written before OPE-508 L1: read as cap_unverifiable.
+                view.maximum_seconds = event.get("maximum_seconds")
+                view.maximum_rows = event.get("maximum_rows")
+                view.maximum_steps = event.get("maximum_steps")
             elif kind == "file":
                 view.file_id = event["file_id"]
             elif kind == "job":
@@ -576,7 +536,7 @@ class ManagedConnector:
                 view.terminal = True
                 view.state = mc.JobState(event["state"])
                 view.tuned_model_id = event.get("tuned_model_id", "")
-                view.usage = _journaled_usage(event.get("usage"))
+                view.usage = UsageFigures.from_document(event.get("usage"))
             elif kind == "cancel_requested":
                 view.cancel_requested = True
             elif kind == "disposition":
@@ -631,14 +591,8 @@ class ManagedConnector:
             event: dict[str, Any] = {"event": "terminal", "state": state.value}
             if state is mc.JobState.COMPLETED:
                 event["tuned_model_id"] = job.tuned_model_id
-            if job.usage is not None and _usage_valid(job.usage):
-                event["usage"] = {
-                    "currency": job.usage.currency,
-                    "minor_units": job.usage.minor_units,
-                    "seconds": job.usage.seconds,
-                    "rows": job.usage.rows,
-                    "steps": job.usage.steps,
-                }
+            if job.usage is not None and usage_valid(job.usage):
+                event["usage"] = usage_document(job.usage)
             _append(self._journal(key), event)
         elif state is not view.state:
             _append(self._journal(key), {"event": "progress", "state": state.value})
@@ -715,8 +669,8 @@ class ManagedConnector:
                         "event": "dispatching",
                         "intent_sha256": digest,
                         "binding": _binding_document(intent.binding),
-                        "maximum_minor_units": intent.bound.maximum_minor_units,
-                        "currency": intent.bound.currency,
+                        # The cap compared at release: currency and all four maxima.
+                        **journal_bound(intent.bound),
                     },
                 )
             token = self._token(key)
@@ -835,7 +789,7 @@ class ManagedConnector:
             or not view.tuned_model_id
         ):
             raise ValueError("job_not_collectable")
-        hold = _hold(view, job.intent.bound)  # the bound is the journal's, by intent digest
+        hold = _hold(view)  # usage and cap both from the journal
         if hold is not None:
             raise ValueError(hold)
         return key, view
@@ -866,7 +820,7 @@ class ManagedConnector:
             or candidate.parent_revision != candidate.intent.binding.immutable_revision
         ):
             raise ValueError("candidate_lineage_unverified")
-        hold = _hold(view, candidate.intent.bound)
+        hold = _hold(view)
         if hold is not None:
             raise ValueError(hold)  # a held job's tuned-model id is never used or released
         return view
@@ -881,7 +835,7 @@ class ManagedConnector:
         view = self._view(self._key_from_ref(job.job_ref))
         if view.intent_sha != intent_digest(job.intent):
             raise ValueError("job_receipt_mismatched")
-        return _hold(view, job.intent.bound)
+        return _hold(view)
 
     def handoff_reference(self, candidate: mc.Candidate, recipient: str) -> str:
         """Release the tuned-model id only to a recipient the customer permitted."""
@@ -906,25 +860,25 @@ class ManagedConnector:
         view = self._view(key)
         if view.intent_sha != intent_digest(job.intent):
             raise ValueError("job_receipt_mismatched")
-        if not view.terminal or view.usage is None or not _usage_valid(view.usage):
-            return None
         reported = view.usage
+        if not view.terminal or reported is None or not usage_valid(reported):
+            return None
         state = view.state
-        approved, approved_currency = _approved_cap(view)
-        status = _cap_status(view, job.intent.bound) or CAP_UNKNOWN
+        cap = view.cap
+        minor_units: int = reported.minor_units  # type: ignore[assignment]  # checked just above
         return ReportedUsage(
             self._job_ref(key),
-            reported.currency,
-            reported.minor_units,
-            reported.seconds,
-            reported.rows,
-            reported.steps,
+            reported.currency,  # type: ignore[arg-type]
+            minor_units,
+            reported.seconds,  # type: ignore[arg-type]
+            reported.rows,  # type: ignore[arg-type]
+            reported.steps,  # type: ignore[arg-type]
             UsageSource.PROVIDER_REPORTED,
-            irreversible=reported.minor_units > 0
+            irreversible=minor_units > 0
             and (state is not mc.JobState.COMPLETED or view.cancel_requested),
-            cap_status=status,
-            approved_maximum_minor_units=approved,
-            approved_currency=approved_currency,
+            cap_status=cap_status(reported, cap) or CAP_UNKNOWN,
+            approved_maximum_minor_units=cap_limit(cap.maximum_minor_units),
+            approved_currency=cap_currency(cap),
         )
 
     def dispose_training_file(self, job: mc.JobReceipt) -> str:

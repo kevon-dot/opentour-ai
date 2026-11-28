@@ -1841,6 +1841,9 @@ def test_malformed_or_foreign_currency_usage_cannot_bypass_the_cap(env, usage):
 
 @pytest.mark.parametrize("bad", [-1, 1.5, True, float("nan")])
 def test_usage_report_rejects_malformed_values(env, bad):
+    # OPE-508 follow-up: usage is the journaled terminal figure, as on the managed route. A
+    # malformed report is never journaled, so it reads as unknown (``None``), never settleable;
+    # it used to raise ``INVALID_USAGE`` from the live poll.
     receipt = env.dispatch()
 
     class Garbage(Proxy):
@@ -1848,8 +1851,9 @@ def test_usage_report_rejects_malformed_values(env, bad):
             view = self.inner.poll(credential, job_id)
             return replace(view, usage=TrainerUsage("USD", bad, 1, 1, 1))
 
-    with pytest.raises(ValueError, match="INVALID_USAGE"):
-        env.make_connector(Garbage(env.trainer)).usage(receipt)
+    connector = env.make_connector(Garbage(env.trainer))
+    assert connector.usage(receipt) is None
+    assert connector.status(receipt).state is mc.JobState.FAILED  # stopped, as before
 
 
 def test_usage_is_never_estimated_or_settleable_by_string(env):
@@ -2030,3 +2034,311 @@ def test_conformance_replay_honours_a_declared_tolerance(tmp_path):
     )
     results = tc.run_trainer_conformance(harness, tmp_path)
     assert {r.name: r.outcome for r in results}["replay_deterministic"] is tc.Outcome.PASSED
+
+
+# ---- OPE-508 follow-up: the custom-trainer route adopts the managed route's usage-vs-cap hold ----
+# T1 a COMPLETED job whose journaled usage is above the journaled cap is held ``over_cap``: no
+#    result is fetched, no candidate, no replay; ``hold_reason`` reports it; ``settleable`` False;
+#    the job is not stopped (it already finished) and its state stays COMPLETED
+# T2 a COMPLETED job with missing or malformed usage is held ``usage_unverifiable`` (the gap)
+# T3 usage not comparable to the journaled cap (currency, missing or invalid cap) is held
+#    ``cap_unverifiable``
+# T4 usage exactly at the cap is accepted and released
+# T5 the intent journals all four maxima and the currency; release compares to those
+# T6 ``hold_reason`` is None unless the job is COMPLETED, and checks the receipt
+# T7 an intent bound that is not exactly ``int`` is refused before anything is journaled or sent
+TRAINER_MAXIMA = ("maximum_minor_units", "maximum_seconds", "maximum_rows", "maximum_steps")
+REFERENCE_USAGE = TrainerUsage("USD", 3, 1, 4, 1)  # what the reference trainer reports
+
+
+class SneakyInt(int):
+    """An ``int`` subclass. It serializes like the plain int, so it matches the intent digest."""
+
+
+class Observed(Proxy):
+    """Reports ``reported`` usage on a completed job and records result fetches and replays."""
+
+    def __init__(self, inner, reported):
+        super().__init__(inner)
+        self.reported = reported
+        self.fetched = []
+        self.predicted = []
+        self.stops = []
+
+    def poll(self, credential, job_id):
+        view = self.inner.poll(credential, job_id)
+        return replace(view, usage=self.reported) if view.state == "completed" else view
+
+    def fetch_result(self, credential, job_id):
+        self.fetched.append(job_id)
+        return self.inner.fetch_result(credential, job_id)
+
+    def predict(self, credential, artifact_ref, inputs):
+        self.predicted.append(artifact_ref)
+        return self.inner.predict(credential, artifact_ref, inputs)
+
+    def request_cancel(self, credential, job_id):
+        self.stops.append(job_id)
+        return self.inner.request_cancel(credential, job_id)
+
+
+def _completed_reporting(env, reported):
+    receipt = env.dispatch()
+    env.trainer.run_pending()
+    transport = Observed(env.trainer, reported)
+    connector = env.make_connector(transport)
+    return connector, transport, connector.status(receipt)
+
+
+def _journal_path(env):
+    return env.tmp / "connector" / "trainer-journal.jsonl"
+
+
+def _rewrite_trainer_journal(env, edit):
+    path = _journal_path(env)
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for record in records:
+        edit(record)
+    path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
+
+
+def _journal_collected(env, done):
+    """A collection record for a held job (a legacy journal), so replay itself can be probed."""
+    with _journal_path(env).open("a") as handle:
+        handle.write(
+            json.dumps(
+                {"t": "collected", "k": TOKEN, "ref": "generated-artifact-x", "digest": "0" * 64}
+            )
+            + "\n"
+        )
+    return mc.Candidate(
+        done.intent, done.job_ref, REVISION, "generated-artifact-x", "replay-manifest:x"
+    )
+
+
+def _assert_trainer_held(env, connector, transport, done, reason):
+    exact = f"^{reason}$"
+    assert done.state is mc.JobState.COMPLETED  # the trainer's own state is kept
+    assert connector.hold_reason(done) == reason
+    with pytest.raises(ValueError, match=exact):
+        connector.collect(done)
+    with pytest.raises(mc.CapabilityError, match="candidate_lineage_unverified"):
+        env.make_preflight(connector).collect_candidate("training", done)
+    assert transport.fetched == [] and transport.stops == []
+    usage = connector.usage(done)
+    if reason == "usage_unverifiable":
+        assert usage is None
+    else:
+        assert usage is not None and usage.settleable is False
+        assert usage.cap_status == ("over_cap" if reason == "over_cap" else "cap_unknown")
+    # A restart replays the hold from the journal alone.
+    assert env.make_connector(env.trainer).hold_reason(done) == reason
+    candidate = _journal_collected(env, done)
+    with pytest.raises(ValueError, match=exact):
+        connector.predict_for_replay(candidate, FROZEN)
+    assert transport.predicted == []
+
+
+def _assert_trainer_released(env, connector, transport, done):
+    assert done.state is mc.JobState.COMPLETED
+    assert connector.hold_reason(done) is None
+    candidate = env.make_preflight(connector).collect_candidate("training", done)
+    assert connector.predict_for_replay(candidate, FROZEN) == EXPECTED
+    usage = connector.usage(done)
+    assert usage is not None and usage.settleable is True and usage.cap_status == "within_cap"
+    assert transport.stops == []
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        TrainerUsage("USD", 501, 1, 4, 1),
+        TrainerUsage("USD", 10**9, 1, 4, 1),
+        TrainerUsage("USD", 3, 61, 4, 1),
+        TrainerUsage("USD", 3, 1, 21, 1),
+        TrainerUsage("USD", 3, 1, 4, 101),
+    ],
+    ids=["money", "money-far", "seconds", "rows", "steps"],
+)
+def test_t1_completed_job_over_its_journaled_cap_is_held(env, reported):
+    connector, transport, done = _completed_reporting(env, reported)
+    _assert_trainer_held(env, connector, transport, done, "over_cap")
+    usage = connector.usage(done)
+    assert usage.incurred_minor_units == reported.minor_units  # the real figure, never clamped
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        None,  # the trainer reported no usage: the decided route gap
+        TrainerUsage("USD", float("nan"), 1, 4, 1),
+        TrainerUsage("USD", -1, 1, 4, 1),
+        TrainerUsage("USD", True, 1, 4, 1),
+        TrainerUsage("USD", 1.5, 1, 4, 1),
+        TrainerUsage("USD", "3", 1, 4, 1),
+        TrainerUsage("USD", 3, None, 4, 1),
+        TrainerUsage("", 3, 1, 4, 1),
+    ],
+)
+def test_t2_completed_job_with_missing_or_malformed_usage_is_held(env, reported):
+    connector, transport, done = _completed_reporting(env, reported)
+    _assert_trainer_held(env, connector, transport, done, "usage_unverifiable")
+
+
+@pytest.mark.parametrize("currency", ["EUR", "usd"])
+def test_t3_usage_in_another_currency_is_cap_unverifiable(env, currency):
+    reported = replace(REFERENCE_USAGE, currency=currency)
+    connector, transport, done = _completed_reporting(env, reported)
+    _assert_trainer_held(env, connector, transport, done, "cap_unverifiable")
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda cap: None,  # an older journal: no cap recorded at all
+        lambda cap: {k: v for k, v in cap.items() if k != "currency"},
+        lambda cap: {k: v for k, v in cap.items() if k != "maximum_steps"},
+        lambda cap: {**cap, "maximum_rows": True},
+        lambda cap: {**cap, "maximum_seconds": 60.0},
+        lambda cap: {**cap, "maximum_minor_units": -1},
+        lambda cap: "generated-not-a-cap",
+    ],
+    ids=["absent", "no-currency", "no-steps", "bool", "float", "negative", "string"],
+)
+def test_t3_unusable_journaled_cap_is_cap_unverifiable(env, edit):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    assert connector.hold_reason(done) is None
+
+    def corrupt(record):
+        if record.get("t") == "intent":
+            replaced = edit(record.get("cap", {}))
+            if replaced is None:
+                record.pop("cap", None)
+            else:
+                record["cap"] = replaced
+
+    _rewrite_trainer_journal(env, corrupt)
+    _assert_trainer_held(env, connector, transport, done, "cap_unverifiable")
+
+
+def test_t4_usage_exactly_at_the_cap_is_released(env):
+    at_cap = TrainerUsage("USD", 500, 60, 20, 100)
+    assert (at_cap.minor_units, at_cap.seconds, at_cap.rows, at_cap.steps) == (
+        LIMIT.maximum_minor_units,
+        LIMIT.maximum_seconds,
+        LIMIT.maximum_rows,
+        LIMIT.maximum_steps,
+    )
+    connector, transport, done = _completed_reporting(env, at_cap)
+    _assert_trainer_released(env, connector, transport, done)
+
+
+def test_t4_ordinary_usage_is_released(env):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    _assert_trainer_released(env, connector, transport, done)
+
+
+def test_t5_intent_journals_all_four_maxima_and_release_compares_to_them(env):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    records = [json.loads(line) for line in _journal_path(env).read_text().splitlines()]
+    intent_record = next(record for record in records if record["t"] == "intent")
+    assert intent_record["cap"] == {
+        "currency": "USD",
+        "maximum_minor_units": 500,
+        "maximum_seconds": 60,
+        "maximum_rows": 20,
+        "maximum_steps": 100,
+    }
+    terminal = next(r for r in records if r["t"] == "state" and r["state"] == "completed")
+    assert terminal["usage"] == {
+        "currency": "USD",
+        "minor_units": 3,
+        "seconds": 1,
+        "rows": 4,
+        "steps": 1,
+    }
+
+    def lower(record):
+        if record.get("t") == "intent":
+            record["cap"]["maximum_rows"] = REFERENCE_USAGE.rows - 1  # the caller's bound is 20
+
+    _rewrite_trainer_journal(env, lower)
+    _assert_trainer_held(env, connector, transport, done, "over_cap")
+
+
+def test_t5_a_late_usage_report_never_changes_the_journaled_figure(env):
+    connector, transport, done = _completed_reporting(env, REFERENCE_USAGE)
+    transport.reported = TrainerUsage("USD", 10**9, 1, 4, 1)  # a later, upward revision
+    assert connector.status(done) == done
+    assert connector.hold_reason(done) is None
+    assert connector.usage(done).incurred_minor_units == 3
+
+
+def test_t6_hold_reason_is_none_unless_completed_and_checks_the_receipt(env):
+    queued = env.dispatch()
+    assert queued.state is mc.JobState.QUEUED and env.connector.hold_reason(queued) is None
+    canceled = env.connector.cancel(queued)
+    assert canceled.state is mc.JobState.CANCELED and env.connector.hold_reason(canceled) is None
+    with pytest.raises(LookupError, match="job_unknown"):
+        env.connector.hold_reason(replace(queued, job_ref="generated-job-other"))
+
+
+def test_t6_failed_job_reports_no_hold(tmp_path):
+    env = Env(tmp_path)
+    receipt = env.dispatch()
+
+    class Fails(Proxy):
+        def poll(self, credential, job_id):
+            view = self.inner.poll(credential, job_id)
+            return replace(view, state="failed", usage=None)
+
+    connector = env.make_connector(Fails(env.trainer))
+    failed = connector.status(receipt)
+    assert failed.state is mc.JobState.FAILED and connector.hold_reason(failed) is None
+
+
+def test_t6_a_running_job_over_its_cap_is_still_stopped(env):
+    receipt = env.dispatch()
+
+    class Running(Observed):
+        def poll(self, credential, job_id):
+            view = self.inner.poll(credential, job_id)
+            return replace(view, state="running", usage=TrainerUsage("USD", 501, 1, 1, 1))
+
+    transport = Running(env.trainer, None)
+    connector = env.make_connector(transport)
+    stopped = connector.status(receipt)
+    assert stopped.state is mc.JobState.FAILED and transport.stops == [receipt.job_ref]
+    assert connector.hold_reason(stopped) is None
+
+
+@pytest.mark.parametrize("limit", TRAINER_MAXIMA)
+@pytest.mark.parametrize("kind", ["subclass", "bool", "float"])
+def test_t7_intent_bound_that_is_not_exactly_int_is_refused_before_dispatch(env, limit, kind):
+    value = getattr(LIMIT, limit)
+    forged_value = {"subclass": SneakyInt(value), "bool": bool(value), "float": float(value)}[kind]
+    forged = replace(env.intent, bound=replace(LIMIT, **{limit: forged_value}))
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        env.connector.submit(forged, env.connector.serialize_development(forged, ROWS))
+    assert env.executions() == 0
+    assert '"intent"' not in _journal_path(env).read_text()
+
+
+@pytest.mark.parametrize("limit", TRAINER_MAXIMA)
+def test_t7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(env, limit):
+    reported = replace(REFERENCE_USAGE, minor_units=10**9, seconds=61, rows=21, steps=101)
+    connector, transport, done = _completed_reporting(env, reported)
+    sneaky = replace(done.intent, bound=replace(LIMIT, **{limit: SneakyInt(getattr(LIMIT, limit))}))
+    forged = replace(done, intent=sneaky)
+    for call in (
+        lambda: connector.hold_reason(forged),
+        lambda: connector.collect(forged),
+        lambda: connector.usage(forged),
+        lambda: connector.status(forged),
+        lambda: connector.cancel(forged),
+        lambda: connector.lookup(sneaky),
+    ):
+        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+            call()
+    assert transport.fetched == [] and transport.stops == []
+    assert connector.hold_reason(done) == "over_cap"
