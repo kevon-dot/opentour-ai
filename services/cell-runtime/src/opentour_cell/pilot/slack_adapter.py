@@ -156,6 +156,9 @@ ACTIONS = {
     "ot_repair_confirm",
     "ot_repair_refresh",
     "ot_release_approve",
+    "ot_bench_proof",
+    "ot_bench_calc",
+    "ot_bench_audit",
     "ot_release_receipt",
     "ot_delivery_status",
     "ot_release_changes",
@@ -4426,10 +4429,20 @@ class Workbench:
                 dataset_revision=target.dataset_revision,
                 audit=target.audit,
             )
+        elif action in {"ot_bench_proof", "ot_bench_calc", "ot_bench_audit"}:
+            self._benchmark_proof(cfg, actor, view, ctx, action, value, old_hash)
         elif action == "ot_evidence":
             _check(
                 ctx["kind"]
-                in {"home", "evidence", "status", "eval_detail", "questions", "handoff_question"}
+                in {
+                    "home",
+                    "evidence",
+                    "status",
+                    "eval_detail",
+                    "questions",
+                    "handoff_question",
+                    "bench_proof",
+                }
                 and value == ctx["revision"]
             )
             self._evidence(cfg, actor, view, ctx, old_hash)
