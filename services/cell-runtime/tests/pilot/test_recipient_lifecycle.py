@@ -278,3 +278,42 @@ def test_real_recipient_replay_producer_binds_installed_benchmark(
     target.receipt_path.rename(withheld)
     with pytest.raises((OSError, ValueError)):
         lifecycle.prepare_recipient_replay_claim(receiver, target.release)
+
+
+def test_rollback_claim_requires_operation_and_independent_restored_readback(receipt_fixture):
+    policy = receipt_fixture.authority.policy
+    assert policy is not None and policy.rollback is not None
+    rollback = policy.rollback
+    received = receipt_fixture.delivery.received_at
+    assert received is not None
+    observed = lifecycle.DestinationRollbackObservation(
+        binding=policy.binding,
+        authorization_ref=rollback.authorization_ref,
+        environment_ref=rollback.environment_ref,
+        previous_serving_version=policy.binding.artifact_sha256,
+        restored_version=rollback.expected_fallback_version,
+        operation_receipt_ref="generated-action-one",
+        serving_readback_ref="generated-independent-observation-one",
+        package_sha256="d" * 64,
+        delivery_received_at=received,
+        observed_at=receipt_fixture.now - 5,
+    )
+    claim = lifecycle.prepare_destination_rollback_claim(policy, observed)
+    assert claim["release_ref"] == policy.binding.release_ref
+    assert claim["restored_version"] == rollback.expected_fallback_version
+    assert claim["serving_readback_ref"] == observed.serving_readback_ref
+    receipt_fixture.record("rollback", payload_updates=claim)
+    assert receipt_fixture.projection().rollback is not None
+    for change in (
+        {"authorization_ref": "wrong-authorization"},
+        {"environment_ref": "wrong-environment"},
+        {"previous_serving_version": rollback.expected_fallback_version},
+        {"restored_version": policy.binding.artifact_sha256},
+        {"operation_receipt_ref": observed.serving_readback_ref},
+        {"package_sha256": "7" * 64},
+        {"observed_at": rollback.authorized_at - 1},
+    ):
+        with pytest.raises(ValueError, match="destination_rollback_claim_unavailable"):
+            lifecycle.prepare_destination_rollback_claim(policy, replace(observed, **change))
+    with pytest.raises(ValueError, match="destination_rollback_claim_unavailable"):
+        lifecycle.prepare_destination_rollback_claim(replace(policy, rollback=None), observed)
