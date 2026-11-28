@@ -242,6 +242,12 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
             f"{arm['incorrect_automatic']}/{arm['observed_error_rate']['denominator']}" in rendered
         )
 
+        coverage = arm["coverage"]
+        assert f"automatic coverage · {coverage['numerator']}/{coverage['denominator']}" in rendered
+    pair = target.audit["comparisons"]["rule"]
+    assert f"Eligible pairs · {pair['paired']['comparable']}/{pair['cohort_size']}" in rendered
+    assert f"Excluded from the paired comparison · {pair['paired']['excluded']}" in rendered
+
     view = ask()
     pin = buttons(screen(h, view))["ot_result_open"]
     grant = next(cfg.directory.glob("slack-review-*.json"))
@@ -389,3 +395,19 @@ def test_scoped_monthly_answer_checks_live_membership_and_signed_receipt_at_rend
     denied = ask()
     assert live.workflow not in text(h, denied) and "verified decisions" not in text(h, denied)
     assert hidden["workflow_ref"] not in text(h, denied) and counts(h) == before
+
+
+def test_monthly_report_file_follows_worker_basename_bound():
+    from opentour_cell.pilot.slack_adapter import MonthlyReportSettings
+
+    row = dict(
+        workflow_ref="workflow", publication_file="a" * 91 + ".json", custodian_key_id="key-one"
+    )
+    config = {"timezone": "UTC", "workflows": [row]}
+    assert (
+        MonthlyReportSettings.parse(config).workflows[0].publication_file == row["publication_file"]
+    )
+    for filename in ("a" * 92 + ".json", "../report.json", "report.txt"):
+        row["publication_file"] = filename
+        with pytest.raises(ValueError):
+            MonthlyReportSettings.parse(config)

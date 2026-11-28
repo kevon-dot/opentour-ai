@@ -185,6 +185,8 @@ class MonthlyReportSettings:
 
     @classmethod
     def parse(cls, doc: Json) -> MonthlyReportSettings:
+        from opentour_cell.pilot.repair_workflow import _name
+
         _check(isinstance(doc, dict) and doc.keys() == {"timezone", "workflows"})
         timezone = doc["timezone"]
         _check(isinstance(timezone, str) and 0 < len(timezone) <= 128)
@@ -204,10 +206,7 @@ class MonthlyReportSettings:
             _check(
                 isinstance(pin.workflow_ref, str) and re.fullmatch(REF_PATTERN, pin.workflow_ref)
             )
-            _check(
-                isinstance(pin.publication_file, str)
-                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,110}\.json", pin.publication_file)
-            )
+            _check(_name(pin.publication_file).endswith(".json"))
             _check(
                 isinstance(pin.custodian_key_id, str)
                 and re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,126}[a-z0-9]", pin.custodian_key_id)
@@ -238,8 +237,8 @@ class Settings:
     config_path: Path | None = None
     explicit_recipient: bool = True
     live_workflow_ref: str = ""
-    monthly_invoice_reports: MonthlyReportSettings | None = None
     starter_setup: StarterBinding | None = None
+    monthly_invoice_reports: MonthlyReportSettings | None = None
 
     @property
     def binding(self) -> str:

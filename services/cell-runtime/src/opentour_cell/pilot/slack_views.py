@@ -812,6 +812,19 @@ def frozen_rule_chart(
             )
         else:
             blocks.append(_section(f"{label} · 0/0 · rate unavailable"))
+        coverage = arm["coverage"]
+        blocks.append(
+            _section(
+                f"{label} automatic coverage · {coverage['numerator']}/{coverage['denominator']}"
+            )
+        )
+    paired = checked["paired"]
+    blocks.append(
+        _section(
+            f"Eligible pairs · {paired['comparable']}/{checked['cohort_size']}. "
+            f"Excluded from the paired comparison · {paired['excluded']}."
+        )
+    )
     return _modal("Frozen comparison", "ot_arm_chart", context, blocks)
 
 
