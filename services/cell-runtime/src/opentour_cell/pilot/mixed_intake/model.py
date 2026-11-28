@@ -188,6 +188,9 @@ REVIEW_FLAGS = frozenset(
         "text_background_contrast_low",
         "text_background_unverified",
         "vector_paint_unchecked",
+        "annotation_over_text",
+        "annotation_unverified",
+        "actual_text_present",
         "content_operand_non_finite",
     }
 )

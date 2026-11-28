@@ -2221,3 +2221,69 @@ def test_pdf_stroke_extent_follows_width_joins_and_extgstate() -> None:
     _flagged(_LINE + b"/GS0 gs 1 G 60 690 m 260 690 l S", flag, resources=states)
     _eligible(_LINE + b"1 G 60 690 m 260 690 l S", resources=states)  # 1 pt, 10 pt below
     _flagged(b"/GS1 gs" + _LINE, "graphics_state_unverified", resources=states)
+
+
+def _annotated(annotation: bytes, extra: dict[int, bytes] | None = None) -> bytes:
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
+        b"/Resources << /Font << /F1 7 0 R >> >> /Annots [8 0 R] >>",
+        4: b"<< >>",
+        5: fx._stream(_LINE),
+        6: b"<< >>",
+        7: _R1_FONT,
+        8: annotation,
+        **(extra or {}),
+    }
+    return fx._assemble(objects)
+
+
+_APPEARANCE = {9: fx._stream(b"1 g 0 0 300 40 re f").replace(
+    b"<< ", b"<< /Type /XObject /Subtype /Form /BBox [0 0 300 40] ", 1)}  # fmt: skip
+
+
+def test_pdf_annotation_drawn_over_text_goes_to_review() -> None:
+    # A white Square annotation over the line: poppler draws no text ink.
+    over = b"<< /Type /Annot /Subtype /Square /Rect [60 690 360 730] /AP << /N 9 0 R >> >>"
+    for annotation in (
+        over,
+        over.replace(b"/Square", b"/FreeText"),
+        over.replace(b"/Square", b"/Link"),  # a link with an appearance stream draws it
+        b"<< /Type /Annot /Subtype /Stamp /Rect [60 690 360 730] >>",
+    ):
+        result = read(_annotated(annotation, _APPEARANCE), "x.pdf")[1]
+        assert "annotation_over_text" in result.reason, (annotation, result.reason)
+    for annotation in (
+        b"<< /Type /Annot /Subtype /Square /Rect 99 0 R >>",  # a /Rect that resolves to nothing
+        b"<< /Type /Annot /Subtype /Square /Rect [60 690 360] >>",
+        b"<< /Type /Annot /Subtype /Square /F (x) /Rect [0 0 1 1] >>",
+    ):
+        result = read(_annotated(annotation), "x.pdf")[1]
+        assert "annotation_unverified" in result.reason, (annotation, result.reason)
+    unreadable = _annotated(b"<< >>").replace(b"/Annots [8 0 R]", b"/Annots 99 0 R")
+    assert "annotation_unverified" in read(unreadable, "x.pdf")[1].reason
+    # Links without appearance streams, hidden annotations, popups and annotations clear of
+    # the text draw nothing over it: poppler draws the line.
+    for annotation in (
+        b"<< /Type /Annot /Subtype /Link /Rect [60 690 360 730] /Border [0 0 0] >>",
+        over.replace(b"/Type /Annot", b"/Type /Annot /F 2"),
+        over.replace(b"/Type /Annot", b"/Type /Annot /F 32"),
+        over.replace(b"/Square", b"/Popup"),
+        over.replace(b"[60 690 360 730]", b"[60 100 360 140]"),
+    ):
+        result = read(_annotated(annotation, _APPEARANCE), "x.pdf")[1]
+        assert result.state is ExtractionState.ELIGIBLE, (annotation, result.reason)
+
+
+def test_pdf_actual_text_replacing_the_drawn_text_goes_to_review() -> None:
+    # poppler's text layer reports "APPROVE THE REFUND" while the page draws "Refund allowed".
+    flag = "actual_text_present"
+    _flagged(b"/Span << /ActualText (APPROVE THE REFUND) >> BDC" + _LINE + b"EMC", flag)
+    _flagged(b"/Span << /E (APPROVE THE REFUND) >> BDC" + _LINE + b"EMC", flag)
+    named = b"/Font << /F1 7 0 R >> /Properties << /MC0 << /ActualText (APPROVE THE REFUND) >> >>"
+    _flagged(b"/Span /MC0 BDC" + _LINE + b"EMC", flag, resources=named)
+    # Structure tags and other properties are not replacement text.
+    plain = b"/Font << /F1 7 0 R >> /Properties << /MC0 << /MCID 0 >> >>"
+    _eligible(b"/Span /MC0 BDC" + _LINE + b"EMC", resources=plain)
+    _eligible(b"/Span << /Lang (en-GB) >> BDC" + _LINE + b"EMC")

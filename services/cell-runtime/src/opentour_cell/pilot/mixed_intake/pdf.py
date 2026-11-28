@@ -1742,6 +1742,8 @@ def _fragments(
     font_metrics: dict[bytes, _Metrics] | None = None,
     colour_spaces: dict[bytes, int | None] | None = None,
     ext_states: dict[bytes, _ExtState] | None = None,
+    annotations: list[_Box] | None = None,
+    replaced: frozenset[bytes] = frozenset(),
 ) -> tuple[list[_Fragment], set[str]]:
     """Return positioned fragments and the review flags the content stream earned.
 
@@ -2088,6 +2090,12 @@ def _fragments(
         elif op in (b"BDC", b"BMC") and stack and stack[0] == b"OC":
             # Optional content: a viewer may hide or show it by layer state, which is not read.
             marks.add("optional_content_present")
+        elif op == b"BDC" and any(
+            value in (b"ActualText", b"E") or value in replaced for value in stack[1:]
+        ):
+            # /ActualText (or /E) replaces the drawn text for extraction and accessibility, so
+            # what a viewer's text layer says differs from the glyphs this reader reads.
+            marks.add("actual_text_present")
         elif op == b"re" and len(nums) >= 4:
             rects.append((nums[-4], nums[-3], nums[-2], nums[-1]))
             rx, ry, rw, rh = nums[-4:]
@@ -2176,6 +2184,9 @@ def _fragments(
         elif overprint:
             late.add("glyph_overprint_suspected")
         late |= _paint_flags(shown, painted)
+        if any(_overlap(note, box) for note in annotations or () for box in text_boxes):
+            # An annotation's appearance is drawn over the page content; it is not read here.
+            late.add("annotation_over_text")
         marks |= late
     return out, marks
 
@@ -2365,9 +2376,17 @@ def read_pdf(data: bytes, limits: Limits, deadline: Deadline) -> ReadResult:
         metrics = {name: _font_metrics(font, doc) for name, font in fonts.items()}
         spaces = _colour_spaces(resources, doc)
         states = _ext_states(resources, doc)
-        fragments, marks = _fragments(
-            stream, deadline, forms, images, page_box, metrics, spaces, states
+        drawn_over, annotations_unreadable = _annotation_boxes(page, doc)
+        replaced = frozenset(
+            name
+            for name, entry in _named(resources, "Properties", doc).items()
+            if "ActualText" in entry or "E" in entry
         )
+        fragments, marks = _fragments(
+            stream, deadline, forms, images, page_box, metrics, spaces, states, drawn_over, replaced
+        )
+        if annotations_unreadable:
+            marks.add("annotation_unverified")
         if len(readable) != len(refs):
             # A referenced content stream that cannot be resolved means the page was not read.
             marks.add("content_stream_unresolved")
@@ -2561,6 +2580,43 @@ def _ext_states(resources: dict[str, object], doc: _Doc) -> dict[bytes, _ExtStat
             alphas[0], alphas[1], dashed, unverified, geometry[0], geometry[1], geometry[2]
         )
     return out
+
+
+_ANNOTATION_HIDDEN = 2 | 32  # the Hidden and NoView annotation flags
+
+
+def _annotation_boxes(page: dict[str, object], doc: _Doc) -> tuple[list[_Box], bool]:
+    """(the /Rect of every annotation a viewer may draw on the page, whether any is unreadable).
+
+    Annotations are drawn over the page content from their appearance streams, which this
+    reader does not read. A Popup, a Link with no appearance stream and one flagged Hidden or
+    NoView draw nothing over the page; every other annotation is assumed to paint its /Rect.
+    An /Annots value, an annotation or a /Rect that cannot be read is unreadable.
+    """
+    if "Annots" not in page:
+        return [], False
+    annots = doc.resolve(page["Annots"])
+    if not isinstance(annots, list):
+        return [], True
+    boxes: list[_Box] = []
+    unreadable = False
+    for entry in annots:
+        annot = doc.dict(entry)
+        if annot is None:
+            unreadable = True
+            continue
+        flags = doc.resolve(annot.get("F", 0))
+        subtype = doc.resolve(annot.get("Subtype"))
+        if type(flags) is int and flags & _ANNOTATION_HIDDEN:
+            continue
+        if subtype == "Popup" or (subtype == "Link" and "AP" not in annot):
+            continue
+        box = _box(annot.get("Rect"), doc)
+        if box is None or type(flags) is not int:
+            unreadable = True
+            continue
+        boxes.append(box)
+    return boxes, unreadable
 
 
 def _colour_spaces(resources: dict[str, object], doc: _Doc) -> dict[bytes, int | None]:
