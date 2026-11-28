@@ -55,6 +55,7 @@ MODULES = (
     "opentour_cell/pilot/local_handoff_permissions.py",
     "opentour_cell/pilot/recipient_delivery.py",
     "opentour_cell/pilot/recipient_lifecycle.py",
+    "opentour_cell/pilot/recipient_lifecycle_authority.py",
     "opentour_cell/pilot/recipient_handoff_simulator.py",
     "opentour_cell/pilot/release_authority.py",
     "opentour_cell/pilot/release_outbox.py",

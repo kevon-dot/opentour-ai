@@ -100,6 +100,7 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
             assert sha == hashlib.sha256(archive.read(name)).hexdigest()
     with ZipFile(target / "opentour-slack.pyz") as archive:
         assert "opentour_cell/pilot/recipient_lifecycle.py" in archive.namelist()
+        assert "opentour_cell/pilot/recipient_lifecycle_authority.py" in archive.namelist()
         for module in settings["JOURNAL_MODULES"]:
             source = root / settings["JOURNAL"] / "src" / module
             assert archive.read(module) == source.read_bytes()
