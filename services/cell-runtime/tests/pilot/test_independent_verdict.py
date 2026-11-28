@@ -411,6 +411,7 @@ def test_c1_clean_win_verifies_all_three_statements_and_is_alert_eligible(tmp_pa
         "cleared": True,
         "policy_floor": "satisfied",
         "policy_floor_hold": None,
+        "candidate_identity_hold": None,
     }
     assert doc["effects"]["improvement_alert_eligible"] is True
     assert doc["effects"]["release_request_eligible"] is False
@@ -3203,6 +3204,7 @@ def test_v12_review_m2_no_effect_on_a_gain_whose_policy_is_below_the_floor(tmp_p
         "cleared": True,
         "policy_floor": "below_registered_floor",
         "policy_floor_hold": "policy_floor_below_registered_floor",
+        "candidate_identity_hold": None,
     }
     assert floor.shortfalls(v.document["policy"]) == DEFAULT_POLICY_SHORTFALLS
     for effect in ("improvement_alert", "release_request", "handoff_request"):
@@ -3289,6 +3291,7 @@ def test_v14_the_d11_seam_applies_the_registered_floor_and_refuses_a_laxer_polic
         "cleared": True,
         "policy_floor": "unset",
         "policy_floor_hold": "policy_floor_unset",
+        "candidate_identity_hold": None,
     }
     assert held_before.document["effects"]["improvement_alert_eligible"] is False
     assert ev.authorize(held_before.document, effect="improvement_alert")["reason"] == (
@@ -3614,6 +3617,7 @@ def test_d11_a_large_gain_over_100_families_verifies_and_authorizes(tmp_path):
         "cleared": True,
         "policy_floor": "satisfied",
         "policy_floor_hold": None,
+        "candidate_identity_hold": None,
     }
     assert v.document["effects"]["improvement_alert_eligible"] is True
     assert ev.authorize(v.document, effect="improvement_alert") == {

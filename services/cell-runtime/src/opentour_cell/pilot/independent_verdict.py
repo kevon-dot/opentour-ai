@@ -65,6 +65,16 @@ returns the stored original after re-checking it against the current claim; a ch
 a new key and a new verdict; a verdict past its ``not_after`` is archived and re-evaluated.
 Verified non-wins (no material gain, regression, inconclusive) are first-class outcomes.
 
+Only a gain on the evaluator-replayed open-weight route (``candidate_kind`` ``open_weight_fit``
+with a ``self_consistent_manifest`` job statement, where the evaluator holds the fit manifest
+and the served artifact digest itself) can make an effect eligible. A managed provider or
+customer trainer gain rests on unauthenticated provider or trainer statements
+(``provider_reported`` / ``trainer_reported``, ``identity_kind: provider_self_claim``), and a
+simple repair has no job evidence at all, so every effect on those holds with
+``candidate_identity_unauthenticated`` (``candidate_identity_hold``), in the issued ``effects``
+and in ``authorize`` alike, even when the policy meets the D11 floor, until a provider/trainer
+attestation verifier exists (OPE-566/OPE-507).
+
 Correction and revocation: ``revoke_verdict`` appends one sealed, write-once revocation per
 verdict key. From then on ``read_verdict``, ``evaluate`` and the consumer check ``authorize``
 report the key as ``stale`` (state ``revoked``) and never as its original outcome, for the live
@@ -271,16 +281,17 @@ class PolicyFloor:
     def shortfalls(self, policy: Mapping[str, Any]) -> list[str]:
         """Every floor term the bound ``policy`` (its ``as_json`` form) fails, in a fixed order.
 
-        Fail closed: a policy or ``operating_point_terms`` that is not a Mapping, and a term that
-        is missing or not exactly the floor's type (``type(v) is int``, so ``True`` and int
+        Fail closed: a policy or ``operating_point_terms`` that is not exactly a ``dict`` (any
+        other Mapping, a dict subclass included, could answer one reader differently from
+        another), and a term that is missing or not exactly the floor's type (``type(v) is int``, so ``True`` and int
         subclasses fail; ``type(v) is str``, so str subclasses fail), is a shortfall, never a
         pass. ``operating_point_terms.minimum_slice_cases`` is required whenever the policy's
         ``critical_slices`` or the terms' ``critical_slices`` is anything but an empty list or
         tuple (a missing or wrong-typed policy ``critical_slices`` therefore requires it).
         """
-        doc: Mapping[str, Any] = policy if isinstance(policy, Mapping) else {}
+        doc: Mapping[str, Any] = policy if type(policy) is dict else {}
         raw_terms = doc.get("operating_point_terms")
-        terms: Mapping[str, Any] = raw_terms if isinstance(raw_terms, Mapping) else {}
+        terms: Mapping[str, Any] = raw_terms if type(raw_terms) is dict else {}
 
         def no_slices(value: object) -> bool:
             return isinstance(value, (list, tuple)) and len(value) == 0
@@ -344,7 +355,11 @@ class PolicyFloor:
 # term; one laxer term refuses with ``policy_below_registered_floor``. Meeting the floor lifts
 # only this hold: integrity, freshness and revocation still apply, this module never makes a
 # release or handoff request eligible, and comparison_packet keeps its own issuer hold
-# (``audit_and_verdict_issuers_unverified``, until the OPE-566 signing contract lands).
+# (``audit_and_verdict_issuers_unverified``, until the OPE-566 signing contract lands). Nor does
+# it lift the route hold: a gain whose candidate identity rests on provider or trainer statements
+# (managed provider, customer trainer) or on no job evidence (simple repair) holds with
+# ``candidate_identity_unauthenticated`` at any policy, until a provider/trainer attestation
+# verifier exists (OPE-566/OPE-507); only the evaluator-replayed open-weight route authorizes.
 #   alpha_bps <= 500                         minimum_improvement_bps >= 100
 #   min_families >= 30                       coverage_floor_bps >= 5000
 #   max_coverage_loss_bps <= 200             max_missing <= 0 (no missing/malformed output)
@@ -393,6 +408,28 @@ def policy_floor_status(policy: Mapping[str, Any]) -> str:
     if floor is None:
         return "unset"
     return "below_registered_floor" if floor.shortfalls(policy) else "satisfied"
+
+
+# The one route whose candidate identity the evaluator observes itself (fit manifest and served
+# artifact digest), and the job statement it must carry. Everything else is held.
+_EVALUATOR_HELD_IDENTITY = ("open_weight_fit", "self_consistent_manifest")
+
+
+def candidate_identity_hold(document: Mapping[str, Any]) -> str | None:
+    """``None`` only for the evaluator-replayed open-weight route, else the hold reason.
+
+    Reads the verdict's ``candidate_kind`` and its ``job_produced_candidate`` statement. Managed
+    provider and customer trainer candidates rest on unauthenticated provider or trainer
+    statements, and a simple repair carries no job evidence, so their gains hold with
+    ``candidate_identity_unauthenticated`` until a provider/trainer attestation verifier exists
+    (OPE-566/OPE-507). Fails closed on any missing or malformed field.
+    """
+    statements = document.get("statements") if type(document) is dict else None
+    job = statements.get("job_produced_candidate") if type(statements) is dict else None
+    status = job.get("status") if type(job) is dict else None
+    if (document.get("candidate_kind"), status) == _EVALUATOR_HELD_IDENTITY:
+        return None
+    return "candidate_identity_unauthenticated"
 
 
 class VerdictInputError(ValueError):
@@ -828,6 +865,10 @@ class GatePolicy:
             not _ID.fullmatch(self.policy_revision)
             or not _is_sha(self.operating_point_digest)
             or not isinstance(self.operating_point_terms, Mapping)
+            # Exactly a dict of plain JSON values: a lying Mapping (or a dict, list or str
+            # subclass) could show ``as_json``/the D11 floor one value and ``term`` another.
+            or type(self.operating_point_terms) is not dict
+            or not _plain_json(self.operating_point_terms)
             or not all(type(v) is int and v >= 0 for v in ints)
             or not 0 < self.alpha_bps < 10_000
             or self.min_families < 2
@@ -1379,6 +1420,21 @@ def operating_point_binding(
     if computed != operating_point_digest:
         return "operating_point_digest_mismatch"
     return None
+
+
+def _plain_json(value: object, depth: int = 0) -> bool:
+    """Exact JSON types only (no subclasses, finite floats), so every reader sees one value."""
+    if depth > 32:
+        return False
+    if value is None or type(value) in (str, int, bool):
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) is list:
+        return all(_plain_json(v, depth + 1) for v in value)
+    if type(value) is dict:
+        return all(type(k) is str and _plain_json(v, depth + 1) for k, v in value.items())
+    return False
 
 
 def _is_sha(value: object) -> bool:
@@ -1981,7 +2037,10 @@ class IndependentEvaluator:
         Every consumer (eligibility, watch, report, release gate) calls this with the document it
         holds before acting. It refuses a revoked key, an expired verdict, a document that is not
         the one stored under its key (including an older archived generation), and an effect the
-        verdict did not make eligible. Any effect on a ``verified_gain`` also refuses with
+        verdict did not make eligible. Any effect on a ``verified_gain`` whose candidate is not
+        on the evaluator-replayed open-weight route refuses with
+        ``candidate_identity_unauthenticated`` (``candidate_identity_hold``). Any effect on a
+        ``verified_gain`` also refuses with
         ``policy_below_registered_floor`` when the verdict's bound policy is laxer than the
         registered D11 floor (``REGISTERED_POLICY_FLOOR``, ``d11.v1``) on any term, and would
         refuse with ``policy_floor_unset`` if no floor were registered.
@@ -2022,6 +2081,11 @@ class IndependentEvaluator:
                     "policy_floor_unset" if floor == "unset" else "policy_below_registered_floor",
                     stored.outcome,
                 )
+            # Only the evaluator-replayed open-weight route; provider/trainer statements and
+            # no-job repairs hold until an attestation verifier exists (OPE-566/OPE-507).
+            identity_hold = candidate_identity_hold(held_doc)
+            if identity_hold is not None:
+                return refuse(identity_hold, stored.outcome)
         if effect == "improvement_alert":
             eligible = held_doc.get("alert_gates", {}).get("cleared")
         else:
@@ -2916,6 +2980,9 @@ class IndependentEvaluator:
             and statements["candidate_served_evaluation"]["status"] == "readback_consistent"
         )
         floor = policy_floor_status(policy.as_json())
+        identity_hold = candidate_identity_hold(
+            {"candidate_kind": claim.candidate_kind, "statements": statements}
+        )
         primary = policy.required_comparators[0]
         body: Json = {
             "schema_version": VERDICT,
@@ -2975,8 +3042,11 @@ class IndependentEvaluator:
             "predictions_commitment": self._commit(record),
             "predictions_custody": "evaluator_private_retention_limited",
             "effects": {
-                # Held unless the bound policy meets the D11 floor (``policy_floor_status``).
-                "improvement_alert_eligible": alert and floor == "satisfied",
+                # Held unless the bound policy meets the D11 floor (``policy_floor_status``)
+                # and the candidate is on the evaluator-replayed open-weight route.
+                "improvement_alert_eligible": alert
+                and floor == "satisfied"
+                and identity_hold is None,
                 "release_request_eligible": False,
                 "handoff_request_eligible": False,
             },
@@ -2986,6 +3056,7 @@ class IndependentEvaluator:
                 "cleared": alert,
                 "policy_floor": floor,
                 "policy_floor_hold": None if floor == "satisfied" else "policy_floor_" + floor,
+                "candidate_identity_hold": identity_hold,
             },
             "evidence": {
                 # This exported document: a plain digest anyone can recompute. The keyed seal
