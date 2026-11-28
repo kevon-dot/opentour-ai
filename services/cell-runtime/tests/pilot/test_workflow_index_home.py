@@ -11,7 +11,7 @@ from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake, BenchmarkSc
 from opentour_cell.pilot.workflow_index import IndexScope, WorkflowLabel
 from test_app_home import publish
 from test_managed_slack import setup_workflow
-from test_reviewer_workflow import restart, screen
+from test_reviewer_workflow import buttons, restart, screen
 from test_slack_adapter import ACTOR, OTHER
 from test_status_questions import counts, inspect
 from test_workflow_benchmarks import HISTORY
@@ -61,14 +61,14 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
     assert "ot_app_queue_open" in rendered and "ot_app_pending" not in rendered
     assert "Purchasing" not in json.dumps(publish(h, monkeypatch, OTHER))
 
-    def reopen(home):
+    def reopen(home, actor=ACTOR):
         choice = next(b["accessory"] for b in home["blocks"] if b.get("accessory"))
         h.send(
             "interactive",
             {
                 "api_app_id": cfg.app,
                 "team": {"id": cfg.team},
-                "user": {"id": ACTOR},
+                "user": {"id": actor},
                 "container": {"type": "view", "view_id": "VHOME"},
                 "view": {**home, "id": "VHOME"},
                 "type": "block_actions",
@@ -84,6 +84,31 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
     assert revision not in json.dumps(reopen(old))
     renamed = publish(h, monkeypatch, ACTOR)
     assert revision in json.dumps(reopen(renamed))
+    assert counts(h) == before
+    h.config["users"][OTHER]["datasets"] = list(h.config["users"][ACTOR]["datasets"])
+    h.save()
+    # Current aggregate rights alone expose no proposal. The second user opens their own evidence.
+    assert "Invoices" not in json.dumps(publish(h, monkeypatch, OTHER))
+    other_view = h.launch(OTHER)
+    h.action(other_view, "ot_evidence", buttons(screen(h, other_view))["ot_evidence"], OTHER)
+    waiting = publish(h, monkeypatch, OTHER)
+    assert "Waiting" in json.dumps(waiting) and "Review proposal" not in json.dumps(waiting)
+    assert "ot_release_approve" not in json.dumps(reopen(waiting, OTHER))
+    assert counts(h) == before
+
+    # Only the existing private release action records the decision.
+    evidence = next(
+        v for v, data in reversed(h.slack.screens.items()) if "ot_release_changes" in buttons(data)
+    )
+    h.action(evidence, "ot_release_changes", revision, ACTOR)
+    decision = h.path.parent / "managed-outputs" / run / "release-decision.json"
+    saved = decision.read_bytes()
+    assert json.loads(saved)["decision"] == "changes_requested"
+    before = counts(h)
+    recent = publish(h, monkeypatch, ACTOR)
+    assert "Recent" in json.dumps(recent) and "changes requested" in json.dumps(recent)
+    assert revision in json.dumps(reopen(recent))
+    assert decision.read_bytes() == saved
     member = False
     denied = json.dumps(publish(h, monkeypatch, ACTOR))
     assert "Workflow queue access is unavailable" in denied and "Invoices" not in denied
