@@ -552,7 +552,8 @@ class LearningRuns:
         # Count the whole renewal lineage, as the mandate's own usage does; renewal never resets.
         lineage = mandate.lineage or (mandate.mandate_id,)
         admitted = db.execute(
-            "SELECT count(*) FROM lr_runs WHERE tenant=? AND json_extract(plan,'$.engagement_epoch')=? "
+            "SELECT count(*) FROM lr_runs WHERE tenant=? "
+            "AND json_extract(plan,'$.engagement_epoch')=? "
             f"AND mandate_id IN ({','.join('?' * len(lineage))}) "
             "AND (state IN ('queued','benchmark_only') OR dispatched=1)",
             (scope.tenant, scope.engagement_epoch, *lineage),

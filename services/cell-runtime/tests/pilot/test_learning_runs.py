@@ -1120,3 +1120,16 @@ def test_second_mandate_on_same_workflow_cannot_read_or_control_prior_run(site):
         with pytest.raises(lr.LearningRunError):
             operation()
     assert original.status(owner, run)["state"] == "queued"
+
+
+def test_read_only_preview_resolves_exact_plan_and_latest_authorized_run(site):
+    path = site.authorize("slack-owner")
+    owner, service = site.open(path, ledger=None)
+    plan_ref = site.publish()
+    before = service.preview(owner)
+    assert before["plan_ref"] == plan_ref and before["can_benchmark"] and not before["can_improve"]
+    assert before["current_run"] is None and site.counts()["lr_runs"] == 0
+    run = service.submit(owner, lr.SubmitRequest(plan_ref, "benchmark_only", "preview-start"))
+    _, restarted = site.open(path, ledger=None)
+    assert restarted.preview(owner)["current_run"] == run["run_ref"]
+    assert site.counts()["lr_runs"] == 1
