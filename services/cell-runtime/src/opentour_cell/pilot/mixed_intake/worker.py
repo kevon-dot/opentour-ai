@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from opentour_cell.pilot.intake_admission import DurableIntake
+from opentour_cell.pilot.intake_admission import _hash as ope505_key_hash
 from opentour_cell.pilot.intake_local import LocalStarterAuthority
 from opentour_cell.pilot.intake_mcp import AdmissionHold, Starter
 from opentour_cell.pilot.intake_mcp import IntakeError as AdmissionError
@@ -304,12 +305,40 @@ def provably_unbound(error: BaseException) -> bool:
       `ManifestError`, `MandateError`, `TrainingError`) as `IntakeError(...) from error`, and the
       guards themselves never raise `IntakeError`.
 
-    So a refusal with no `__cause__` was raised before OPE-505 committed anything. A refusal
-    with a cause may follow a commit and is never treated as unbound (fail closed). The same
-    rule makes a cause-bearing refusal raised in the body (an `sqlite3.Error` inside the
+    So today a refusal with no `__cause__` was raised before OPE-505 committed anything. A
+    refusal with a cause may follow a commit and is never treated as unbound (fail closed). The
+    same rule makes a cause-bearing refusal raised in the body (an `sqlite3.Error` inside the
     transaction) count as possibly bound: conservative, never unsafe.
+
+    That inference spans modules and nothing pins it: a guard exit that one day raised a bare
+    `IntakeError` (or `raise ... from None`) after the commit would pass it. So the shape is only
+    the first condition; `ope505_key_unbound` must also confirm, from OPE-505's own durable
+    state, that nothing was bound for the key. Both must hold.
     """
     return isinstance(error, AdmissionError) and error.__cause__ is None
+
+
+def ope505_key_unbound(intake_path: Path, tenant: str, key: str) -> bool:
+    """Read-only, positive check that OPE-505 holds no binding for `key` (fail closed).
+
+    OPE-505 binds an idempotency key only by committing an `intake_keys` row for
+    `(tenant, _hash(key))`, in the same transaction as any run it creates for it. This opens
+    OPE-505's own store read-only (`mode=ro`, `query_only`) and looks that row up with OPE-505's
+    own hash function. Any failure to perform the check counts as bound.
+    """
+    try:
+        key_hash = ope505_key_hash(key)
+        db = sqlite3.connect(intake_path.as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            db.execute("PRAGMA query_only=ON")
+            row = db.execute(
+                "SELECT 1 FROM intake_keys WHERE tenant=? AND key_hash=?", (tenant, key_hash)
+            ).fetchone()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        return False
+    return row is None
 
 
 def parent_matches(lineage: object, expected: str | None) -> bool:
@@ -399,9 +428,10 @@ class StarterBenchmarkSink:
     transaction as the decision. A directly recorded admission carries the receipt's fields,
     and is held as `OPE505_LINEAGE_MISMATCH` unless the record-time `get_run` confirms them.
     An ancestor's submit frees its successor (under the same intent) only when OPE-505 provably
-    bound nothing (`provably_unbound`); every other outcome counts as binding. OPE-505 itself
-    adjudicates the idempotency key: a retry always submits, and an OPE-505 refusal of a key
-    already bound to an earlier intent is held as `OPE505_INTENT_CHANGED`.
+    bound nothing: the refusal's shape qualifies (`provably_unbound`) and OPE-505's own store
+    confirms no binding for the key (`ope505_key_unbound`); every other outcome is binding.
+    OPE-505 itself adjudicates the idempotency key: a retry always submits, and an OPE-505
+    refusal of a key already bound to an earlier intent is held as `OPE505_INTENT_CHANGED`.
 
     The final checks and the ledger writes run in `BEGIN IMMEDIATE` transactions, backed by
     unique indexes, so concurrent dispatchers record at most one admission per draft and per
@@ -729,7 +759,9 @@ class StarterBenchmarkSink:
                 # OPE-505's queue admission is one transaction (see `provably_unbound`).
                 receipt = admission.intake.submit_intake(principal, request)
             except AdmissionError as error:
-                unbound = provably_unbound(error)
+                unbound = provably_unbound(error) and ope505_key_unbound(
+                    admission.intake.path, principal.tenant, key
+                )
                 self._outcome(
                     session,
                     draft_key,

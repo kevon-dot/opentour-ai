@@ -2069,6 +2069,173 @@ def test_f3_the_admitted_row_records_the_receipt_values(tmp_path: Path) -> None:
     assert ope505["provenance"] == "ope505_receipt_confirmed_at_record"
 
 
+@pytest.mark.parametrize("style", ["cause_free", "from_none"])
+@pytest.mark.parametrize("guard", ["guard_registered_owner", "engagement_guard"])
+def test_r5_a_cause_free_refusal_after_ope505_committed_stays_binding(
+    tmp_path: Path, monkeypatch, guard: str, style: str
+) -> None:
+    """Review F1-r5 (Q8, Q9): through the real `LocalStarterAuthority` and `DurableIntake`, a
+    guard exit that fails after OPE-505 committed the ancestor's run, with no cause, never frees
+    the ancestor's key: OPE-505's own store shows it bound."""
+    from contextlib import contextmanager
+
+    from opentour_cell.pilot.intake_admission import DurableIntake
+    from opentour_cell.pilot.intake_mcp import IntakeError as AdmissionError
+
+    owner = {
+        "guard_registered_owner": LearningMandates,
+        "engagement_guard": LocalTrainingStore,
+    }[guard]
+    real_guard = getattr(owner, guard)
+    real_submit = DurableIntake.submit_intake
+    armed: list[bool] = []
+
+    @contextmanager
+    def failing_exit(self, *args, **kw):  # type: ignore[no-untyped-def]
+        with real_guard(self, *args, **kw):
+            yield
+        if armed:
+            armed.clear()
+            if style == "from_none":
+                try:
+                    raise OSError("generated release failure")
+                except OSError:
+                    raise AdmissionError("intake_unavailable") from None
+            raise AdmissionError("intake_unavailable")
+
+    def submit(self, actor, request):  # type: ignore[no-untyped-def]
+        armed.append(True)
+        try:
+            return real_submit(self, actor, request)
+        finally:
+            armed.clear()
+
+    monkeypatch.setattr(owner, guard, failing_exit)
+    monkeypatch.setattr(DurableIntake, "submit_intake", submit)
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    first = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert first["ope505"] == {"state": "held", "reason": "OPE505_UNAVAILABLE"}
+    assert world.ope505_rows("intake_runs") == 1 and world.ope505_rows("intake_keys") == 1
+    assert [p["outcome"] for _, p in ledger_rows(world, "ope505_submit_outcome")] == ["refused"]
+    monkeypatch.undo()
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    second = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert second["supersedes"] == first["draft_key"]
+    assert second["ope505"] == {
+        "state": "held",
+        "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
+    }
+    assert world.ope505_rows("intake_runs") == 1
+    assert ledger_rows(world, "ope505_admitted") == []
+
+
+def test_r5_an_unbound_refusal_is_not_freeing_when_ope505_cannot_be_checked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The positive check of OPE-505's own store is required; if it errors, stay binding."""
+    from opentour_cell.pilot.intake_admission import DurableIntake
+
+    world = World(tmp_path / "w")
+    selection = world.starter()
+    w, sid = scanned(world)
+    real_submit = DurableIntake.submit_intake
+    withdrawn = selection.parent / "starter-intake-withdrawn-generated-starter.json"
+
+    def withdraw_then_submit(self, actor, request):  # type: ignore[no-untyped-def]
+        _private(withdrawn, {})
+        return real_submit(self, actor, request)
+
+    def unreadable(*args, **kw):  # type: ignore[no-untyped-def]
+        raise OSError("generated unreadable OPE-505 store")
+
+    monkeypatch.setattr(DurableIntake, "submit_intake", withdraw_then_submit)
+    monkeypatch.setattr(entry, "ope505_key_hash", unreadable)
+    first = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert first["ope505"] == {"state": "held", "reason": "OPE505_UNAVAILABLE"}
+    assert [p["outcome"] for _, p in ledger_rows(world, "ope505_submit_outcome")] == ["refused"]
+    monkeypatch.undo()
+    os.unlink(withdrawn)
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    second = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    assert second == {"state": "held", "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT"}
+    assert world.ope505_rows("intake_runs") == 0
+
+
+def test_r5_the_positive_check_is_scoped_to_the_drafts_own_tenant(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Another tenant's row under the same key hash never makes this tenant's key bound."""
+    from opentour_cell.pilot.intake_admission import DurableIntake
+
+    world = World(tmp_path / "w")
+    selection = world.starter()
+    w, sid = scanned(world)
+    real_submit = DurableIntake.submit_intake
+    withdrawn = selection.parent / "starter-intake-withdrawn-generated-starter.json"
+
+    def other_tenant_row_then_refuse(self, actor, request):  # type: ignore[no-untyped-def]
+        with sqlite3.connect(self.path) as db:  # forge: another tenant, the same key hash
+            db.execute(
+                "INSERT INTO intake_keys VALUES (?,?,?)",
+                (
+                    "generated-tenant-b",
+                    entry.ope505_key_hash(request.idempotency_key),
+                    "generated-intent",
+                ),
+            )
+        _private(withdrawn, {})
+        return real_submit(self, actor, request)
+
+    monkeypatch.setattr(DurableIntake, "submit_intake", other_tenant_row_then_refuse)
+    first = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert first["ope505"] == {"state": "held", "reason": "OPE505_UNAVAILABLE"}
+    assert [p["outcome"] for _, p in ledger_rows(world, "ope505_submit_outcome")] == [
+        "bound_nothing"
+    ]
+    monkeypatch.undo()
+    os.unlink(withdrawn)
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    second = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    assert second["state"] == "admitted" and second["benchmark_version"] == 1
+
+
+def test_r5_the_key_hash_checked_is_the_one_ope505_stores(tmp_path: Path) -> None:
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    frozen = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert frozen["ope505"]["state"] == "admitted"
+    assert world.selection is not None
+    with sqlite3.connect(world.selection.parent / "intake.sqlite3") as db:
+        stored = [h for (h,) in db.execute("SELECT key_hash FROM intake_keys")]
+    assert stored == [entry.ope505_key_hash(entry.idempotency_key(frozen["draft_key"]))]
+
+
+def test_r5_a_record_time_read_with_no_benchmark_is_held(tmp_path: Path, monkeypatch) -> None:
+    """Review F2-r5 (X8): `get_run` reporting no benchmark never confirms the receipt."""
+    from dataclasses import replace
+
+    from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
+
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    original = BenchmarkIntake.get_run
+    monkeypatch.setattr(
+        BenchmarkIntake,
+        "get_run",
+        lambda self, actor, run_ref: replace(original(self, actor, run_ref), benchmark=None),
+    )
+    held = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    assert held == {"state": "held", "reason": "OPE505_LINEAGE_MISMATCH"}
+    assert ledger_rows(world, "ope505_admitted") == []
+
+
 def test_l3_a_lock_wait_past_the_busy_timeout_then_a_regrant_reconciles(
     tmp_path: Path, monkeypatch
 ) -> None:
