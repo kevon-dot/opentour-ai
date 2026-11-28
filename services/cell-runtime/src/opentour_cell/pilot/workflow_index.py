@@ -1,8 +1,8 @@
 """Read a private proposal index under independent, current workflow permissions."""
 
 import time
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -60,6 +60,22 @@ class IndexAuthority(Protocol):
         must deny. Implementors must revalidate current authority at guard exit.
         """
         ...
+
+
+class CurrentIndexAuthority:
+    """Recheck an actor's worker-resolved authorization before releasing an index read."""
+
+    def __init__(self, read_scope: Callable[[IntakePrincipal], IndexScope | None]) -> None:
+        self.read_scope = read_scope
+
+    @contextmanager
+    def guard(self, actor: IntakePrincipal) -> Iterator[IndexScope]:
+        current = self.read_scope(actor)
+        if current is None or current.actor != actor:
+            raise IntakeError("workflow_index_unavailable")
+        yield current
+        if self.read_scope(actor) != current:
+            raise IntakeError("workflow_index_unavailable")
 
 
 @dataclass(frozen=True)

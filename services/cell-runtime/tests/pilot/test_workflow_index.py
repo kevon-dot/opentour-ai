@@ -7,6 +7,7 @@ import pytest
 from opentour_cell.pilot.intake_mcp import IntakeError
 from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope, WorkflowBenchmarks
 from opentour_cell.pilot.workflow_index import (
+    CurrentIndexAuthority,
     IndexAuthority,
     IndexScope,
     ProposalAccess,
@@ -220,3 +221,25 @@ def test_concurrent_proposals_on_one_workflow_reopen_independently(index):
     assert restarted.page(ACTOR).rows == ()
     with pytest.raises(IntakeError, match="workflow_index_unavailable"):
         restarted.select(ACTOR, later.selection)
+
+
+def test_current_authority_reloads_authorization_on_page_and_selection(index):
+    api, grants, labels, _ = index
+    current = grants.current
+    protected = WorkflowIndex(
+        api.benchmarks, CurrentIndexAuthority(lambda _: grants.current), clock=lambda: 150
+    )
+    page = protected.page(ACTOR, size=1)
+    assert protected.select(ACTOR, page.rows[0].selection) == page.rows[0]
+    for replacement in (
+        None,
+        replace(current, membership_revision="member-v2"),
+        replace(current, labels=(labels[0], replace(labels[1], revision="label-v2"))),
+    ):
+        for read in (protected.page, lambda actor: protected.select(actor, page.rows[0].selection)):
+            snapshots = iter((current, replacement))
+            protected.authority = CurrentIndexAuthority(
+                lambda _, snapshots=snapshots: next(snapshots)
+            )
+            with pytest.raises(IntakeError, match="workflow_index_unavailable"):
+                read(ACTOR)
