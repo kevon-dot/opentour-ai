@@ -72,8 +72,54 @@ def test_workplace_questions_inspect_current_frozen_scope(
         assert "frozen cohort contains" in rendered and "data custodian" in rendered
     else:
         assert "Augmentation benefit is unproven" in rendered
+        assert "comparable cases" in rendered and "newly wrong" in rendered
+        assert "no matched real-only and augmented arms" in rendered
         assert "Incremental cost is unavailable" in rendered and "evaluation operator" in rendered
     h.action(view, "ot_evidence", buttons(screen(h, view))["ot_evidence"])
+    assert counts(h) == before
+
+
+@pytest.mark.parametrize("surface", ["home", "slash"])
+def test_label_savings_separates_frozen_references_from_training_effort(
+    tmp_path, monkeypatch, surface
+):
+    h, plan, run, _ = setup_workflow(tmp_path, "rule")
+    intake = check_current_intake(
+        h.path.parent, h.store.organization, h.store.engagement_id, plan["intake_revision"]
+    )
+    h.config["live_workflow_ref"] = intake["workflow"]
+    h.save()
+    _, revision = inspect(h)
+    target = h.app._managed(h.app.settings(), ACTOR, "managed:" + run)
+    question = "How many real labels did this save?"
+    before = counts(h)
+
+    def ask():
+        if surface == "slash":
+            return h.launch(prompt=question)
+        click(h, publish(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": question}}})
+        return view
+
+    view = ask()
+    h.action(view, "ot_result_open", buttons(screen(h, view))["ot_result_open"])
+    observed = text(h, view)
+    assert "Label savings not measured." in observed and revision in observed
+    assert f"Workflow {intake['workflow']}" in observed
+    assert (
+        f"{target.report['known_references']} known references across "
+        f"{target.report['cohort_size']} cases" in observed
+    )
+    assert "matched label-budget comparison" in observed and "expert minutes" in observed
+    assert buttons(screen(h, view))["ot_evidence"] == revision
+
+    view = ask()
+    pin = buttons(screen(h, view))["ot_result_open"]
+    h.config["live_workflow_ref"] = "another-workflow"
+    h.save()
+    h.action(view, "ot_result_open", pin)
+    assert "Label savings not measured" not in text(h, view)
     assert counts(h) == before
 
 

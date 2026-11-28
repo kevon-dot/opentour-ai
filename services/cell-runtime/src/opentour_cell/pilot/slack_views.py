@@ -668,7 +668,8 @@ def regression_picker(
             continue
         label = (
             "Dataset"
-            if topic in {"delivery", "independent_workplace_cases", "synthetic_benefit"}
+            if topic
+            in {"delivery", "independent_workplace_cases", "synthetic_benefit", "label_savings"}
             else "Workflow"
         )
         blocks.append(_section(f"{label} {_ref(dataset)} · {_display(source)} · {_ref(revision)}"))

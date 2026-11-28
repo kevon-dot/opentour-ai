@@ -73,7 +73,11 @@ REGRESSION_QUESTION = re.compile(
     r"(?:what (?:got|became) worse|(?:which|what) (?:cases|decisions|answers) "
     r"(?:(?:got|became) (?:worse|wrong|incorrect)|regressed))\??"
 )
-WORKPLACE_QUESTIONS = {ReadoutQuestion.WORKPLACE_SUPPORT, ReadoutQuestion.SYNTHETIC_BENEFIT}
+WORKPLACE_QUESTIONS = {
+    ReadoutQuestion.WORKPLACE_SUPPORT,
+    ReadoutQuestion.SYNTHETIC_BENEFIT,
+    ReadoutQuestion.LABEL_SAVINGS,
+}
 ROLES = {"inspect", "tune", "review"}
 CALLBACKS = {
     "ot_dataset_search",
@@ -2098,9 +2102,25 @@ class Workbench:
                 "No receipt links them to independently verified workplace families.",
                 "The data custodian can provide verified case lineage for this frozen result.",
             )
+        if topic == ReadoutQuestion.LABEL_SAVINGS:
+            return StatusAnswer(
+                "Label savings not measured.",
+                f"{scope}{basis} The frozen evaluation has {target.report['known_references']} "
+                f"known references across {target.report['cohort_size']} cases. "
+                "Training-label budgets, independent training families and expert minutes "
+                "are unavailable for this comparison.",
+                "The evaluation operator can supply a matched label-budget comparison at the "
+                "same quality target, coverage and regression limits, with measured expert time.",
+            )
+        pair = target.report["paired"]
+        measured = (
+            f"The recorded comparison has {pair['comparable']} comparable cases, "
+            f"{pair['fixes']} fixed, {pair['regressions']} newly wrong "
+            f"and {pair['excluded']} excluded."
+        )
         return StatusAnswer(
             "Augmentation benefit is unproven for this result.",
-            f"{scope}{basis} The result has no matched real-only and augmented arms "
+            f"{scope}{basis} {measured} The result has no matched real-only and augmented arms "
             "scored on the same untouched real cases. Incremental cost is unavailable.",
             "The evaluation operator can provide a matched comparison and its cost receipt.",
         )
