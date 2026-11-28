@@ -184,6 +184,7 @@ class Settings:
     explicit_recipient: bool = True
     live_workflow_ref: str = ""
     starter_setup: StarterBinding | None = None
+    owner_settings_authority_file: str = ""
 
     @property
     def binding(self) -> str:
@@ -230,6 +231,7 @@ class Settings:
             "workspace_title",
             "workflow_label",
             "starter_setup",
+            "owner_settings_authority_file",
             "live_workflow_ref",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
@@ -270,6 +272,11 @@ class Settings:
                     and label.isprintable()
                     and not any(c in label for c in "<>@#&")
                 )
+        authority_file = ""
+        if "owner_settings_authority_file" in doc:
+            from opentour_cell.pilot.repair_workflow import _name
+
+            authority_file = _name(doc["owner_settings_authority_file"])
         live_workflow = doc.get("live_workflow_ref", "")
         if "live_workflow_ref" in doc:
             _check(isinstance(live_workflow, str) and re.fullmatch(REF_PATTERN, live_workflow))
@@ -298,6 +305,7 @@ class Settings:
             path,
             explicit_recipient=explicit_recipient,
             live_workflow_ref=live_workflow,
+            owner_settings_authority_file=authority_file,
             starter_setup=StarterBinding.parse(doc["starter_setup"])
             if "starter_setup" in doc
             else None,
@@ -2745,13 +2753,36 @@ class Workbench:
                     prior = nominee
                 return token, prior
 
+    def _owner_setup_readback(self, cfg: Settings, actor: str, workflow: str) -> Json | None:
+        if not cfg.owner_settings_authority_file:
+            return None
+        from opentour_cell.pilot.owner_settings import OwnerSettings
+
+        try:
+            service = OwnerSettings.open_readback(
+                cfg.directory,
+                cfg.organization,
+                self.store.engagement_id,
+                authority_file=cfg.directory / cfg.owner_settings_authority_file,
+            )
+            result = service.setup_readback(actor=actor, workflow=workflow)
+            _check(self.settings() == cfg)
+            return result
+        except (ValueError, OSError, sqlite3.Error):
+            return None
+
     def _workflow_settings_view(self, cfg: Settings, actor: str, workflow: str, view: str) -> None:
         nomination = self._nomination(actor, workflow)
+        setup = self._owner_setup_readback(cfg, actor, workflow)
         token = self.journal.context(actor, cfg.channel, view, "workflow_settings", workflow)
         self._show(
             view,
-            self.views.workflow_settings(token, workflow, *nomination),
-            authorize=lambda: _check(self._nomination(actor, workflow) == nomination),
+            self.views.workflow_settings(token, workflow, *nomination, setup=setup),
+            authorize=lambda: _check(
+                self.settings() == cfg
+                and self._nomination(actor, workflow) == nomination
+                and self._owner_setup_readback(cfg, actor, workflow) == setup
+            ),
         )
 
     def _live_model(
