@@ -27,35 +27,39 @@ ELIGIBLE. Covered:
 - glyphs drawn onto each other anywhere on the page, by any operator (_page_overprint), and
   within a run of shows along one line (_extent_units);
 - render modes: 3 and 7 are invisible; 4 to 7 clip, and any undefined mode, go to review;
-- fill colour: near-white in DeviceGray, DeviceRGB, DeviceCMYK and ICCBased spaces of 1, 3 or
-  4 components (g, rg, k, sc, scn); text in any other colour space (Separation, DeviceN,
-  Lab, CalGray, CalRGB, Indexed, Pattern, an unknown name) goes to review;
+- paint colour: near-white in DeviceGray, DeviceRGB and DeviceCMYK, for the fill (g, rg, k,
+  cs, sc, scn) and, in stroking render modes, the stroke (G, RG, K, CS, SC, SCN), composited
+  at the ExtGState constant alpha (/ca, /CA); any other colour space (ICCBased, Separation,
+  DeviceN, Lab, CalGray, CalRGB, Indexed, Pattern, an unknown name) or operands that do not
+  fit the space go to review;
+- graphics state: a soft mask, a blend mode other than Normal, a transfer function, an
+  ExtGState font, an unreadable or missing ExtGState, or a dash on stroked text go to review;
+- vector paint and shadings (_paint_flags): paint over a glyph box after the text, or paint
+  under it too close to its colour (or of a colour that cannot be judged), goes to review;
+- images: page-sized or text-overlapping image XObjects and inline images; inline image data
+  is skipped, and data whose extent its dictionary does not confirm goes to review;
+- annotations a viewer may draw over a glyph box, and /ActualText or /E replacement text, go
+  to review;
 - optional content: any `/OC` marked content goes to review, whatever the layer state;
 - XObjects: text in a Form XObject is not read and goes to review; a `Do` of anything not
   classified as a form or an image (indirect /Subtype resolved) goes to review;
 - file structure: objects are those the cross-reference data selects; a stream whose extent
-  is in doubt, an unreadable dictionary, a dictionary left open in a content stream, or a
-  non-finite operand goes to review; `#xx`-escaped names are decoded wherever names are
-  compared, /Encrypt included.
+  is in doubt (its parsed /Length, direct or indirect, against the first endstream), an
+  unreadable dictionary, a dictionary left open in a content stream, or a non-finite operand
+  goes to review; `#xx`-escaped names are decoded wherever names are compared, /Encrypt
+  included.
 
 NOT covered, and therefore able to admit hidden text as ELIGIBLE:
 
-- inline images (`BI ... ID ... EI`) are not detected at all, so a page-sized inline image
-  over text is not flagged;
-- vector overpaint is not detected, e.g. `1 g ... re f` painted over text after it;
-- ExtGState is not read: zero alpha (`/GS gs`), soft masks and blend modes pass unseen;
-- annotations (/Annots) and their appearance streams are not read, so one drawn over text
-  is not flagged;
-- stroke-only text (`1 Tr`) is judged by its fill colour and space, not its stroke colour;
 - an embedded font program may draw any shape for a code: for a simple font with a standard
-  encoding, the reader trusts the code, not the glyph drawn;
+  encoding, the reader trusts the code, not the glyph drawn (OPE-584 compares with a renderer);
 - glyph boxes are bounds from widths (see the width sources below), not outlines; a font with
-  valid /Widths and no standard name is boxed by its declared widths.
+  valid /Widths and no standard name is boxed by its declared widths, so paint, clip and image
+  checks see that box, not the ink.
 
 Known cost, by design: white or reverse-out text on a dark band (banner and table headers) is
-flagged `text_color_invisible`, because no background is tracked and visibility cannot be
-established without it. Closing that needs painted-background tracking: the fill colour and
-extent of every filled rectangle and image, composited under each text fragment.
+flagged `text_color_invisible`, since visibility on paper is judged against white. Anything
+painted over a glyph box after the text is flagged, a strike-through line included.
 """
 
 from __future__ import annotations
@@ -79,7 +83,7 @@ from opentour_cell.pilot.mixed_intake.model import (
     finish,
 )
 
-PDF_REVISION = "opentour.reader.pdf-text@1.0.7"
+PDF_REVISION = "opentour.reader.pdf-text@1.0.8"
 # The three thresholds below are adjustable judgement values, not contract values: they trade
 # review volume against missed concealment and may be retuned without a format change.
 # Effective text size, in points, below which text is treated as not human-readable. Real
@@ -1675,7 +1679,7 @@ def _stroke_boxes(
             x, y = points[0]
             boxes.append(_widen((x, y, x, y), half))  # a dot, drawn by round or square caps
             continue
-        segments = list(zip(points, points[1:]))
+        segments = list(zip(points, points[1:], strict=False))
         if is_closed and len(points) > 2:
             segments.append((points[-1], points[0]))
         for (x0, y0), (x1, y1) in segments:
@@ -1726,7 +1730,8 @@ def _paint_flags(
             if paint.colour is None:
                 flags.add("text_background_unverified")
             elif not any(
-                colour is not None and _contrast(colour, paint.colour) >= MIN_TEXT_CONTRAST_AGAINST_WHITE
+                colour is not None
+                and _contrast(colour, paint.colour) >= MIN_TEXT_CONTRAST_AGAINST_WHITE
                 for colour in colours
             ):
                 flags.add("text_background_contrast_low")
@@ -2114,7 +2119,10 @@ def _fragments(
                     closed.append(False)
                 if op in (b"c", b"v", b"y"):
                     start = subpaths[-1][-1] if subpaths[-1] else points[-1]
-                    xs, ys = [start[0], *(p[0] for p in points)], [start[1], *(p[1] for p in points)]
+                    xs, ys = (
+                        [start[0], *(p[0] for p in points)],
+                        [start[1], *(p[1] for p in points)],
+                    )
                     curves.append((min(xs), min(ys), max(xs), max(ys)))
                 subpaths[-1].append(points[-1])
         elif op == b"h":
@@ -2543,11 +2551,7 @@ def _ext_states(resources: dict[str, object], doc: _Doc) -> dict[bytes, _ExtStat
         alphas: list[float | None] = []
         for key in ("ca", "CA"):
             alpha = doc.resolve(state.get(key))
-            if (
-                isinstance(alpha, (int, float))
-                and not isinstance(alpha, bool)
-                and 0 <= alpha <= 1
-            ):
+            if isinstance(alpha, (int, float)) and not isinstance(alpha, bool) and 0 <= alpha <= 1:
                 alphas.append(float(alpha))
             else:
                 alphas.append(None)

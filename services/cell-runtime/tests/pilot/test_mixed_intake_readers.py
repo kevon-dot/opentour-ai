@@ -1907,8 +1907,15 @@ def test_pdf_text_in_a_colour_space_this_reader_cannot_judge_goes_to_review() ->
                  resources=_spaces(b"/CS0 [/ICCBased 8 0 R]"), extra=known)  # fmt: skip
     # Operands that do not match the space's component count are malformed: poppler ignores
     # `1 1 1 sc` in DeviceGray and draws black, another viewer may read the first operand.
-    for paint in (b"0.2 0.4 0.6 sc", b"1 1 1 sc", b"1 1 1 scn", b"0 0 0 0 sc",
-                  b"/DeviceRGB cs 1 sc", b"/DeviceCMYK cs 0 0 0 sc", b"/CS0 cs 1 scn"):
+    for paint in (
+        b"0.2 0.4 0.6 sc",
+        b"1 1 1 sc",
+        b"1 1 1 scn",
+        b"0 0 0 0 sc",
+        b"/DeviceRGB cs 1 sc",
+        b"/DeviceCMYK cs 0 0 0 sc",
+        b"/CS0 cs 1 scn",
+    ):
         _flagged(paint + hidden, "text_color_space_unverified",
                  resources=_spaces(b"/CS0 /DeviceRGB"))  # fmt: skip
     # Colour set back to a device space by g, rg or k is judged again.
@@ -2287,3 +2294,21 @@ def test_pdf_actual_text_replacing_the_drawn_text_goes_to_review() -> None:
     plain = b"/Font << /F1 7 0 R >> /Properties << /MC0 << /MCID 0 >> >>"
     _eligible(b"/Span /MC0 BDC" + _LINE + b"EMC", resources=plain)
     _eligible(b"/Span << /Lang (en-GB) >> BDC" + _LINE + b"EMC")
+
+
+def test_every_flag_the_pdf_reader_raises_routes_to_review() -> None:
+    # A flag missing from REVIEW_FLAGS is silently dropped by finish(): the page would be
+    # ELIGIBLE with the defect recorded nowhere. Every literal flag the reader adds must route.
+    import inspect
+    import re as regex
+
+    from opentour_cell.pilot.mixed_intake.model import REVIEW_FLAGS
+
+    source = inspect.getsource(pdf)
+    raised = set(regex.findall(r'(?:marks|late|flags)\.add\("([a-z_]+)"\)', source))
+    raised |= set(regex.findall(r'\{"([a-z_]+)"\}', source))
+    raised |= set(regex.findall(r'flags\.add\(\s*"([a-z_]+)"\s+if', source))
+    raised |= set(regex.findall(r'else "([a-z_]+)"\)', source))
+    raised |= set(regex.findall(r'flags\.append\("([a-z_]+)"\)', source))
+    assert len(raised) >= 30, sorted(raised)  # the pattern still finds them
+    assert raised <= REVIEW_FLAGS, sorted(raised - REVIEW_FLAGS)
