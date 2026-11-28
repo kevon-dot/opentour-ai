@@ -27,7 +27,13 @@ from urllib.parse import urlsplit
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
-from opentour_cell.pilot.scoped_query_plan import ReadoutQuestion, plan_query
+from opentour_cell.pilot.scoped_query_plan import (
+    ArmChart,
+    QueryHold,
+    ReadoutQuestion,
+    WorkflowDiscovery,
+    plan_query,
+)
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
@@ -4456,6 +4462,10 @@ class Workbench:
             self._regression_picker(cfg, actor, view, topic=status_topic.value)
             return
         plan = plan_query(prompt)
+        if isinstance(plan, (ArmChart, WorkflowDiscovery)) or plan == QueryHold.VERSION_REQUIRED:
+            ctx = self.journal.context(actor, cfg.channel, view, "query_hold")
+            self._show(view, self.views.query_hold_modal(ctx, plan))
+            return
         if isinstance(plan, ReadoutQuestion) and plan in WORKPLACE_QUESTIONS:
             self._regression_picker(cfg, actor, view, topic=plan.value)
             return

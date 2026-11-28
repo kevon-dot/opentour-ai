@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
+from opentour_cell.pilot.scoped_query_plan import ArmChart, QueryHold, WorkflowDiscovery
 from opentour_cell.pilot.starter_setup import StarterPreview
 from opentour_cell.pilot.status_questions import StatusAnswer
 from opentour_cell.pilot.text_classifier import (
@@ -781,6 +782,35 @@ def current_training_question(
         "ot_current_training_proof" if proof else "ot_current_training_status",
         context,
         blocks,
+    )
+
+
+def query_hold_modal(context: str, plan: ArmChart | WorkflowDiscovery | QueryHold) -> Block:
+    if isinstance(plan, WorkflowDiscovery):
+        answer = StatusAnswer(
+            "Recurring invoice-code errors for the previous calendar month are unavailable.",
+            "This request needs a verified monthly report for the workflows you can inspect.",
+            "The data custodian can supply a scoped report with the reporting timezone and dates.",
+        )
+    elif isinstance(plan, ArmChart):
+        answer = StatusAnswer(
+            f"The baseline and rule chart for requested version {plan.version} is unavailable.",
+            "There is no verified comparison linking both arms to that version for this request.",
+            "The evaluation operator can provide the version-bound benchmark comparison.",
+        )
+    elif plan == QueryHold.VERSION_REQUIRED:
+        answer = StatusAnswer(
+            "Choose one benchmark version for the baseline and rule chart.",
+            "A comparison needs the same frozen benchmark version for both arms.",
+            "Ask again with one exact version, such as “Graph baseline versus rule on v2”.",
+        )
+    else:
+        raise ValueError("Unsupported query hold.")
+    return _modal(
+        "Ask OpenTour",
+        "ot_query_hold",
+        context,
+        [_section(answer.finding), _section(answer.basis), _section(answer.next_action)],
     )
 
 

@@ -136,3 +136,33 @@ def test_old_workplace_page_does_not_rebind_to_another_workflow(tmp_path, monkey
     after = screen(h, picker)
     assert after == initial or "ot_result_open" not in buttons(after)
     assert counts(h) == before
+
+
+@pytest.mark.parametrize("surface", ["home", "slash"])
+@pytest.mark.parametrize(
+    ("question", "expected", "next_actor"),
+    [
+        ("Graph baseline versus rule on v27", "requested version 27", "evaluation operator"),
+        ("Graph baseline versus rule on latest", "Choose one benchmark version", "Ask again"),
+        (
+            "Which workflows had recurring invoice code errors last month?",
+            "previous calendar month",
+            "data custodian",
+        ),
+    ],
+)
+def test_typed_query_holds_are_private_and_read_only(
+    tmp_path, monkeypatch, surface, question, expected, next_actor
+):
+    h = Harness(tmp_path)
+    before = counts(h)
+    if surface == "slash":
+        view = h.launch(prompt=question)
+    else:
+        click(h, publish(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+        view = list(h.slack.screens)[-1]
+        h.form(view, {"command": {"command": {"value": question}}})
+    assert screen(h, view)["callback_id"] == "ot_query_hold"
+    assert expected in text(h, view) and next_actor in text(h, view)
+    assert not buttons(screen(h, view))
+    assert counts(h) == before
