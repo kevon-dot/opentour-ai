@@ -17,6 +17,13 @@ The cache key binds ``TOOL_VERSION``, ``VERIFIER_VERSION`` (the verifier/finalit
 built artifact was checked under) and ``ARTIFACT_SCHEMA_VERSION``. The same versions are in
 the stored registry fingerprint, so bumping any of them forces a bounded full rebuild with no
 reuse of earlier jobs or snapshot results.
+
+Source state rewritten outside the event log (another writer, a restore) is caught twice.
+At publish, the state must still equal the state the run planned against, or the publish is
+refused (``SOURCE_STATE_MOVED``; a moved grant on a published built result is refused first as
+``AUTHORITY_MOVED``). On the next run, the current state must equal the last published state
+with the pending events replayed onto it; otherwise the run is a bounded full rebuild
+(``source_state_rewritten``), so a rewrite cannot leave stale reused results in place.
 """
 
 from __future__ import annotations
@@ -52,7 +59,7 @@ class RecomputeError(Exception):
 
 
 class PublishConflict(RecomputeError):
-    """The parent snapshot, change cursor or authority moved before publish."""
+    """The parent snapshot, change cursor, authority or source state moved before publish."""
 
 
 class LeaseLost(RecomputeError):
@@ -326,6 +333,7 @@ def make_plan(
     max_fanout: int | None = None,
     lookup: IndexLookup | None = None,
     registry_changed: bool = False,
+    state_rewritten: bool = False,
 ) -> Plan:
     find = lookup or registry.lookup
     reasons: dict[str, set[str]] = defaultdict(set)
@@ -350,7 +358,11 @@ def make_plan(
         mode = "bounded_full_rebuild"
         for fam_id in registry.families:
             reasons[fam_id].add("registry_changed")
-    elif max_fanout is not None and len(reasons) > max_fanout:
+    if state_rewritten:  # state moved without an event: no reused result is known to be current
+        mode = "bounded_full_rebuild"
+        for fam_id in registry.families:
+            reasons[fam_id].add("source_state_rewritten")
+    if mode == "incremental" and max_fanout is not None and len(reasons) > max_fanout:
         mode = "bounded_full_rebuild"  # excessive fan-out: rebuild the full authorized scope
         for fam_id in registry.families:
             reasons[fam_id].add("fanout_fallback")
@@ -482,6 +494,27 @@ class RecomputeService:
             "insert or replace into meta values('state',?)", (canonical(state.to_json()),)
         )
 
+    def _put_published_state(self, state: SourceState) -> None:
+        self.db.execute(
+            "insert or replace into meta values('published_state',?)",
+            (canonical(state.to_json()),),
+        )
+
+    def _state_rewritten(self, state: SourceState, pending: Iterable[ChangeEvent]) -> bool:
+        """True unless ``state`` is the last published state with ``pending`` replayed onto it.
+
+        ``submit`` is the only writer that advances state, and it always appends the event, so
+        a mismatch means the state was rewritten outside the event log. A missing row (a store
+        written before this check existed) counts as rewritten: the safe direction.
+        """
+        row = self.db.execute("select v from meta where k='published_state'").fetchone()
+        if row is None:
+            return True
+        expected = SourceState.from_json(json.loads(row[0]))
+        for event in pending:
+            expected = apply_event(expected, event)
+        return canonical(expected.to_json()) != canonical(state.to_json())
+
     def _put_registry(self) -> None:
         self.db.execute(
             "insert or replace into meta values('registry',?)",
@@ -539,6 +572,7 @@ class RecomputeService:
             manifest = Manifest(1, None, None, results)
             self._save_snapshot(manifest)
             self._put_state(state)
+            self._put_published_state(state)
             self._put_registry()
             return manifest
 
@@ -657,11 +691,12 @@ class RecomputeService:
         snap = self.snapshot()
         if snap is None:
             raise RecomputeError("NOT_BOOTSTRAPPED")
-        state, cursor = self.source_state(), self.cursor()
+        with self._tx():  # one consistent read: a concurrent submit cannot split state/events
+            state, cursor, pending = self.source_state(), self.cursor(), self.pending_events()
         changed = self._registry_changed()
         plan = make_plan(
-            self.registry, snap.results, snap.revision, self.pending_events(), state, cursor,
-            self.max_fanout, lookup, changed,
+            self.registry, snap.results, snap.revision, pending, state, cursor,
+            self.max_fanout, lookup, changed, self._state_rewritten(state, pending),
         )  # fmt: skip
         built: dict[str, FamilyResult] = {}
         started = hits = 0
@@ -687,11 +722,17 @@ class RecomputeService:
                 raise SimulatedCrash
         if before_publish:
             before_publish()
-        return RunReport(plan, started, hits, self._publish(plan, snap, built, token, changed))
+        manifest = self._publish(plan, snap, built, token, changed, state)
+        return RunReport(plan, started, hits, manifest)
 
     def _publish(
-        self, plan: Plan, parent: Manifest, built: Mapping[str, FamilyResult], token: int,
+        self,
+        plan: Plan,
+        parent: Manifest,
+        built: Mapping[str, FamilyResult],
+        token: int,
         registry_changed: bool,
+        planned: SourceState,
     ) -> Manifest:
         with self._tx():
             self._check_lease(token)  # inside the publish transaction: no check-then-act window
@@ -709,8 +750,12 @@ class RecomputeService:
                     and state.grants.get((fam.tenant, fam.purpose)) != res.grant_epoch
                 ):
                     raise PublishConflict("AUTHORITY_MOVED")
+            if canonical(state.to_json()) != canonical(planned.to_json()):
+                # Same cursor, different state: rewritten outside the event log mid-run.
+                raise PublishConflict("SOURCE_STATE_MOVED")
             manifest = Manifest(parent.revision + 1, parent.revision, parent.semantic, results)
             self._save_snapshot(manifest)
+            self._put_published_state(state)
             self._put_registry()
             self.db.execute(
                 "update events set state='done' where state='pending' and cursor<=?", (plan.cursor,)

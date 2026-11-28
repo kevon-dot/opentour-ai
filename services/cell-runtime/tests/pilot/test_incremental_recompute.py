@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from opentour_cell.pilot import incremental_recompute as ir
@@ -389,7 +390,8 @@ def test_randomized_event_sequences_match_a_clean_rebuild(tmp_path: Path) -> Non
                     )
                 )
             service.submit(events)
-            service.run("w", now=step * 1000)
+            report = service.run("w", now=step * 1000)
+            assert report.plan.mode == "incremental"  # event-driven state is never "rewritten"
             parity(service)
         service.close()
 
@@ -422,8 +424,10 @@ def test_authority_moved_before_publish_publishes_nothing(
     parity(svc)
 
 
-@pytest.mark.parametrize("constant", ["VERIFIER_VERSION", "ARTIFACT_SCHEMA_VERSION"])
-def test_cache_key_binds_verifier_and_artifact_schema_versions(
+@pytest.mark.parametrize(
+    "constant", ["TOOL_VERSION", "VERIFIER_VERSION", "ARTIFACT_SCHEMA_VERSION"]
+)
+def test_cache_key_binds_tool_verifier_and_artifact_schema_versions(
     monkeypatch: pytest.MonkeyPatch, constant: str
 ) -> None:
     registry, state = Registry(fams()), base_state()
@@ -435,7 +439,9 @@ def test_cache_key_binds_verifier_and_artifact_schema_versions(
     assert after.digest != before.digest
 
 
-@pytest.mark.parametrize("constant", ["VERIFIER_VERSION", "ARTIFACT_SCHEMA_VERSION"])
+@pytest.mark.parametrize(
+    "constant", ["TOOL_VERSION", "VERIFIER_VERSION", "ARTIFACT_SCHEMA_VERSION"]
+)
 def test_version_bump_invalidates_cache_and_prior_snapshot_across_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, constant: str
 ) -> None:
@@ -457,3 +463,127 @@ def test_version_bump_invalidates_cache_and_prior_snapshot_across_restart(
     parity(restarted)
     assert restarted.admit("C") is True
     assert restarted.run("w", now=1).plan.dirty == ()  # versions stored: incremental again
+
+
+OTHER_TENANT = "generated-tenant-b"
+OTHER_FIELD = FieldRef(SRC, "generated-other-field")
+
+
+@pytest.fixture
+def two_scopes(tmp_path: Path) -> RecomputeService:
+    """Tenant B's family X reads a field nothing in tenant A reads, so A's changes never dirty X."""
+    families = fams() + [Family("X", OTHER_TENANT, PURPOSE, DEVELOPMENT, (OTHER_FIELD,))]
+    state = SourceState(
+        {**base_state().values, OTHER_FIELD.key(): (1, "generated-other-1")},
+        grants={(TENANT, PURPOSE): 1, (OTHER_TENANT, PURPOSE): 1},
+    )
+    service = RecomputeService(str(tmp_path / "two.db"), Registry(families))
+    service.bootstrap(state)
+    return service
+
+
+def rewrite_state(service: RecomputeService, state: SourceState) -> None:
+    """Another writer or a restore: state changes, no event is appended, the cursor stays."""
+    cursor = service.cursor()
+    service._put_state(state)
+    assert service.cursor() == cursor
+
+
+@pytest.mark.parametrize("epoch", [None, 2])
+def test_publish_rechecks_authority_of_reused_results_not_only_built_ones(
+    two_scopes: RecomputeService, monkeypatch: pytest.MonkeyPatch, epoch: int | None
+) -> None:
+    """Only the non-dirty scope's grant moves, so only a reused result can see it."""
+    svc = two_scopes
+    svc.submit([upsert("e1", 2, FREIGHT, 11)])
+    admissions = svc.admission_count()
+    current = svc.source_state()
+    moved = SourceState(current.values, grants={**current.grants, (OTHER_TENANT, PURPOSE): epoch})
+    captured: list[ir.Plan] = []
+    original = ir.make_plan
+
+    def spy(*args: Any, **kwargs: Any) -> ir.Plan:
+        captured.append(original(*args, **kwargs))
+        return captured[-1]
+
+    monkeypatch.setattr(ir, "make_plan", spy)
+    with pytest.raises(PublishConflict) as exc:
+        svc.run("w", now=0, before_publish=lambda: rewrite_state(svc, moved))
+    monkeypatch.undo()
+    assert "X" in captured[0].reusable and "X" not in captured[0].dirty  # X is reuse-only
+    assert {"A", "B", "P"} <= set(captured[0].dirty)  # tenant A's grant did not move
+    assert exc.value.code == "AUTHORITY_MOVED"
+    assert svc.revision() == 1 and svc.admit("X") is False
+    assert svc.admission_count() == admissions
+    report = svc.run("w", now=1)
+    assert report.manifest.results["X"].grant_epoch == epoch
+    parity(svc)
+
+
+def test_missing_registry_fingerprint_row_forces_full_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No stored fingerprint means nothing proves prior results match this registry/version."""
+    path = str(tmp_path / "nofp.db")
+    first = RecomputeService(path, Registry(fams()))
+    boot = first.bootstrap(base_state())
+    first.db.execute("delete from meta where k='registry'")
+    first.close()
+    monkeypatch.setattr(ir, "TOOL_VERSION", ir.TOOL_VERSION + "-next")  # what the row would catch
+    restarted = RecomputeService(path, Registry(fams()))
+    report = restarted.run("w", now=0)
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert set(report.plan.dirty) == set(restarted.registry.families)
+    assert all("registry_changed" in report.plan.reasons[f] for f in report.plan.dirty)
+    for family, result in report.manifest.results.items():
+        if result.status == BUILT:
+            assert result.cache_key != boot.results[family].cache_key
+    parity(restarted)
+    assert restarted.run("w", now=1).plan.dirty == ()  # row written back: incremental again
+
+
+def test_input_rewritten_before_publish_is_refused_and_next_run_rebuilds(
+    svc: RecomputeService,
+) -> None:
+    """An input of a reused family changes without an event while the run is in flight."""
+    boot = svc.snapshot()
+    assert boot is not None
+    svc.submit([upsert("e1", 2, FREIGHT, 11)])
+    current = svc.source_state()
+    moved = SourceState(
+        {**current.values, DATE.key(): (1, "generated-date-rewritten")}, grants=current.grants
+    )
+    with pytest.raises(PublishConflict) as exc:
+        svc.run("w", now=0, before_publish=lambda: rewrite_state(svc, moved))
+    assert exc.value.code == "SOURCE_STATE_MOVED"
+    assert svc.revision() == 1 and svc.admit("C") is False
+    report = svc.run("w", now=1)  # no new event: only the rewrite can make C dirty
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert "source_state_rewritten" in report.plan.reasons["C"]
+    assert report.manifest.results["C"].cache_key != boot.results["C"].cache_key
+    parity(svc)
+    assert svc.admit("C") is True
+    assert svc.run("w", now=2).plan.dirty == ()  # published state stored: incremental again
+
+
+def test_state_rewritten_between_runs_forces_full_rebuild(svc: RecomputeService) -> None:
+    current = svc.source_state()
+    rewrite_state(
+        svc,
+        SourceState({**current.values, MEMO.key(): (1, "generated-memo-x")}, grants=current.grants),
+    )
+    svc.submit([upsert("e1", 2, DATE, "generated-date-2")])  # an unrelated, legitimate event
+    report = svc.run("w", now=0)
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert "source_state_rewritten" in report.plan.reasons["E"]
+    parity(svc)
+
+
+def test_missing_published_state_row_forces_full_rebuild(svc: RecomputeService) -> None:
+    """A store written before the published-state row existed rebuilds once, then is incremental."""
+    svc.db.execute("delete from meta where k='published_state'")
+    report = svc.run("w", now=0)
+    assert report.plan.mode == "bounded_full_rebuild"
+    assert set(report.plan.dirty) == set(svc.registry.families)
+    parity(svc)
+    assert svc.run("w", now=1).plan.dirty == ()
