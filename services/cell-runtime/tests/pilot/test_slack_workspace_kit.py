@@ -66,6 +66,9 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     for path in paths:
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / path, repo / path)
+    platform_verifier = settings["PLATFORM_VERIFIER"]
+    verifier_source = repo / settings["CELL"] / "src" / platform_verifier
+    verifier_source.write_bytes(b'"""Generated platform verifier packaging sentinel."""\n')
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(
@@ -92,7 +95,9 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     target = tmp_path / "extracted"
     with ZipFile(first) as archive:
         archive.extractall(target)
-        assert json.loads(archive.read("PROVENANCE.json"))["source_commit"] == revision
+        provenance = json.loads(archive.read("PROVENANCE.json"))
+        assert provenance["source_commit"] == revision
+        assert provenance["platform_verifier_bundled"] is True
         sums = archive.read("SHA256SUMS").decode().splitlines()
         assert len(sums) == len(archive.namelist()) - 1
         for line in sums:
@@ -101,6 +106,7 @@ def test_reproducible_kit_runs_isolated_data_mcp_and_slack_entrypoints(tmp_path)
     with ZipFile(target / "opentour-slack.pyz") as archive:
         assert "opentour_cell/pilot/recipient_lifecycle.py" in archive.namelist()
         assert "opentour_cell/pilot/recipient_lifecycle_authority.py" in archive.namelist()
+        assert archive.read(platform_verifier) == verifier_source.read_bytes()
         for module in settings["JOURNAL_MODULES"]:
             source = root / settings["JOURNAL"] / "src" / module
             assert archive.read(module) == source.read_bytes()

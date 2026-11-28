@@ -19,6 +19,7 @@ CELL = "services/cell-runtime"
 JOURNAL = "packages/authority-journal"
 VERSION = "1.0.0-rc.4"
 PYTHON = (3, 12, 16)
+PLATFORM_VERIFIER = "opentour_cell/pilot/signed_records.py"
 JOURNAL_MODULES = (
     "opentour_journal/__init__.py",
     "opentour_journal/crypto.py",
@@ -279,6 +280,10 @@ def build(revision: str) -> bytes:
     archive = runpy.run_path(str(ROOT / ARCHIVE_HELPER))["_archive"]
     modules = {name: read(f"{CELL}/src/{name}") for name in MODULES}
     modules.update({name: read(f"{JOURNAL}/src/{name}") for name in JOURNAL_MODULES})
+    verifier_path = f"{CELL}/src/{PLATFORM_VERIFIER}"
+    verifier_bundled = bool(_git("ls-tree", "--name-only", revision, "--", verifier_path).strip())
+    if verifier_bundled:
+        modules[PLATFORM_VERIFIER] = read(verifier_path)
     version = f"OpenTour Slack workspace kit {VERSION} ({revision})"
     modules["__main__.py"] = (f"VERSION = {version!r}\n" + ENTRY).encode()
     files = {name: read(path) for name, path in ASSETS.items()}
@@ -293,6 +298,7 @@ def build(revision: str) -> bytes:
             "kit_version": VERSION,
             "source_repository": "kevon-dot/opentour-ai",
             "source_commit": revision,
+            "platform_verifier_bundled": verifier_bundled,
             "python_version": "3.12.16",
             "artifact_kind": "release_candidate",
             "fixture_kind": "generated",
