@@ -815,3 +815,178 @@ def test_r2_an_unattributed_staging_scorer_cannot_stage(env: Env) -> None:
     )
     assert not decision.stageable
     assert "staging_scorer_unattributed" in decision.reasons
+
+
+# ---------------------------------------------------------------- cross-session review (PR #210)
+def journaled_result(env: Env, worker: rp.EveReplayWorker) -> dict[str, Any]:
+    """The result ``build_result`` gives from the arms the journal holds now, as a forger would."""
+    records = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
+    return env.result(records, journal=worker.journal)
+
+
+RowEdit = Callable[[str, list[list[Any]]], list[list[Any]]]
+
+
+def _duplicate_first(env: Env) -> RowEdit:
+    return lambda arm, rows: [rows[0], *rows]  # P2: the same correct row twice in every arm
+
+
+def _delete_fourth(env: Env) -> RowEdit:
+    return lambda arm, rows: [r for i, r in enumerate(rows) if i != 3]  # P3: a case deleted
+
+
+def _extra_excluded(env: Env) -> RowEdit:
+    excluded_ref = rp._ref(env.manifest, env.manifest.excluded[0][0])
+    # a well formed row for a case the manifest excluded, appended to every arm
+    return lambda arm, rows: [*rows, [excluded_ref, "correct_answer", *rows[0][2:]]]
+
+
+def _reversed(env: Env) -> RowEdit:
+    return lambda arm, rows: list(reversed(rows))
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(_duplicate_first, id="P2-duplicated-row"),
+        pytest.param(_delete_fourth, id="P3-deleted-case"),
+        pytest.param(_extra_excluded, id="extra-row"),
+        pytest.param(_reversed, id="reordered-rows"),
+    ],
+)
+def test_x1_an_arm_whose_rows_are_not_exactly_the_eligible_cases_cannot_build_or_stage(
+    env: Env, edit: Callable[[Env], RowEdit]
+) -> None:
+    worker = env.worker()
+    genuine = full_result(env, worker)
+    assert genuine["body"]["arms"]["baseline"]["correct"] == 1
+    assert len(env.manifest.eligible_case_ids) == 5
+    rewrite_rows(worker.journal.path, edit(env))
+    # every row still parses: attribution and commitment are present and name the frozen scorer
+    records = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
+    assert set(records) == {"baseline", "simple_repair", "candidate"}
+    with refuses("journal_rows_incomplete"):
+        journaled_result(env, worker)
+    with refuses("journal_rows_incomplete"):
+        env.replay(env.arm("baseline"), ScriptedInference(BASE, BASELINE), worker=worker)
+    with refuses("journal_rows_incomplete"):
+        verify(env, worker, 1, output(1, "correct"))
+    with refuses("journal_rows_incomplete"):
+        ag.rederive(worker.journal.path, env.manifest)
+    for supplied in (genuine, {"body": {}, "result_digest": "x"}):
+        decision = rp.stage_decision(
+            supplied, recomputed_digest=supplied["result_digest"], **env.staging(worker.journal)
+        )
+        assert not decision.stageable
+        assert decision.reasons == ("rebuild_refused_journal_rows_incomplete",)
+
+
+def test_x1b_the_untampered_journal_still_builds_and_stages(env: Env) -> None:
+    worker = env.worker()
+    genuine = full_result(env, worker)
+    assert journaled_result(env, worker) == genuine
+    want = [rp._ref(env.manifest, c) for c in env.manifest.eligible_case_ids]
+    outcomes = genuine["body"]["case_outcomes_redacted"]
+    assert all([ref for ref, _ in rows] == want for rows in outcomes.values())
+    decision = rp.stage_decision(
+        genuine, recomputed_digest=genuine["result_digest"], **env.staging(worker.journal)
+    )
+    assert decision.stageable and decision.reasons == ()
+
+
+def test_x2_an_existing_key_store_readable_by_others_is_refused_not_chmodded(env: Env) -> None:
+    worker, _ = baseline_run(env)
+    run_id = rp.run_id_for(env.manifest, env.arm("baseline"))
+    os.chmod(worker.keys.path, 0o644)
+    with refuses("commitment_key_store_insecure"):
+        worker.keys.require(run_id)
+    with refuses("commitment_key_store_insecure"):
+        worker.keys.key_for(run_id)
+    with refuses("commitment_key_store_insecure"):
+        worker.keys.key_for("generated-new-run")
+    assert stat.S_IMODE(worker.keys.path.stat().st_mode) == 0o644  # left as found
+    fresh = env.keys_dir / "fresh.keys"
+    fresh.write_text("")
+    os.chmod(fresh, 0o640)
+    with refuses("commitment_key_store_insecure"):
+        rp.CommitmentKeyStore(fresh).key_for("generated-new-run")
+    assert fresh.read_text() == ""  # no key was appended to the insecure store
+
+
+def test_x2b_a_key_store_owned_by_another_uid_is_refused(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, _ = baseline_run(env)
+    run_id = rp.run_id_for(env.manifest, env.arm("baseline"))
+    owner = worker.keys.path.stat().st_uid
+    monkeypatch.setattr(rp.os, "getuid", lambda: owner + 1)
+    with refuses("commitment_key_store_insecure"):
+        worker.keys.require(run_id)
+    with refuses("commitment_key_store_insecure"):
+        worker.keys.key_for("generated-new-run")
+
+
+def test_x2c_a_symlinked_key_store_is_refused(env: Env) -> None:
+    worker, _ = baseline_run(env)
+    run_id = rp.run_id_for(env.manifest, env.arm("baseline"))
+    link = env.keys_dir / "link.keys"
+    link.symlink_to(worker.keys.path)
+    assert stat.S_IMODE(worker.keys.path.stat().st_mode) == 0o600  # the target itself is sound
+    with refuses("commitment_key_store_insecure"):
+        rp.CommitmentKeyStore(link).require(run_id)
+    with refuses("commitment_key_store_insecure"):
+        rp.CommitmentKeyStore(link).key_for("generated-new-run")
+    dangling = env.keys_dir / "dangling.keys"
+    dangling.symlink_to(env.keys_dir / "dangling-target.keys")
+    with refuses("commitment_key_store_insecure"):
+        rp.CommitmentKeyStore(dangling).key_for("generated-new-run")
+    assert not (env.keys_dir / "dangling-target.keys").exists()  # nothing created through it
+
+
+def test_x2d_a_new_key_store_is_0600_inside_a_0700_directory(env: Env) -> None:
+    store = rp.CommitmentKeyStore(env.keys_dir / "new-dir" / "k.keys")
+    assert not store.path.parent.exists()
+    key = store.key_for("generated-run")
+    assert store.require("generated-run") == key
+    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(store.path.parent.stat().st_mode) == 0o700
+
+
+_ABSENT = object()
+
+
+def _scorer_with(env: Env, name: str, value: Any) -> Any:
+    scorer = sc.DeterministicScorer(env.manifest.scorer_version, env.manifest.rubric_revision)
+    if value is _ABSENT:
+        delattr(scorer, name)
+    else:
+        setattr(scorer, name, value)
+    return scorer
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        pytest.param("version", _ABSENT, id="no-version"),
+        pytest.param("version", "", id="empty-version"),
+        pytest.param("version", 7, id="int-version"),
+        pytest.param("scorer_id", _ABSENT, id="no-id"),
+        pytest.param("scorer_id", "", id="empty-id"),
+        pytest.param("scorer_id", 7, id="int-id"),
+    ],
+)
+def test_x3_an_unattributed_staging_scorer_is_a_reason_never_a_raw_exception(
+    env: Env, name: str, value: Any
+) -> None:
+    worker = env.worker()
+    result = full_result(env, worker)
+    scorer = _scorer_with(env, name, value)
+    records = {r.spec.arm_id: r for r in worker.journal.arms_for(env.manifest.digest)}
+    rebuilt = env.result(records, journal=worker.journal, scorer_=scorer)
+    assert rebuilt["body"]["scorer"]["staging_selfcheck_passed"] is False
+    decision = rp.stage_decision(
+        result, recomputed_digest=result["result_digest"], **env.staging(worker.journal, scorer)
+    )
+    assert not decision.stageable
+    assert "staging_scorer_unattributed" in decision.reasons
+    assert not any(r.startswith("rebuild_refused") for r in decision.reasons), decision.reasons

@@ -39,12 +39,14 @@ external gates. They are software behavior only and never provider or customer e
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
+import stat
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -641,6 +643,21 @@ def _require_attributed(manifest: ReplayManifest, record: ArmRecord) -> None:
         raise EveRefusal("arm_selfcheck_failed")
 
 
+def _require_complete(manifest: ReplayManifest, record: ArmRecord) -> None:
+    """The arm's rows must be exactly one per eligible case, in the manifest's order: no
+    duplicated, missing, extra or reordered row, so no total can count a case twice or skip one.
+    This is the same rule ``eve_aggregate`` applies to the journal it reads."""
+    if [r.ref for r in record.rows] != [_ref(manifest, c) for c in manifest.eligible_case_ids]:
+        raise EveRefusal("journal_rows_incomplete")
+
+
+def _require_sound(manifest: ReplayManifest, record: ArmRecord) -> None:
+    """Every reader's check on a journaled arm: attributed to the frozen scorer, replayed under a
+    passing self-check, and holding exactly the manifest's eligible cases."""
+    _require_attributed(manifest, record)
+    _require_complete(manifest, record)
+
+
 def _output_message(output: ArmOutput | None) -> list[Any] | None:
     if output is None:
         return None
@@ -679,12 +696,18 @@ def output_commitment(
 class CommitmentKeyStore:
     """Per-run HMAC keys for output commitments, held apart from the journal they protect.
 
-    One 32-byte key is drawn from ``secrets`` per run id on first use and appended to this file
-    (mode 0600). The key is never written into the journal. ``EveReplayWorker`` refuses a key store
-    anywhere under the journal's directory, one that is the journal file under another name (same
-    inode or a symlink), and a key store or journal with a second hard link; the store also refuses
-    to append to a file with more than one link. That check is structural only: it keeps the key
-    out of the record, not out of the same operator's reach.
+    One 32-byte key is drawn from ``secrets`` per run id on first use and appended to this file,
+    created 0600 inside a parent directory created 0700. The key is never written into the journal.
+    The file is opened with ``O_NOFOLLOW``, so a symlinked store is refused, and an existing store
+    that is not a regular file owned by the current uid with no permission beyond 0600 is refused
+    (``commitment_key_store_insecure``), for reading and for appending alike; it is never chmodded
+    into shape, because a store that was once readable by others may already have been read.
+
+    ``EveReplayWorker`` refuses a key store anywhere under the journal's directory, one that is the
+    journal file under another name (same inode or a symlink), and a key store or journal with a
+    second hard link; the store also refuses to append to a file with more than one link. That
+    check is structural only: it keeps the key out of the record, not out of the same operator's
+    reach.
 
     Evidence rung ``locally_keyed``: the same party holds this file and the journal, so a
     commitment is tamper evidence for ourselves, not proof to a third party. Moving this file to
@@ -697,12 +720,43 @@ class CommitmentKeyStore:
     def __repr__(self) -> str:
         return f"CommitmentKeyStore(path={str(self.path)!r})"
 
+    def _open(self, flags: int) -> int | None:
+        """A descriptor for the store, checked after opening (no check-then-open race), or None
+        when reading a store that does not exist yet."""
+        try:
+            fd = os.open(self.path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except FileNotFoundError:
+            if flags & os.O_CREAT:
+                raise EveRefusal("commitment_key_unavailable") from None
+            return None
+        except OSError as error:
+            if error.errno == errno.ELOOP:  # the final path component is a symlink
+                raise EveRefusal("commitment_key_store_insecure") from None
+            raise EveRefusal("commitment_key_unavailable") from None
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & ~0o600
+            ):
+                raise EveRefusal("commitment_key_store_insecure")
+            if flags & os.O_CREAT and info.st_nlink > 1:  # re-checked on the opened file
+                raise EveRefusal("commitment_key_colocated")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
     def _keys(self) -> dict[str, bytes]:
-        if not self.path.exists():
+        fd = self._open(os.O_RDONLY)
+        if fd is None:
             return {}
         keys: dict[str, bytes] = {}
         try:
-            for line in self.path.read_text().splitlines():
+            with os.fdopen(fd, "rb") as handle:
+                text = handle.read().decode()
+            for line in text.splitlines():
                 if not line:
                     continue
                 entry = json.loads(line)
@@ -722,8 +776,10 @@ class CommitmentKeyStore:
         key = secrets.token_bytes(32)
         if _hard_linked(self.path):
             raise EveRefusal("commitment_key_colocated")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = self._open(os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        if fd is None:  # unreachable: with O_CREAT the store is opened or refused
+            raise EveRefusal("commitment_key_unavailable")
         with os.fdopen(fd, "ab") as handle:
             handle.write(canonical({"run_id": run_id, "key": key.hex()}) + b"\n")
             handle.flush()
@@ -940,7 +996,7 @@ def verify_output(
     record = journal.arm(run_id)
     if record is None:
         raise EveRefusal("arm_not_journaled")
-    _require_attributed(manifest, record)
+    _require_sound(manifest, record)
     ref = _ref(manifest, case_id)
     rows = [r for r in record.rows if r.ref == ref]
     if len(rows) != 1:
@@ -1034,7 +1090,7 @@ class EveReplayWorker:
         run_id = run_id_for(manifest, arm)
         done = self.journal.arm(run_id)
         if done is not None:
-            _require_attributed(manifest, done)
+            _require_sound(manifest, done)
             self._emit(key, f"arm_replay_reused arm={arm.arm_id} run={run_id[7:23]}")
             return done
         run_key = self.keys.key_for(run_id)
@@ -1183,35 +1239,37 @@ def build_result(
     record the replay worker journaled for this manifest, so a hand-built arm cannot be scored.
     Every arm and verdict row must be attributed to the scorer id, version and rubric the manifest
     froze, and every arm must record that its replay ran under a passing self-check; the self-check
-    of the ``scorer`` passed here is an additional gate and never stands in for that record. Its
-    aggregation can be re-derived from the journal by ``eve_aggregate``; nothing here re-scores a
-    verdict, because the worker journal holds no candidate output.
+    of the ``scorer`` passed here is an additional gate and never stands in for that record. Every
+    arm must hold exactly one row per eligible case, in the manifest's order; a duplicated, missing,
+    extra or reordered row is refused (``journal_rows_incomplete``), so no count can include a case
+    twice or omit one. Its aggregation can be re-derived from the journal by ``eve_aggregate``;
+    nothing here re-scores a verdict, because the worker journal holds no candidate output.
     """
     if not arms or any(k != r.spec.arm_id or k not in ARMS for k, r in arms.items()):
         raise EveRefusal("invalid_arm_spec")
-    if (scorer.version, scorer.rubric_revision) != (
-        manifest.scorer_version,
-        manifest.rubric_revision,
-    ):
-        raise EveRefusal("scorer_version_drift")
+    # Attribution is read first, defensively: a staging scorer with a missing, empty or non-string
+    # id, version or rubric is unattributed (not stageable), never a raw AttributeError. Only a
+    # fully declared identity is compared with the manifest, version and rubric first.
+    try:
+        staging_attribution: tuple[str, str, str] | None = scorer_attribution(scorer)
+    except EveRefusal:
+        staging_attribution = None
+    if staging_attribution is not None:
+        if staging_attribution[1:] != (manifest.scorer_version, manifest.rubric_revision):
+            raise EveRefusal("scorer_version_drift")
+        if staging_attribution[0] != manifest.scorer_id:
+            raise EveRefusal("scorer_identity_drift")
     for record in arms.values():
         journaled = journal.arm(run_id_for(manifest, record.spec))
         if journaled is not None:
-            _require_attributed(manifest, journaled)
+            _require_sound(manifest, journaled)
         if journaled != record:
             raise EveRefusal("arm_not_journaled")
     replay_selfcheck_passed = all(
         r.scorer is not None and r.scorer.selfcheck_passed is True for r in arms.values()
     )
     # The staging scorer must be the scorer the manifest names, as replay requires. A declared
-    # other identity is refused; an undeclared one cannot pass the staging gate.
-    try:
-        staging_attribution: tuple[str, str, str] | None = scorer_attribution(scorer)
-    except EveRefusal:
-        staging_attribution = None
-    frozen = (manifest.scorer_id, manifest.scorer_version, manifest.rubric_revision)
-    if staging_attribution is not None and staging_attribution != frozen:
-        raise EveRefusal("scorer_identity_drift")
+    # other identity was refused above; an undeclared one cannot pass the staging gate.
     staging_selfcheck_passed = staging_attribution is not None and scorer_selfcheck(scorer)
     treatment = arms.get("candidate") or arms.get("simple_repair")
     control = arms.get("simple_repair") if "candidate" in arms else arms.get("baseline")
