@@ -29,6 +29,13 @@ CANONICAL = canonical_digest("generated-canonical-inputs")
 SOURCES = canonical_digest("generated-source-revisions")
 SCORING = canonical_digest("generated-scoring-policy")
 ANSWER_KEY = canonical_digest("generated-sealed-answer-key")
+# The material each opaque binding digest above is computed from, as a worker store holds it.
+BINDING_MATERIALS = {
+    "canonical_inputs": "generated-canonical-inputs",
+    "source_revisions": "generated-source-revisions",
+    "scoring_policy": "generated-scoring-policy",
+    "answer_key": "generated-sealed-answer-key",
+}
 FEATURES = (
     FeatureSpec("ticket_text", "decision_time"),
     FeatureSpec("customer_tier", "decision_time"),
