@@ -283,16 +283,27 @@ def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
         hazards.append("dockerfile_non_ascii_or_control")
     joined: list[str] = []
     pending = ""
+    continuing = False
     for line in lines:
-        if not pending and not line.strip():
+        if not line.strip():
+            # BuildKit skips an empty or blank line inside a continuation and keeps joining, so
+            # `WORKDIR /x \` + blank line swallows the next instruction (for example USER).
+            # Refused; the skip is still emulated so the other checks see what BuildKit builds.
+            if continuing:
+                hazards.append("dockerfile_empty_continuation_line")
             continue
         if line.lstrip().startswith("#"):
+            # BuildKit also skips comment lines inside a continuation. The real file has none.
+            if continuing:
+                hazards.append("dockerfile_comment_in_continuation")
             continue
         if line.rstrip().endswith("\\"):
             pending += line.rstrip()[:-1] + " "
+            continuing = True
             continue
         joined.append((pending + line).strip())
         pending = ""
+        continuing = False
     if pending:
         hazards.append("dangling_continuation")
     stages: list[dict] = [{"from": None, "steps": []}]
@@ -338,7 +349,12 @@ def env_assignments(args: str) -> list[tuple[str, str]]:
         return [("__UNPARSEABLE__", args)]
     if tokens and "=" not in tokens[0]:
         return [(tokens[0], " ".join(tokens[1:]))]
-    return [tuple(token.split("=", 1)) for token in tokens]  # type: ignore[misc]
+    # A bare word in the NAME=value form is a BuildKit syntax error; keep it so it is refused.
+    return [
+        (name, value) if sep else ("__UNPARSEABLE__", token)
+        for token in tokens
+        for name, sep, value in [token.partition("=")]
+    ]
 
 
 def simple_commands(script: str) -> list[list[str]] | None:
@@ -654,6 +670,15 @@ SMUGGLED = {
     "final_env": (FINAL_ENV_TAIL, FINAL_ENV_PAYLOAD, "env_not_allowlisted"),
     "build_env": (BUILD_ENV_TAIL, BUILD_ENV_PAYLOAD, "env_not_allowlisted"),
 }
+# X1: a blank line after a trailing `\` is skipped by BuildKit, which then joins the next
+# instruction. (line that gains the `\`, what BuildKit's join breaks)
+CONTINUED = {
+    "workdir": (WORKDIR, ("workdir_not_allowlisted", "not_final_non_root_user")),
+    "run": (COMPAT_TAIL, ("run_not_allowlisted",)),
+    "env": (FINAL_ENV_TAIL, ("env_not_allowlisted",)),
+    "copy": ("COPY --from=build /opt/venv /opt/venv\n", ("copy_from_not_allowed",)),
+}
+BLANK_LINES = {"empty": "", "spaces": "   ", "tab": "\t"}
 _PYTHON_ARTIFACT = json.loads((ROOT / "tools/toolchain.json").read_text())["tools"]["python"]
 _PYTHON_ARTIFACT = _PYTHON_ARTIFACT["artifacts"]["Linux-x86_64"]
 ADD_BLOCK = (
@@ -1002,6 +1027,10 @@ MUTATIONS = {
         "cmd_not_allowlisted",
     ),
     # CMD is compared verbatim, so whitespace inside the JSON is not collapsed away.
+    "comment_inside_continuation": (
+        ((INSTALL, INSTALL + "# kept out of the RUN by BuildKit\n"),),
+        "dockerfile_comment_in_continuation",
+    ),
     "cmd_double_space": (
         ((FINAL_CMD, FINAL_CMD.replace('", "-c"', '",  "-c"')),),
         "cmd_not_allowlisted",
@@ -1051,6 +1080,37 @@ def test_line_separators_cannot_smuggle_content(variant: str, separator: str) ->
     assert "dockerfile_non_ascii_or_control" in found, found
     # Independent of the character rule: the parser itself must see the payload.
     assert guard in found, found
+
+
+@pytest.mark.parametrize("blank", sorted(BLANK_LINES))
+@pytest.mark.parametrize("position", sorted(CONTINUED))
+def test_blank_line_inside_a_continuation_is_refused(position: str, blank: str) -> None:
+    """X1: `INSTRUCTION ... \\` then a blank line. BuildKit joins the next instruction."""
+    line, joined_hazards = CONTINUED[position]
+    text = read_dockerfile()
+    assert text.count(line) == 1, line
+    text = text.replace(line, line.removesuffix("\n") + " \\\n" + BLANK_LINES[blank] + "\n")
+    found = image_hazards(text)
+    assert "dockerfile_empty_continuation_line" in found, found
+    # The parse follows BuildKit's join, so the swallowed instruction is visible too.
+    for hazard in joined_hazards:
+        assert hazard in found, found
+
+
+def test_env_bare_word_is_kept_as_unparseable() -> None:
+    # What an ENV swallowing `WORKDIR /home/trainer` through a continuation looks like.
+    assert env_assignments("A=1 WORKDIR /x") == [
+        ("A", "1"),
+        ("__UNPARSEABLE__", "WORKDIR"),
+        ("__UNPARSEABLE__", "/x"),
+    ]
+
+
+def test_x1_reviewer_payload_is_refused() -> None:
+    text = read_dockerfile().replace("WORKDIR /home/trainer\n", "WORKDIR /home/trainer \\\n\n")
+    found = image_hazards(text)
+    assert "dockerfile_empty_continuation_line" in found, found
+    assert "not_final_non_root_user" in found, found
 
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
