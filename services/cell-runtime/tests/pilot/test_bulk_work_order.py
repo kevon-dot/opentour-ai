@@ -10,7 +10,8 @@ tenant/workflow/case, family, revision; then change rows in feed order), checked
 independent derivation, with units scheduled round-robin by source, then bucket;
 O2 that order and every unit checkpoint are identical across insertion orders: a read retry
 that reorders staging, the change feed read before the snapshot, the manifest's listing
-order, page sizes, and normalization interleaved with reading;
+order, page sizes, and normalization interleaved with reading; so is the run's content, down
+to which revisions are renames;
 O3 ...and across restarts and runs: a process killed mid-normalization and resumed under
 another hash seed, a successor that re-reads a quarantined file, a clean successor;
 O4 a unit never works past the first file of its source still being read, and a row that
@@ -30,6 +31,7 @@ each test fails on its own instead of the whole file failing to import.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import sqlite3
@@ -132,6 +134,17 @@ CHANGES = (
     change(11, RES_D, 3, 2),
     change(12, RES_D, 40, 1),
     change(13, RES_D, 5, 2),
+    # A newer revision under a new path: a rename, whether it arrives before or after the
+    # revision it renames.
+    ChangeEntry(
+        "decision",
+        14,
+        "upsert",
+        RES_D,
+        "generated-decision-6",
+        2,
+        decision(6, revision=2, path="generated/moved/6.json"),
+    ),
 )
 
 
@@ -296,6 +309,31 @@ def test_insertion_order_never_changes_the_work_order_or_a_unit_checkpoint(
     assert other.semantic_manifest(other_run) == engine.semantic_manifest(run)
     if variant in ("retry", "changes_first", "listing"):
         assert other_recorder.calls == recorder.calls  # the whole schedule, not only per unit
+
+
+@pytest.mark.parametrize(
+    "arrival",
+    list(itertools.permutations((1, 2, 3))),
+    ids=["-".join(map(str, p)) for p in itertools.permutations((1, 2, 3))],
+)
+def test_renames_never_depend_on_the_order_revisions_arrive_in(
+    private: Path, arrival: tuple[int, ...]
+) -> None:
+    # Revision 2 moves the object; revision 3 keeps revision 2's path, so it is no rename.
+    paths = {1: "generated/a.json", 2: "generated/b.json", 3: "generated/b.json"}
+    source = GeneratedSource(history(4))
+    engine = engine_for(private, source)
+    run = engine.start()
+    engine.step(run)
+    for feed_revision, revision in zip((11, 12, 13), arrival, strict=True):
+        row = decision(9, revision=revision, path=paths[revision])
+        entry = ChangeEntry(
+            "decision", feed_revision, "upsert", RES_D, row.native_id, revision, row
+        )
+        source.push("decision", entry)
+    engine.consume_changes(run, "decision")
+    nine = family_id(TENANT, RES_D, "generated-decision-9")
+    assert engine.semantic_manifest(run)["renames"] == [[nine, 2]]
 
 
 # ---- O3 restarts and runs -------------------------------------------------------------------
@@ -640,7 +678,7 @@ def test_no_view_carries_a_raw_identifier_a_case_hash_or_an_order_key(private: P
     contradicted = replace(decision(4), content_digest=digest_of("generated-contradiction"))
     source.push(
         "decision",
-        ChangeEntry("decision", 14, "upsert", RES_D, contradicted.native_id, 1, contradicted),
+        ChangeEntry("decision", 15, "upsert", RES_D, contradicted.native_id, 1, contradicted),
     )
     engine.consume_changes(run, "decision")
     views: list[Any] = [

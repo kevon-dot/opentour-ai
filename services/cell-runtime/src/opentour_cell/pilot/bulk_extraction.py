@@ -1607,6 +1607,24 @@ class BulkExtraction:
                 "INSERT OR IGNORE INTO renames VALUES (?,?,?,?)",
                 (run_id, family, row.revision, resource),
             )
+        # A revision is a rename when its path differs from the revision just before it. A
+        # revision staged after a newer one now sits just before it, so the newer one is
+        # judged again against this path: the result never depends on which arrived first.
+        following = db.execute(
+            "SELECT revision, path FROM admissions WHERE run_id=? AND family_id=? AND revision>?"
+            " ORDER BY revision LIMIT 1",
+            (run_id, family, row.revision),
+        ).fetchone()
+        if following is not None:
+            db.execute(
+                "DELETE FROM renames WHERE run_id=? AND family_id=? AND revision=?",
+                (run_id, family, following["revision"]),
+            )
+            if following["path"] != row.path:
+                db.execute(
+                    "INSERT OR IGNORE INTO renames VALUES (?,?,?,?)",
+                    (run_id, family, following["revision"], resource),
+                )
         return "admitted"
 
     # ---- change feed -----------------------------------------------------------------
