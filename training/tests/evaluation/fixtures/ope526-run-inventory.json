@@ -1,0 +1,3579 @@
+{
+  "blocked": [
+    {
+      "blocked_on": [
+        "OPE-566 verifier",
+        "OPE-582 keys"
+      ],
+      "built": false,
+      "item": "signed audit receipts"
+    }
+  ],
+  "dirty": false,
+  "evidence_label": "generated_fixture_evidence",
+  "evidence_notice": "Generated sentinel fixtures only. Local or simulated runs cannot satisfy real-population, provider or customer-evidence gates, and nothing here is an accuracy claim.",
+  "external_inputs": [
+    {
+      "input": "customer-approved population frame, sampling design and tolerances",
+      "owner": "named customer evidence owner"
+    },
+    {
+      "input": "blinded second qualified adjudicator or independent authoritative record",
+      "owner": "customer-designated adjudicator"
+    },
+    {
+      "input": "verified-candidate snapshot receipt",
+      "owner": "OPE-416"
+    },
+    {
+      "input": "independent result verification",
+      "owner": "OPE-528"
+    },
+    {
+      "input": "receipt signature verifier",
+      "owner": "OPE-566"
+    },
+    {
+      "input": "receipt issuer keys and custody",
+      "owner": "OPE-582"
+    },
+    {
+      "input": "one-family query parity in private Slack and the worker UI",
+      "owner": "Codex lane (Slack and worker-UI query surface)"
+    }
+  ],
+  "fixture_kind": "generated_sentinel",
+  "generated_at": "2026-11-28T01:01:28Z",
+  "generator": "training/tests/evaluation/ope526_run_inventory.py",
+  "groups": [
+    {
+      "baseline_run_id": "ope526-fixture-real_sample_standin-926f2a033db4",
+      "comparable_baseline_present": true,
+      "comparable_on": [
+        "real_sample",
+        "generated-frame:stratified-real-sample-standin",
+        "generated-decision:refund-routing",
+        "generated-policy-r1",
+        "generated-scorer-v1"
+      ],
+      "group_id": "group-282c9244ba1f",
+      "next_step_if_missing": null,
+      "run_ids": [
+        "ope526-fixture-real_sample_standin-926f2a033db4",
+        "ope526-fixture-real_sample_standin_small-887bc75a1126"
+      ]
+    },
+    {
+      "baseline_run_id": "ope526-fixture-baseline-4ac7054c9cb2",
+      "comparable_baseline_present": true,
+      "comparable_on": [
+        "enumerated_fixture",
+        "generated-frame:12-family-enumeration",
+        "generated-decision:refund-routing",
+        "generated-policy-r1",
+        "generated-scorer-v1"
+      ],
+      "group_id": "group-d69c96c66091",
+      "next_step_if_missing": null,
+      "run_ids": [
+        "ope526-fixture-baseline-4ac7054c9cb2",
+        "ope526-fixture-baseline_rescore-4ac7054c9cb2",
+        "ope526-fixture-mutation_a_corrections_only-f79d698e755b",
+        "ope526-fixture-mutation_a_selective_under_full_design-d757ca736ea9",
+        "ope526-fixture-mutation_b_no_critical_verification-1fc4f42fd013",
+        "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083",
+        "ope526-fixture-mutation_c_resealed-4ac7054c9cb2",
+        "ope526-fixture-mutation_d_post_freeze_relabel-6924c2162996",
+        "ope526-fixture-pack_policy_only_starter-d89bd4d888d7",
+        "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922",
+        "ope526-fixture-pack_unresolved_ambiguity-10cd1e652a76",
+        "ope526-fixture-pack_future_only_field-2945f5025e39",
+        "ope526-fixture-adverse_empty_audit-3fa22b3777c1",
+        "ope526-fixture-adverse_protected_selection-6a4ea99fae24",
+        "ope526-fixture-adverse_preprocessing_fit_on_protected-1013f941ec93",
+        "ope526-fixture-adverse_unlogged_disclosure-7a90f9793781",
+        "ope526-fixture-adverse_preregistered_after_reveal-a05a52d4e284",
+        "ope526-fixture-adverse_superseded-50c6121648c9"
+      ]
+    }
+  ],
+  "injected_findings": [
+    {
+      "codes": [
+        "family_crosses_split"
+      ],
+      "disposition": "detected_as_designed",
+      "run_id": "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083"
+    },
+    {
+      "codes": [
+        "label_overturned_by_independent_record"
+      ],
+      "disposition": "detected_as_designed",
+      "run_id": "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922"
+    },
+    {
+      "codes": [
+        "future_only_field"
+      ],
+      "disposition": "detected_as_designed",
+      "run_id": "ope526-fixture-pack_future_only_field-2945f5025e39"
+    }
+  ],
+  "issue": "OPE-526",
+  "local_engineering_checks": [
+    "audit verdict regressions over the hand-checked packs and mutations A-D",
+    "rescore replay of identical inputs",
+    "worker-side release check of the receipt (refuses non-allowed, stale, superseded)",
+    "exposure guard fail-open fixes (PR #219, parallel lane)",
+    "regeneration of this inventory"
+  ],
+  "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+  "missing_for_every_run": [
+    "independent_customer_label_audit_receipt",
+    "customer_approved_sampling_frame_and_tolerances",
+    "second_qualified_adjudicator_or_independent_authoritative_record_outside_fixtures",
+    "upstream_candidate_snapshot_receipt_ope_416",
+    "receipt_issuer_signature_ope_566_ope_582",
+    "independent_result_verification_ope_528",
+    "real_stage_times_or_effects_beyond_local_audit_cpu_time"
+  ],
+  "redaction": "No family id, label, label commitment or verifier identity is included; verifier identities appear only as short digests.",
+  "release_worker": {
+    "finding": "No release worker on main consumes the OPE-526 receipt. release_gate, release_authority and release_outbox (services/cell-runtime) gate a human release decision on repair runs, take no audit receipt and cannot import the training package. candidate_staging (OPE-545) stages, does not release, and reads a caller-supplied audit_verdict string.",
+    "interface_provided": "opentour_training.evaluation.benchmark_audit.release_check.check_receipt_for_release",
+    "status": "gap"
+  },
+  "runs": [
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "evaluation_allowed",
+      "held": false,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.65,
+      "population": "baseline",
+      "reason_codes": [],
+      "receipt": {
+        "receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d",
+        "receipt_id": "audit-4ac7054c9cb2269f",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [
+          "audit_receipt_issuer_unauthenticated",
+          "generated_fixture_evidence_only"
+        ],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "held",
+        "receipt_id": "audit-4ac7054c9cb2269f",
+        "refusals": [],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
+      },
+      "rerun_of": null,
+      "role": "baseline",
+      "run_id": "ope526-fixture-baseline-4ac7054c9cb2",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "evaluation_allowed",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "evaluation_allowed",
+      "held": false,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.502,
+      "population": "baseline_rescore",
+      "reason_codes": [],
+      "receipt": {
+        "receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d",
+        "receipt_id": "audit-4ac7054c9cb2269f",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [
+          "audit_receipt_issuer_unauthenticated",
+          "generated_fixture_evidence_only"
+        ],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "held",
+        "receipt_id": "audit-4ac7054c9cb2269f",
+        "refusals": [],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
+      },
+      "rerun_of": "baseline",
+      "role": "rerun",
+      "run_id": "ope526-fixture-baseline_rescore-4ac7054c9cb2",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "evaluation_allowed",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "permitted",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "1/1",
+        "critical_status": "measured",
+        "routine": "3/3"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 0,
+        "correct": 0,
+        "correction": 4,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 4,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 4,
+        "reconciles": 1,
+        "scoreable": 4,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 4
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "claim_limited_to_named_population",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "79e0e63fd8d0",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "e8f1d192e8b9"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "612b6fbb2f384f92b9bc563c146dae26962064bf529f7849be5db83dec4a4842",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 4,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 4,
+          "verified": 4
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.5271291954984122
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.443,
+      "population": "mutation_a_corrections_only",
+      "reason_codes": [
+        "correction_only_sample"
+      ],
+      "receipt": {
+        "receipt_digest": "f79d698e755b2dccbc04af7d2f21bb3a2ac1c16c5926b5584ec0413699327c6e",
+        "receipt_id": "audit-f79d698e755b2dcc",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-f79d698e755b2dcc",
+        "refusals": [
+          "audit_claim_limited_to_named_population"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "f79d698e755b2dccbc04af7d2f21bb3a2ac1c16c5926b5584ec0413699327c6e"
+      },
+      "rerun_of": null,
+      "role": "mutation",
+      "run_id": "ope526-fixture-mutation_a_corrections_only-f79d698e755b",
+      "sampling_frame": {
+        "design": "correction_only",
+        "eligible_families": 4,
+        "frame_digest": "1653821de166cd9543f917fd9aa393cc56ab250c92d619b941e1fe4c1294178d",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 4,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "claim_limited_to_named_population",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 4,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "permitted",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "1/1",
+        "critical_status": "measured",
+        "routine": "3/3"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 0,
+        "correct": 0,
+        "correction": 4,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 4,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 4,
+        "reconciles": 1,
+        "scoreable": 4,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 4
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "claim_limited_to_named_population",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "79e0e63fd8d0",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "e8f1d192e8b9"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "b35a9fde2d321b3436c74136bebcf940d44411429fdef640abe18371d0bafeac",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 4,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 4,
+          "verified": 4
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.5271291954984122
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.441,
+      "population": "mutation_a_selective_under_full_design",
+      "reason_codes": [
+        "correction_only_sample"
+      ],
+      "receipt": {
+        "receipt_digest": "d757ca736ea9e0ca2ac255ce62d3629237baf974ae994975e9c1d3d50a1e10aa",
+        "receipt_id": "audit-d757ca736ea9e0ca",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-d757ca736ea9e0ca",
+        "refusals": [
+          "audit_claim_limited_to_named_population"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "d757ca736ea9e0ca2ac255ce62d3629237baf974ae994975e9c1d3d50a1e10aa"
+      },
+      "rerun_of": null,
+      "role": "mutation",
+      "run_id": "ope526-fixture-mutation_a_selective_under_full_design-d757ca736ea9",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 4,
+        "frame_digest": "1653821de166cd9543f917fd9aa393cc56ab250c92d619b941e1fe4c1294178d",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 4,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "claim_limited_to_named_population",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 4,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "held",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "0/4",
+        "critical_status": "unavailable",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 3,
+        "correction": 3,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 8,
+        "unresolved": 0,
+        "unverified": 4,
+        "verified": 8
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "claim_limited_to_named_population",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 8,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 8,
+          "verified": 8
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.31234397806636793
+      },
+      "missing_fields": [
+        "critical_error_rate",
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.601,
+      "population": "mutation_b_no_critical_verification",
+      "reason_codes": [
+        "critical_coverage_gap"
+      ],
+      "receipt": {
+        "receipt_digest": "1fc4f42fd013c72947f0a09da5cddb016c47aff49b0b9faa2de3bab511ffdf40",
+        "receipt_id": "audit-1fc4f42fd013c729",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-1fc4f42fd013c729",
+        "refusals": [
+          "audit_claim_limited_to_named_population"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "1fc4f42fd013c72947f0a09da5cddb016c47aff49b0b9faa2de3bab511ffdf40"
+      },
+      "rerun_of": null,
+      "role": "mutation",
+      "run_id": "ope526-fixture-mutation_b_no_critical_verification-1fc4f42fd013",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "claim_limited_to_named_population",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 8,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "a300f489b121",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "a9dbec9c9345"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "ce04e023cbc08ce078ce0263497a001d8445dfbdf40d95e2c2d3a2b447c0a83a",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.496,
+      "population": "mutation_c_cross_split_sibling",
+      "reason_codes": [
+        "family_crosses_split"
+      ],
+      "receipt": {
+        "receipt_digest": "442f91d65083e9953f1faa4a1a5dfbdb80e8f72a19b08896227a9b17b1f4267a",
+        "receipt_id": "audit-442f91d65083e995",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-442f91d65083e995",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "442f91d65083e9953f1faa4a1a5dfbdb80e8f72a19b08896227a9b17b1f4267a"
+      },
+      "rerun_of": null,
+      "role": "mutation",
+      "run_id": "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 1,
+          "template_group": 0
+        },
+        "development_families": 4,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "evaluation_allowed",
+      "held": false,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.632,
+      "population": "mutation_c_resealed",
+      "reason_codes": [],
+      "receipt": {
+        "receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d",
+        "receipt_id": "audit-4ac7054c9cb2269f",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [
+          "audit_receipt_issuer_unauthenticated",
+          "generated_fixture_evidence_only"
+        ],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "held",
+        "receipt_id": "audit-4ac7054c9cb2269f",
+        "refusals": [],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "4ac7054c9cb2269fa76b08f9c30ee106af59b673519b0a2477fb8f116cc3921d"
+      },
+      "rerun_of": "baseline",
+      "role": "rerun",
+      "run_id": "ope526-fixture-mutation_c_resealed-4ac7054c9cb2",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "evaluation_allowed",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 1,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 11,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "stale",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 1,
+        "fixture_agreement": {
+          "matches": 11,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.33868066843403255
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.6,
+      "population": "mutation_d_post_freeze_relabel",
+      "reason_codes": [
+        "bound_digest_changed"
+      ],
+      "receipt": {
+        "receipt_digest": "6924c2162996b6954661e9365c56e79bdad8e09f6ae6b94e415fe995df27223a",
+        "receipt_id": "audit-6924c2162996b695",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-6924c2162996b695",
+        "refusals": [
+          "audit_receipt_stale"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "6924c2162996b6954661e9365c56e79bdad8e09f6ae6b94e415fe995df27223a"
+      },
+      "rerun_of": null,
+      "role": "mutation",
+      "run_id": "ope526-fixture-mutation_d_post_freeze_relabel-6924c2162996",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "stale",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 11,
+          "disagree": 1,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "held",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "0/0",
+        "critical_status": "unavailable",
+        "routine": "0/0"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 0,
+        "correct": 0,
+        "correction": 0,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 0,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 0,
+        "reconciles": 1,
+        "scoreable": 0,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 0
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "starter_only",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "4f53cda18c2b",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "4f53cda18c2b"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "500c1e95d82027912cfde6c69635cac253cf36672844a37113d32c69bdb4a362",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "unavailable",
+        "denominator_families": 0,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 0,
+          "verified": 0
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": null
+      },
+      "missing_fields": [
+        "critical_error_rate",
+        "overall_upper_error",
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.287,
+      "population": "pack_policy_only_starter",
+      "reason_codes": [
+        "policy_only_starter"
+      ],
+      "receipt": {
+        "receipt_digest": "d89bd4d888d713c886dfce5d9e4ecedec79109f45e0fba72bb9babb5a7008a73",
+        "receipt_id": "audit-d89bd4d888d713c8",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-d89bd4d888d713c8",
+        "refusals": [
+          "audit_verdict_starter_only"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "d89bd4d888d713c886dfce5d9e4ecedec79109f45e0fba72bb9babb5a7008a73"
+      },
+      "rerun_of": null,
+      "role": "pack",
+      "run_id": "ope526-fixture-pack_policy_only_starter-d89bd4d888d7",
+      "sampling_frame": {
+        "design": "policy_only",
+        "eligible_families": 0,
+        "frame_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 0,
+        "protected_families": 0,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "starter_only",
+      "verifier": {
+        "adjudicator_digests": [],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 0,
+        "disagreement_matrix": {
+          "agree": 0,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [],
+        "independent_sources": 0,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 1,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 11,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "902cb5d9ed24",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "930345cd780bc15636f34d92bcb2ba076474e0d6d605db9aed611185f965571c",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 1,
+        "fixture_agreement": {
+          "matches": 11,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.33868066843403255
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.721,
+      "population": "pack_two_reviewers_overturned",
+      "reason_codes": [
+        "label_overturned_by_independent_record"
+      ],
+      "receipt": {
+        "receipt_digest": "a0ce27e5992254fc9aae1033e2363f90be5090e026be6d9f720e05d2c512dfa0",
+        "receipt_id": "audit-a0ce27e5992254fc",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-a0ce27e5992254fc",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "a0ce27e5992254fc9aae1033e2363f90be5090e026be6d9f720e05d2c512dfa0"
+      },
+      "rerun_of": null,
+      "role": "pack",
+      "run_id": "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 11,
+          "disagree": 1,
+          "overturned_after_two_reviewers_agreed": 1,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "6/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 10,
+        "unresolved": 2,
+        "unverified": 0,
+        "verified": 10
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "insufficient_evidence",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 10,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 10,
+          "verified": 10
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.25886555089305235
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.814,
+      "population": "pack_unresolved_ambiguity",
+      "reason_codes": [
+        "unresolved_ambiguity"
+      ],
+      "receipt": {
+        "receipt_digest": "10cd1e652a767f71488f511039ac7f6611a95b882df37a22dcc84304265e8840",
+        "receipt_id": "audit-10cd1e652a767f71",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-10cd1e652a767f71",
+        "refusals": [
+          "audit_verdict_insufficient_evidence"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "10cd1e652a767f71488f511039ac7f6611a95b882df37a22dcc84304265e8840"
+      },
+      "rerun_of": null,
+      "role": "pack",
+      "run_id": "ope526-fixture-pack_unresolved_ambiguity-10cd1e652a76",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "insufficient_evidence",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 10,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 2
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.672,
+      "population": "pack_future_only_field",
+      "reason_codes": [
+        "future_only_field"
+      ],
+      "receipt": {
+        "receipt_digest": "2945f5025e3918e931e14fadea78979b5e15f6cc88842e435d918e09c8be0209",
+        "receipt_id": "audit-2945f5025e3918e9",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-2945f5025e3918e9",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "2945f5025e3918e931e14fadea78979b5e15f6cc88842e435d918e09c8be0209"
+      },
+      "rerun_of": null,
+      "role": "pack",
+      "run_id": "ope526-fixture-pack_future_only_field-2945f5025e39",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "held",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "0/4",
+        "critical_status": "unavailable",
+        "routine": "0/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 0,
+        "correction": 0,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 0,
+        "unresolved": 0,
+        "unverified": 12,
+        "verified": 0
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "insufficient_evidence",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "unavailable",
+        "denominator_families": 0,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 0,
+          "verified": 0
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": null
+      },
+      "missing_fields": [
+        "critical_error_rate",
+        "overall_upper_error",
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.393,
+      "population": "adverse_empty_audit",
+      "reason_codes": [
+        "no_verified_families"
+      ],
+      "receipt": {
+        "receipt_digest": "3fa22b3777c1f2f7d1ae149ab8e147755f72123b28ddcd286461fc513d994749",
+        "receipt_id": "audit-3fa22b3777c1f2f7",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-3fa22b3777c1f2f7",
+        "refusals": [
+          "audit_verdict_insufficient_evidence"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "3fa22b3777c1f2f7d1ae149ab8e147755f72123b28ddcd286461fc513d994749"
+      },
+      "rerun_of": null,
+      "role": "adverse",
+      "run_id": "ope526-fixture-adverse_empty_audit-3fa22b3777c1",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "insufficient_evidence",
+      "verifier": {
+        "adjudicator_digests": [],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 0,
+        "disagreement_matrix": {
+          "agree": 0,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [],
+        "independent_sources": 0,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 1,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.507,
+      "population": "adverse_protected_selection",
+      "reason_codes": [
+        "protected_comparison_used_for_selection"
+      ],
+      "receipt": {
+        "receipt_digest": "6a4ea99fae245d29aa5e8cfb85e64a9c2ce2d29367621976cee9a70eea78bc7e",
+        "receipt_id": "audit-6a4ea99fae245d29",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-6a4ea99fae245d29",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "6a4ea99fae245d29aa5e8cfb85e64a9c2ce2d29367621976cee9a70eea78bc7e"
+      },
+      "rerun_of": null,
+      "role": "adverse",
+      "run_id": "ope526-fixture-adverse_protected_selection-6a4ea99fae24",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.856,
+      "population": "adverse_preprocessing_fit_on_protected",
+      "reason_codes": [
+        "preprocessing_fit_on_protected"
+      ],
+      "receipt": {
+        "receipt_digest": "1013f941ec931041b05b492c9f56203f3a2f88d574893df83323653309075ee6",
+        "receipt_id": "audit-1013f941ec931041",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-1013f941ec931041",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "1013f941ec931041b05b492c9f56203f3a2f88d574893df83323653309075ee6"
+      },
+      "rerun_of": null,
+      "role": "adverse",
+      "run_id": "ope526-fixture-adverse_preprocessing_fit_on_protected-1013f941ec93",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 1
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.621,
+      "population": "adverse_unlogged_disclosure",
+      "reason_codes": [
+        "unlogged_case_level_disclosure"
+      ],
+      "receipt": {
+        "receipt_digest": "7a90f97937818f46f614feb4cede9a595964e94b75e9d98e1d5aa32bc191acb5",
+        "receipt_id": "audit-7a90f97937818f46",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-7a90f97937818f46",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "7a90f97937818f46f614feb4cede9a595964e94b75e9d98e1d5aa32bc191acb5"
+      },
+      "rerun_of": null,
+      "role": "adverse",
+      "run_id": "ope526-fixture-adverse_unlogged_disclosure-7a90f9793781",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 100,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "invalid",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 0.735,
+      "population": "adverse_preregistered_after_reveal",
+      "reason_codes": [
+        "preregistration_after_reveal"
+      ],
+      "receipt": {
+        "receipt_digest": "a05a52d4e2849b8b71188ad2424a6591704e2be90e6f0e113ed6d40398f7acd3",
+        "receipt_id": "audit-a05a52d4e2849b8b",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-a05a52d4e2849b8b",
+        "refusals": [
+          "audit_verdict_invalid"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "a05a52d4e2849b8b71188ad2424a6591704e2be90e6f0e113ed6d40398f7acd3"
+      },
+      "rerun_of": null,
+      "role": "adverse",
+      "run_id": "ope526-fixture-adverse_preregistered_after_reveal-a05a52d4e284",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "invalid",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "4/4",
+        "critical_status": "measured",
+        "routine": "8/8"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 6,
+        "correct": 6,
+        "correction": 4,
+        "deferral": 2,
+        "disputed": 0,
+        "eligible": 12,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 12,
+        "reconciles": 1,
+        "scoreable": 12,
+        "unresolved": 0,
+        "unverified": 0,
+        "verified": 12
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "generated",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "stale",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "bfe9e3275ace",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "0aa4587b2bb2"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "324097be5ce9e4028b3c65b717b64f3d0379d9a6a1c8b9c71072148112b2ce15",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 12,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 12,
+          "verified": 12
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.22092219194555593
+      },
+      "missing_fields": [
+        "design_weighted_error",
+        "candidate_snapshot_binding",
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 4.987,
+      "population": "adverse_superseded",
+      "reason_codes": [
+        "superseded"
+      ],
+      "receipt": {
+        "receipt_digest": "50c6121648c972c17f1645292bf5a45d854fcec87d1857918d1d403aabd5ef83",
+        "receipt_id": "audit-50c6121648c972c1",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-50c6121648c972c1",
+        "refusals": [
+          "audit_receipt_stale",
+          "audit_receipt_superseded"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "50c6121648c972c17f1645292bf5a45d854fcec87d1857918d1d403aabd5ef83"
+      },
+      "rerun_of": null,
+      "role": "adverse",
+      "run_id": "ope526-fixture-adverse_superseded-50c6121648c9",
+      "sampling_frame": {
+        "design": "full_enumeration",
+        "eligible_families": 12,
+        "frame_digest": "251138b2a4b84103189af2ba8e1be83a658cca73c884181b3b019217e97c4325",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:12-family-enumeration",
+        "population_kind": "enumerated_fixture",
+        "sample_sizes": [],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 3,
+        "protected_families": 12,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "stale",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 12,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "eligible_pending_upstream_receipt"
+      },
+      "coverage": {
+        "critical": "60/60",
+        "critical_status": "measured",
+        "routine": "60/60"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 100,
+        "correct": 60,
+        "correction": 60,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 180,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 180,
+        "reconciles": 1,
+        "scoreable": 120,
+        "unresolved": 0,
+        "unverified": 60,
+        "verified": 120
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "observed",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "evaluation_allowed",
+      "held": false,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "f28ad98e0475",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "16055da694bf"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "65dcf3446825922d9a3d33da30f266f31f750718793d51a79ba91048d5c392a1",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.02
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "ruled_out_at_ceiling",
+        "denominator_families": 120,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 120,
+          "verified": 120
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.024655401055656386
+      },
+      "missing_fields": [
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 15.921,
+      "population": "real_sample_standin",
+      "reason_codes": [],
+      "receipt": {
+        "receipt_digest": "926f2a033db4ddd182db07b63869fbe6218ffc4f5e9be618645194bca63f9fb1",
+        "receipt_id": "audit-926f2a033db4ddd1",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [
+          "audit_receipt_issuer_unauthenticated"
+        ],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "held",
+        "receipt_id": "audit-926f2a033db4ddd1",
+        "refusals": [],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "926f2a033db4ddd182db07b63869fbe6218ffc4f5e9be618645194bca63f9fb1"
+      },
+      "rerun_of": null,
+      "role": "baseline",
+      "run_id": "ope526-fixture-real_sample_standin-926f2a033db4",
+      "sampling_frame": {
+        "design": "stratified_random",
+        "eligible_families": 180,
+        "frame_digest": "2e52918409e8e28066c2364ab3a00e53bccafe720254d1463717efd62da67368",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:stratified-real-sample-standin",
+        "population_kind": "real_sample",
+        "sample_sizes": [
+          [
+            "routine",
+            60
+          ],
+          [
+            "critical",
+            60
+          ]
+        ],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 1,
+        "protected_families": 180,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "evaluation_allowed",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 120,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    },
+    {
+      "answer_key_exposure": {
+        "answer_key_unchanged": true,
+        "exposed_families_retired": 0,
+        "mapper_view_protected_label_fields": 0,
+        "protected_selection_uses": 0,
+        "unlogged_disclosures_supplied": 0
+      },
+      "claims": {
+        "alerts_emitted": 0,
+        "broad_improvement_alert_permitted": false,
+        "critical_inclusive_claim": "permitted_if_precision_met",
+        "customer_accuracy_alert_permitted": false,
+        "error_family_claim": "not_applicable",
+        "overall_accuracy_claim": "not_established"
+      },
+      "coverage": {
+        "critical": "20/20",
+        "critical_status": "measured",
+        "routine": "20/20"
+      },
+      "cutoff": {
+        "as_of_day": 300,
+        "candidate_outputs_revealed_day": 150,
+        "frozen_day": 100,
+        "maturity_window_days": 30,
+        "temporal_cutoff_day": 200
+      },
+      "denominator": {
+        "auto_acted": 60,
+        "correct": 20,
+        "correction": 20,
+        "deferral": 0,
+        "disputed": 0,
+        "eligible": 100,
+        "excluded": 0,
+        "immature": 0,
+        "mature": 100,
+        "reconciles": 1,
+        "scoreable": 40,
+        "unresolved": 0,
+        "unverified": 60,
+        "verified": 40
+      },
+      "dirty": false,
+      "evidence": {
+        "customer_scope": null,
+        "evidence_label": "generated_fixture_evidence",
+        "evidence_origin_basis": "caller_asserted_in_preregistration",
+        "evidence_origin_declared": "observed",
+        "fixture_kind": "generated_sentinel",
+        "real_population_gate_satisfied": false
+      },
+      "expectation_met": true,
+      "expected_verdict": "insufficient_evidence",
+      "held": true,
+      "inputs_and_configuration": {
+        "acceptable_error_ceiling": 0.05,
+        "alpha": 0.05,
+        "binding_digests": {
+          "answer_key": "b4a5a70a396b",
+          "canonical_inputs": "c4f92ff431fe",
+          "label_manifest": "3c3ed7d46ee6",
+          "scoring_policy": "e216d97c3f37",
+          "source_revisions": "4f656d7dd24a",
+          "split_manifest": "708630bc2c12"
+        },
+        "interval_method": "binomial_clopper_pearson_one_sided_v1",
+        "max_unresolved": 0,
+        "min_critical_coverage": 1.0,
+        "operating_point": "generated-operating-point",
+        "policy_revision": "generated-policy-r1",
+        "preregistration_digest": "aa51dc573cc793ed8a93994983736e0b989643e25c6f7f1e71d655beb2d02aa0",
+        "scorer_version": "generated-scorer-v1",
+        "tolerable_label_error": 0.0
+      },
+      "measured_git_sha": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+      "metric": {
+        "ceiling": 0.05,
+        "conclusion": "inconclusive",
+        "denominator_families": 40,
+        "errors": 0,
+        "fixture_agreement": {
+          "matches": 40,
+          "verified": 40
+        },
+        "name": "one_sided_exact_upper_label_error_per_independent_family",
+        "upper_error": 0.07215752450551459
+      },
+      "missing_fields": [
+        "upstream_snapshot_verification"
+      ],
+      "observed_audit_cpu_ms": 10.802,
+      "population": "real_sample_standin_small",
+      "reason_codes": [
+        "precision_cannot_rule_out_ceiling"
+      ],
+      "receipt": {
+        "receipt_digest": "887bc75a1126773205ae4a9534c502c1fc182034b2e95f80587bf1ffb5cec902",
+        "receipt_id": "audit-887bc75a11267732",
+        "schema_version": "opentour.benchmark-audit-receipt.v1"
+      },
+      "release_check": {
+        "decision_basis": "worker_ledger_and_recomputed_bindings",
+        "holds": [],
+        "integrity": "digest_self_consistent_only",
+        "issuer_authenticated": false,
+        "outcome": "refused",
+        "receipt_id": "audit-887bc75a11267732",
+        "refusals": [
+          "audit_verdict_insufficient_evidence"
+        ],
+        "release_permitted": false,
+        "schema_version": "opentour.benchmark-audit-release-check.v1",
+        "verified_receipt_digest": "887bc75a1126773205ae4a9534c502c1fc182034b2e95f80587bf1ffb5cec902"
+      },
+      "rerun_of": null,
+      "role": "mutation",
+      "run_id": "ope526-fixture-real_sample_standin_small-887bc75a1126",
+      "sampling_frame": {
+        "design": "stratified_random",
+        "eligible_families": 100,
+        "frame_digest": "806a0e4f60d7e799b1b9f054c503087fee4d2164e48d2c27d8c228e0ac144ffb",
+        "intended_decision": "generated-decision:refund-routing",
+        "population_frame": "generated-frame:stratified-real-sample-standin",
+        "population_kind": "real_sample",
+        "sample_sizes": [
+          [
+            "routine",
+            20
+          ],
+          [
+            "critical",
+            20
+          ]
+        ],
+        "seed": 7
+      },
+      "split": {
+        "cross_split_overlaps": {
+          "ancestry_root": 0,
+          "attachment_hash": 0,
+          "exact_hash": 0,
+          "group_root": 0,
+          "template_group": 0
+        },
+        "development_families": 1,
+        "protected_families": 100,
+        "split_manifest_unchanged": true,
+        "unknown_links_recorded": 0
+      },
+      "status": "completed",
+      "timestamp": "2026-11-28T01:01:28Z",
+      "verdict": "insufficient_evidence",
+      "verifier": {
+        "adjudicator_digests": [
+          "sha256:94ffb2b5266c"
+        ],
+        "adjudicator_independence": "blinded_to_first_label_and_predictions",
+        "adjudicators": 1,
+        "disagreement_matrix": {
+          "agree": 40,
+          "disagree": 0,
+          "overturned_after_two_reviewers_agreed": 0,
+          "unresolved": 0
+        },
+        "independent_source_digests": [
+          "sha256:b6072639578a"
+        ],
+        "independent_sources": 1,
+        "label_authority_digest": "sha256:b6072639578a"
+      }
+    }
+  ],
+  "schema_version": "opentour.ope526.run-inventory.v1",
+  "step2_decision": {
+    "action": "Missing audit, selective corrections or thin critical slices: scope the claim to what was sampled or return insufficient evidence; set a blinded, stratified adjudication plan against the intended population and collect the missing independent cases under the current grant.",
+    "branch": "missing_audit",
+    "triggers": {
+      "no_independent_customer_label_audit": "0 of 20 runs carry independent customer evidence; all are generated_sentinel"
+    }
+  },
+  "step4_decision_record": {
+    "baseline_run_id": "ope526-fixture-baseline-4ac7054c9cb2",
+    "branch": "missing_audit",
+    "change_revision": "27e0012eabfa2ab1dd78a3070072ec50c7525b57",
+    "change_revision_dirty": false,
+    "change_under_test": "No benchmark or label change. This revision adds the run inventory and the worker-side release check of the audit receipt.",
+    "decision": "hold_for_specified_evidence",
+    "evidence_level": "generated_fixture_evidence",
+    "expectation_met": true,
+    "expected": {
+      "baseline_customer_accuracy_alert_permitted": false,
+      "baseline_upper_error": "greater_than_ceiling_so_inconclusive_for_real_inference",
+      "baseline_verdict": "evaluation_allowed",
+      "held_or_invalid_populations_with_alert_permitted": 0,
+      "release_checks_permitting_release": 0,
+      "rerun_digests_match_baseline": true,
+      "runs": 20,
+      "runs_matching_hand_checked_verdict": 20
+    },
+    "held_for": [
+      "independent_customer_label_audit_receipt",
+      "customer_approved_sampling_frame_and_tolerances",
+      "second_qualified_adjudicator_or_independent_authoritative_record_outside_fixtures",
+      "upstream_candidate_snapshot_receipt_ope_416",
+      "receipt_issuer_signature_ope_566_ope_582",
+      "independent_result_verification_ope_528",
+      "real_stage_times_or_effects_beyond_local_audit_cpu_time"
+    ],
+    "hypothesis": "The 12-family generated fixture supports only fixture agreement, never customer accuracy. Scoping its claim to that and returning insufficient evidence for any real-population claim, until a blinded, stratified independent label audit of the intended population exists, is the correct disposition. Rescoring identical inputs reproduces the verdict, and every held or invalid population permits no alert.",
+    "next_iteration": {
+      "justified": true,
+      "measured_cause": "no independent customer label-audit receipt exists for any eligible run",
+      "owner": "named customer evidence owner (sampling frame, tolerances, adjudicators)",
+      "stop_condition": "a blinded, stratified independent audit of the customer-approved frame whose critical strata meet the registered coverage and whose exact upper error is at or below the ceiling; at zero errors that needs 59 independent families per claimed stratum; or the owner declines, which keeps the hold"
+    },
+    "observed": {
+      "baseline_customer_accuracy_alert_permitted": false,
+      "baseline_upper_error": 0.22092219194555593,
+      "baseline_verdict": "evaluation_allowed",
+      "held_or_invalid_populations_with_alert_permitted": 0,
+      "release_checks_permitting_release": 0,
+      "rerun_digests_match_baseline": true,
+      "runs": 20,
+      "runs_matching_hand_checked_verdict": 20
+    },
+    "preserved_unsuccessful_trials": [
+      "ope526-fixture-mutation_a_corrections_only-f79d698e755b",
+      "ope526-fixture-mutation_a_selective_under_full_design-d757ca736ea9",
+      "ope526-fixture-mutation_b_no_critical_verification-1fc4f42fd013",
+      "ope526-fixture-mutation_c_cross_split_sibling-442f91d65083",
+      "ope526-fixture-mutation_d_post_freeze_relabel-6924c2162996",
+      "ope526-fixture-pack_policy_only_starter-d89bd4d888d7",
+      "ope526-fixture-pack_two_reviewers_overturned-a0ce27e59922",
+      "ope526-fixture-pack_unresolved_ambiguity-10cd1e652a76",
+      "ope526-fixture-pack_future_only_field-2945f5025e39",
+      "ope526-fixture-adverse_empty_audit-3fa22b3777c1",
+      "ope526-fixture-adverse_protected_selection-6a4ea99fae24",
+      "ope526-fixture-adverse_preprocessing_fit_on_protected-1013f941ec93",
+      "ope526-fixture-adverse_unlogged_disclosure-7a90f9793781",
+      "ope526-fixture-adverse_preregistered_after_reveal-a05a52d4e284",
+      "ope526-fixture-adverse_superseded-50c6121648c9",
+      "ope526-fixture-real_sample_standin_small-887bc75a1126"
+    ],
+    "rerun_ids": [
+      "ope526-fixture-baseline_rescore-4ac7054c9cb2",
+      "ope526-fixture-mutation_c_resealed-4ac7054c9cb2"
+    ],
+    "software_disposition": "keep_current_behavior",
+    "step3_rerun": {
+      "corrected_disputed_excluded_unresolved": {
+        "correction": 4,
+        "disputed": 0,
+        "excluded": 0,
+        "unresolved": 0
+      },
+      "critical_slice_coverage": "4/4",
+      "denominator_reconciliation": true,
+      "fresh_blinded_audit_sample": "not_run: no repair was made from prior findings and no independent population exists to sample; a fresh sample needs the customer-approved frame",
+      "overlap_checks": "recomputed_in_every_run",
+      "scorer_run_alone_lifts_hold": false
+    },
+    "trade_offs": [
+      "Holding the real-population claim delays any customer accuracy alert until independent evidence exists; the starter and fixture-agreement views stay available.",
+      "The release check refuses or holds every receipt today, because receipts are digest-consistent only and unsigned."
+    ]
+  },
+  "summary": {
+    "attempted": 20,
+    "completed": 20,
+    "evaluation_allowed": 4,
+    "failed": 0,
+    "held": 16,
+    "matching_hand_checked_verdict": 20,
+    "release_permitted": 0
+  }
+}
