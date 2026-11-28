@@ -15,9 +15,9 @@ directory.
 | Part | Behavior |
 | --- | --- |
 | `CredentialReference` | Provider, customer account id, owner and payer references, scope (`fine_tune`, `model_read` only), locator (`file` path or `store_key` name), optional provider budget id, `issued_at`/`not_after`. Refuses a field that looks like a value: a known key prefix, a high-entropy run, a UUID or digest outside a locator, or a field over its length bound (64; locator 200). A canonical UUID is allowed as a locator path segment only; the key-prefix screen still applies to it. Unknown fields such as `value` or `api_key` are refused. |
-| `bind_mandate_store` | Pins, once, the mandate store this ledger trusts: its scope (organization and engagement), the SHA-256 of its directory's real path, the device and inode of its directory and of its database file, and a random store id written into its database at binding. Every `dispatch_authorized` record carries the store digest, so it is inside the authorization id. Any other store is refused with `mandate_store_mismatch`: a copy (other path and inodes), a store recreated or restored at the same path (new inodes, new store id), a replaced database file, a changed or removed store id, or another scope in the same directory. An unbound ledger refuses dispatch with `mandate_store_unbound`. |
-| `authorize_dispatch` | Requires the pinned store. Reads the standing mandate itself, from an exact `LearningMandates` (`inspect`), and type-checks every value it returns. Requires an active autonomous mandate, the worker as its delegate, a positive cost cap, a provider account and cost usage on the mandate, the same owner and payer on the request, mandate and credential reference, the same provider account, and a bound within the cap. The bound counts against `max(this ledger's journaled maxima, the mandate's reported usage)`. It then reserves through the mandate ledger (`LearningMandates.reserve`, which enforces its own fit and seconds budgets) and journals an authorization whose id is this module's digest of its body. A refusal writes nothing. The caller never supplies the mandate's revision, owner, payer or cap. |
-| `CredentialResolver.resolve` | Requires the pinned store (the probe CLI checks the `--mandates` directory it is given against it), a journaled authorization id bound to that store and its job, not fenced and with no recorded outcome; an active reference inside its window; and the mandate still active at the same revision (re-read from the ledger). Walks the locator with no-follow directory descriptors and refuses any link (final, parent or hard link), a non-regular file, a mode other than `0600`, an owner other than the expected uid, a group- or world-writable parent, an empty, oversized or non-printable value. Refusals carry a fixed code only. The value is read in a frame that never raises. |
+| `bind_mandate_store` | Pins, once, the mandate store this ledger trusts: its scope (organization and engagement), the SHA-256 of its directory's real path, the device and inode of its directory and of its database file, and a random store id written into its database at binding. Every `dispatch_authorized` record carries the store digest, so it is inside the authorization id. Any other store is refused with `mandate_store_mismatch`: a copy (other path and inodes), a store recreated at the same path or restored by writing a new file there (new inodes, new store id), a replaced database file, a changed or removed store id, or another scope in the same directory. A restore written into the existing file (`cp backup.sqlite3 learning-mandates.sqlite3`) or a row edited in place keeps the path, inodes and store id, so the pin does not see it; see `mandate_closed` below. An unbound ledger refuses dispatch with `mandate_store_unbound`. |
+| `authorize_dispatch` | Requires the pinned store. Reads the standing mandate itself, from an exact `LearningMandates` (`inspect`), and type-checks every value it returns. Requires an active autonomous mandate, the worker as its delegate, a positive cost cap, a provider account and cost usage on the mandate, the same owner and payer on the request, mandate and credential reference, the same provider account, and a bound within the cap. The bound counts against `max(this ledger's journaled maxima, the mandate's reported usage)`. It then reserves through the mandate ledger (`LearningMandates.reserve`, which enforces its own fit and seconds budgets) and journals an authorization whose id is this module's digest of its body. A refusal writes nothing, with one exception: a mandate seen withdrawn or expired, or at a revision other than one this ledger already journaled for it, is recorded once as `mandate_closed`, and refused from then on with `mandate_closed_observed` whatever the store says later. Mandates are immutable, withdrawal is terminal and renewal mints a new mandate id, so each closure is final. The caller never supplies the mandate's revision, owner, payer or cap. |
+| `CredentialResolver.resolve` | Requires the pinned store (the probe CLI checks the `--mandates` directory it is given against it), a journaled authorization id bound to that store and its job, not fenced and with no recorded outcome; an active reference inside its window; and the mandate still active at the same revision (re-read from the ledger). A mandate seen withdrawn, expired or changed is recorded as `mandate_closed` the same way, and refused from then on. Walks the locator with no-follow directory descriptors and refuses any link (final, parent or hard link), a non-regular file, a mode other than `0600`, an owner other than the expected uid, a group- or world-writable parent, an empty, oversized or non-printable value. Refusals carry a fixed code only. The value is read in a frame that never raises. |
 | `CredentialLedger` | Durable, append-only, hash-chained JSONL journal (`0600` in a `0700` directory, `fsync` per event, `flock` serialized). An edited, reordered, non-canonical, removed-interior or newline-less final line fails closed as `credential_ledger_corrupt`, as do forged events that break a lifecycle rule. |
 | `rotate` | Issues the new reference and activates it in one lock; the previous reference is `retired` and refused locally from any process. Its locator can never be reissued. |
 | `revoke`, `withdraw`, `reenroll` | One durable event revokes the references and fences every in-flight job bound to them. `withdraw` holds the lock across the snapshot and the event, revokes every unrevoked reference of the account, and blocks new references for it in this ledger for good. `reenroll` always refuses with `reenrolment_requires_signed_owner_record` (see gaps). A fenced job has no outcome until `record_outcome` records what was observed (`unknown` is a valid record). A job with a recorded outcome is never re-authorized. |
@@ -25,16 +25,20 @@ directory.
 
 ## Test seams
 
-The source module has none: no clock parameter, no seam class, no enabling flag. Time is
-`time.time` (through a private `_wall_clock`). A mandate source is an exact `LearningMandates`
-(subclasses and look-alikes are refused) or a type in the private `_SOURCE_REGISTRY`, which is
-empty in the source tree. The tests-only module `tests/pilot/provider_credential_seams.py`
-holds `ProviderCapTestSeam` (a wrapper around a real `LearningMandates` that adds the cap,
-provider account and cost tally the mandate schema cannot hold today), registers it, and
-replaces the clock for one test. A repository test parses every non-test Python file and fails
-if anything other than the empty definition and `.get` reads touches the registry. This keeps
-seams out of production code; it is not a security boundary against code already running in the
-same process.
+The source module has none: no clock parameter, no seam class, no registry, no enabling flag.
+Time is `time.time` (through a private `_wall_clock`). A mandate source is an exact
+`LearningMandates`; subclasses and look-alikes are refused. The tests-only module
+`tests/pilot/provider_credential_seams.py` holds `ProviderCapTestSeam` (a wrapper around a real
+`LearningMandates` that adds the cap, provider account and cost tally the mandate schema cannot
+hold today). For one test at a time it replaces the private functions `_underlying` and
+`_reserve_call` through pytest's `monkeypatch`, and the clock the same way. The seam must still
+wrap an exact `LearningMandates`. A repository test parses every Python file outside the cell
+runtime's `tests` tree, including `tests` directories under `src`, every `conftest.py` and every
+`.pth` file. It fails if one names the seams module. For the module itself and any file that
+names it, it also fails on a write to those functions or the clock, on `vars()`, `__dict__` or
+`__globals__`, and on `setattr`, `delattr`, `exec`, `eval` or `compile`. This keeps seams out of
+production code. It is not a security boundary against code already running in the same process:
+a name the scan is never given, such as one built at run time, is out of its reach.
 
 ## What this does NOT prove
 
@@ -78,9 +82,20 @@ same process.
   OPE-426 adds a provider cap, provider account and cost reservation to the mandate. The
   production `LearningMandates.reserve` call is in place but unreachable until then.
 * **The mandate store is pinned by identity, not by signature.** Path, inodes and a random id
-  catch a copied, recreated, restored or replaced store, but anyone who can write the store as
-  this uid can still edit its rows in place. This moves to OPE-566 issuer-signed mandate records,
-  which the credential ledger would then verify instead of trusting the store's file identity.
+  catch a copied, recreated or replaced store, and a restore that writes a new file. They do not
+  catch a restore written into the existing file, which keeps the path, inodes and store id, or a
+  row edited in place by anyone who can write the store as this uid. Either can roll back
+  `LearningMandates.withdraw`. What limits it: once this ledger has seen a mandate withdrawn,
+  expired or at another revision, it journals `mandate_closed` and refuses the mandate from then
+  on, so a later rollback cannot reopen it. A rollback made before this ledger saw the closure is
+  not detected. This moves to OPE-566 issuer-signed mandate records, which the credential ledger
+  would then verify instead of trusting the store's file identity.
+* **The ledger directory is the root of trust.** Withdrawal, `mandate_closed` records and the
+  store pin are per ledger. A new ledger directory starts with none of them: bound to any store,
+  with the same secret locator, it can authorize again, even for an account another ledger
+  withdrew. `resolve` and the probe trust whichever `--ledger` they are given. Until OPE-566
+  signed records or a separate uid protect it, whoever can create or replace the ledger
+  directory as this uid holds the authority it records.
 * **Withdrawal is final; re-enrolment is refused.** `reenroll` refuses with
   `reenrolment_requires_signed_owner_record`. The mandate store cannot express that the owner
   approved re-enrolment after a withdrawal: its actor strings are asserted by the caller, it

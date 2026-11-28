@@ -4,8 +4,9 @@ Fixture kind for every test: generated. Every secret is a sentinel generated at 
 every value-like string is assembled at runtime; no real key, provider or account is used. The
 standing mandate is a real ``LearningMandates`` ledger in a temporary directory. Because its
 schema forces ``max_cost_cents == 0``, paid-dispatch paths use ``ProviderCapTestSeam`` from the
-tests-only ``provider_credential_seams`` module, registered into the source registry that is
-empty in the source tree. These tests prove local software behavior only (EvidenceTier.FIXTURE).
+tests-only ``provider_credential_seams`` module, installed for each test through monkeypatch (the
+source tree has no registry or hook). These tests prove local software behavior only
+(EvidenceTier.FIXTURE).
 
 Item 1  least-privilege reference record and value refusal ........ C1-C8
 Item 2  value only at the locator; resolver; leak scan ............ R1-R7, L1-L3
@@ -13,7 +14,8 @@ Item 3  rotation drill with fresh-subprocess refusal of the old .... T1-T4
 Item 4  durable append-only revocation; withdrawal; outcomes ...... V1-V7
 Item 5  verified mandate owner, payer and cap before dispatch ..... D1-D9
 Store   pinned mandate store identity (copy, move, recreate) ...... P1-P6
-Scope   source registry, clock, evidence tier and the document .... S1-S3, E1
+Closed  observed closures outlast an in-place restore or edit ..... Q1-Q6
+Scope   seam hooks, clock, evidence tier and the document ......... S1-S3, E1
 """
 
 from __future__ import annotations
@@ -50,7 +52,10 @@ from opentour_cell.pilot.connector_ext import EvidenceTier
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.training import LocalTrainingStore
 
-seams.register()
+
+@pytest.fixture(autouse=True)
+def _install_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    seams.install(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -507,13 +512,16 @@ def test_r2_resolution_requires_a_journaled_unfenced_authorization(
     assert refusal(lambda: resolver.resolve(second.authorization_id, job_ref="job-0002")) == (
         "dispatch_settled"
     )
-    # A changed or withdrawn mandate stops resolution even for a journaled authorization.
+    # A changed or withdrawn mandate stops resolution even for a journaled authorization, and
+    # a change once seen stays seen (R1): the reverted revision is still refused.
     source.receipt_overrides["mandate_revision"] = "c" * 64
     assert refusal(lambda: resolver.resolve(auth.authorization_id, job_ref="job-0001")) == (
         "mandate_changed"
     )
     source.receipt_overrides.clear()
-    assert resolver.resolve(auth.authorization_id, job_ref="job-0001")
+    assert refusal(lambda: resolver.resolve(auth.authorization_id, job_ref="job-0001")) == (
+        "mandate_closed_observed"
+    )
     env.mandates.withdraw(MANDATE, actor=OWNER)
     assert refusal(lambda: resolver.resolve(auth.authorization_id, job_ref="job-0001")) == (
         "mandate_not_active"
@@ -1440,19 +1448,22 @@ def test_d3_mandate_sources_other_than_the_verified_ledger_are_refused(
             "mandate_source_untrusted"
         )
     live = seam(env)
-    monkeypatch.setattr(pc, "_SOURCE_REGISTRY", {})
-    assert refusal(ledger.authorize_dispatch, dispatch, mandates=live, actor=WORKER) == (
-        "mandate_source_untrusted"
+    # Without the tests' install the seam is one more look-alike: the module accepts only an
+    # exact LearningMandates.
+    with monkeypatch.context() as patch:
+        patch.setattr(pc, "_underlying", seams.REAL_UNDERLYING)
+        assert refusal(ledger.authorize_dispatch, dispatch, mandates=live, actor=WORKER) == (
+            "mandate_source_untrusted"
+        )
+        resolver_args = {"expected_uid": os.getuid(), "mandates": live}
+        assert refusal(pc.CredentialResolver, ledger, **resolver_args) == (
+            "mandate_source_untrusted"
+        )
+    # An installed seam must still wrap an exact LearningMandates.
+    wrapped = seams.ProviderCapTestSeam(
+        subclass, cap_minor_units=50_000, provider=PROVIDER, account_id=ACCOUNT
     )
-    resolver_args = {"expected_uid": os.getuid(), "mandates": live}
-    assert refusal(pc.CredentialResolver, ledger, **resolver_args) == "mandate_source_untrusted"
-    # A registered type must still wrap an exact LearningMandates.
-    monkeypatch.setattr(
-        pc,
-        "_SOURCE_REGISTRY",
-        {seams.ProviderCapTestSeam: pc._SourceHooks(lambda s: subclass, lambda *a: {})},
-    )
-    assert refusal(ledger.authorize_dispatch, dispatch, mandates=live, actor=WORKER) == (
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=wrapped, actor=WORKER) == (
         "mandate_source_untrusted"
     )
 
@@ -1550,7 +1561,14 @@ def test_d4_dispatch_is_refused_without_a_matching_well_formed_mandate(
     assert refusal(lambda: ledger.authorize_dispatch(dispatch, mandates=source, actor=WORKER)) == (
         expected
     )
-    assert lines(ledger) == before
+    # A mandate seen withdrawn or expired is journaled once (R1); any other refusal writes
+    # nothing.
+    after = lines(ledger)
+    overrides = view.get("receipt_overrides", {})
+    closing = overrides.get("withdrawn") is True or overrides.get("expired") is True
+    assert after[: len(before)] == before
+    added = [json.loads(line)["kind"] for line in after[len(before) :]]
+    assert added == (["mandate_closed"] if closing else [])
     assert refusal(lambda: ledger.job_status("job-0001")) == "job_unknown"
     if expected != "mandate_per_fit_budget_exceeded":
         assert env.mandates.inspect(MANDATE, actor=OWNER)["reserved_fits"] == 0
@@ -1845,79 +1863,303 @@ def test_p4_the_store_is_bound_once_and_required(
     del auth
 
 
-# ================================================================= registry, clock, scope
+# ================================================================= observed mandate closures
+# R1 (review of #216): a restore written into the existing mandate file, or a row edited in
+# place, keeps the store's path, inodes and store id, so the pin cannot see it, and it can roll
+# back LearningMandates.withdraw. Mandates are immutable and withdrawal is terminal, so once this
+# ledger has observed a mandate withdrawn, expired or at another revision it journals that once
+# and refuses the mandate from then on, whatever the store says later.
+def _edit_mandate_row(env: MandateEnv, assignment: str, *params: object) -> None:
+    db = sqlite3.connect(env.mandates.path)
+    try:
+        with db:
+            db.execute(f"UPDATE mandates SET {assignment} WHERE id=?", (*params, MANDATE))
+    finally:
+        db.close()
+
+
+def _closures(ledger: pc.CredentialLedger) -> list[dict[str, Any]]:
+    events = [json.loads(line) for line in lines(ledger)]
+    return [event["body"] for event in events if event["kind"] == "mandate_closed"]
+
+
+def test_q1_an_in_place_restore_cannot_reopen_a_withdrawal_that_resolve_observed(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    """The reviewer's Q3b and Q3c: back up the store, withdraw, then copy the backup over it."""
+    value = sentinel()
+    ledger, source, auth, resolver = authorized(ledger_dir, store, env, value)
+    backup = env.mandates.path.read_bytes()
+    env.mandates.withdraw(MANDATE, actor=OWNER)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_not_active"
+    )
+    assert [c["cause"] for c in _closures(ledger)] == ["withdrawn"]
+    inode = env.mandates.path.stat().st_ino
+    with env.mandates.path.open("r+b") as stream:  # `cp backup store`: the same inode
+        stream.write(backup)
+        stream.truncate()
+    assert env.mandates.path.stat().st_ino == inode
+    assert env.mandates.inspect(MANDATE, actor=OWNER)["withdrawn"] is False
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_closed_observed"
+    )
+    status, body, output = _probe(ledger_dir, env, auth.authorization_id, "job-0001")
+    assert (status, body["result"]) == (2, "mandate_closed_observed") and value not in output
+    dispatch = request(env, "job-0002")
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=source, actor=WORKER) == (
+        "mandate_closed_observed"
+    )
+    assert len(_closures(ledger)) == 1
+
+
+def test_q2_a_withdrawal_observed_at_dispatch_survives_a_row_edit(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    """Q3d: `UPDATE mandates SET withdrawn=NULL` after the ledger saw the withdrawal."""
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
+    source = seam(env)
+    dispatch = request(env)
+    env.mandates.withdraw(MANDATE, actor=OWNER)
+    before = len(lines(ledger))
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=source, actor=WORKER) == (
+        "mandate_not_active"
+    )
+    assert len(lines(ledger)) == before + 1  # the observation, and nothing else
+    assert _closures(ledger) == [
+        {
+            "mandate_id": MANDATE,
+            "observed_revision": env.mandates.inspect(MANDATE)["mandate_revision"],
+            "cause": "withdrawn",
+        }
+    ]
+    # Observed again: the same refusal, and still one record.
+    assert refusal(ledger.authorize_dispatch, dispatch, mandates=source, actor=WORKER) == (
+        "mandate_not_active"
+    )
+    assert len(lines(ledger)) == before + 1
+    _edit_mandate_row(env, "withdrawn=NULL")
+    assert env.mandates.inspect(MANDATE, actor=OWNER)["withdrawn"] is False
+    retry = request(env, "job-0002")
+    assert refusal(ledger.authorize_dispatch, retry, mandates=source, actor=WORKER) == (
+        "mandate_closed_observed"
+    )
+    assert env.mandates.inspect(MANDATE, actor=OWNER)["reserved_fits"] == 0
+
+
+def test_q3_a_revision_change_seen_by_resolve_stays_seen_after_it_is_reverted(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    ledger, source, auth, resolver = authorized(ledger_dir, store, env, sentinel())
+    revision = env.mandates.inspect(MANDATE)["mandate_revision"]
+    _edit_mandate_row(env, "revision=?", "d" * 64)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_changed"
+    )
+    assert [(c["cause"], c["observed_revision"]) for c in _closures(ledger)] == [
+        ("revision_changed", "d" * 64)
+    ]
+    _edit_mandate_row(env, "revision=?", revision)
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_closed_observed"
+    )
+
+
+def test_q4_dispatch_at_another_revision_than_a_journaled_one_closes_the_mandate(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    # Mandates are immutable, so one id at two revisions means the store was edited.
+    ledger, source, auth, resolver = authorized(ledger_dir, store, env, sentinel())
+    source.receipt_overrides["mandate_revision"] = "c" * 64
+    second = request(env, "job-0002")
+    assert refusal(ledger.authorize_dispatch, second, mandates=source, actor=WORKER) == (
+        "mandate_changed"
+    )
+    assert [c["cause"] for c in _closures(ledger)] == ["revision_changed"]
+    source.receipt_overrides.clear()
+    third = request(env, "job-0003")
+    assert refusal(ledger.authorize_dispatch, third, mandates=source, actor=WORKER) == (
+        "mandate_closed_observed"
+    )
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_closed_observed"
+    )
+    assert env.mandates.inspect(MANDATE, actor=OWNER)["reserved_fits"] == 1
+
+
+def test_q5_an_expiry_observed_once_survives_the_clock_moving_back(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    clock = Clock()
+    ledger = active_ledger(ledger_dir, store, sentinel(), clock, env=env)
+    source = seam(env)
+    clock.now = NOW + 4_000  # past the mandate's expiry
+    assert refusal(ledger.authorize_dispatch, request(env), mandates=source, actor=WORKER) == (
+        "mandate_not_active"
+    )
+    assert [c["cause"] for c in _closures(ledger)] == ["expired"]
+    clock.now = NOW
+    retry = request(env, "job-0002")
+    assert refusal(ledger.authorize_dispatch, retry, mandates=source, actor=WORKER) == (
+        "mandate_closed_observed"
+    )
+
+
+def test_q5_resolve_refuses_a_view_of_another_mandate(
+    ledger_dir: Path, store: Path, env: MandateEnv
+) -> None:
+    # A closure is recorded under the view's mandate id, so the view must be this job's.
+    ledger, source, auth, resolver = authorized(ledger_dir, store, env, sentinel())
+    source.receipt_overrides["mandate_id"] = "standing-0002"
+    assert refusal(resolver.resolve, auth.authorization_id, job_ref="job-0001") == (
+        "mandate_view_invalid"
+    )
+    assert _closures(ledger) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"mandate_id": MANDATE, "observed_revision": "a" * 64, "cause": "paused"},
+        {"mandate_id": MANDATE, "observed_revision": "a" * 64},
+        {"mandate_id": MANDATE, "observed_revision": "short", "cause": "withdrawn"},
+        {"mandate_id": "Not An Id", "observed_revision": "a" * 64, "cause": "withdrawn"},
+    ],
+    ids=["unknown-cause", "missing-cause", "bad-revision", "bad-id"],
+)
+def test_q6_a_malformed_closure_record_fails_closed(
+    ledger_dir: Path, store: Path, env: MandateEnv, body: dict[str, Any]
+) -> None:
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
+    forge(ledger, "mandate_closed", body)
+    assert refusal(ledger.status, "pcref-0001") == "credential_ledger_corrupt"
+
+
+def test_q6_a_closure_is_recorded_once(ledger_dir: Path, store: Path, env: MandateEnv) -> None:
+    ledger = active_ledger(ledger_dir, store, sentinel(), env=env)
+    closed = {"mandate_id": MANDATE, "observed_revision": "a" * 64, "cause": "withdrawn"}
+    forge(ledger, "mandate_closed", closed)
+    assert ledger.status("pcref-0001") == "active"
+    forge(ledger, "mandate_closed", dict(closed, cause="expired"))
+    assert refusal(ledger.status, "pcref-0001") == "credential_ledger_corrupt"
+
+
+# ================================================================= hooks, clock, scope
 SEAM_SURFACE = ("enable_test_seams", "ProviderCapTestSeam", "_TEST_SEAMS", "_seam")
+# The private functions the tests replace (through monkeypatch only), and the clock. R3: the
+# source module has no registry, so these are the only things a seam could write.
+HOOKS = frozenset({"_underlying", "_reserve_call", "_trusted_source", "_wall_clock"})
+TESTS_TREE = SRC.parent / "tests"
+REPO = SRC.parents[2]
+_MODULE = re.compile(r"\bprovider_credential\b")
+_UNSCANNED = {".git", ".venv", "node_modules", "__pycache__"}
 
 
-def registry_writes(source: str) -> list[int]:
-    """Lines that write ``_SOURCE_REGISTRY`` other than its empty definition, or read it other
-    than through ``.get``."""
+def scanned(path: Path) -> bool:
+    """Every Python and .pth file outside this tests tree and the environments: src/**/tests,
+    any conftest.py and other tests trees included (R3 E7, E8, E9)."""
+    relative = path.relative_to(REPO)
+    if any(part in _UNSCANNED for part in relative.parts):
+        return False
+    return path.suffix in {".py", ".pth"} and not path.is_relative_to(TESTS_TREE)
+
+
+def scan_targets() -> Iterator[Path]:
+    """The scanned files, walking only directories the scan covers (so nothing outside them is
+    even stat()ed, for example an interpreter link in a virtual environment)."""
+    for directory, dirnames, filenames in os.walk(REPO):
+        here = Path(directory)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _UNSCANNED and not (here / name).is_relative_to(TESTS_TREE)
+        ]
+        yield from (here / name for name in filenames if scanned(here / name))
+
+
+def hook_writes(source: str) -> list[int]:
+    """Lines that write a hook, or reach into a module some other way: vars(), __dict__,
+    __globals__, setattr, delattr, exec, eval or compile. Run on the module itself and on any
+    file that names it; a static scan cannot see a name it is not given."""
     tree = ast.parse(source)
-    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     offending = []
     for node in ast.walk(tree):
-        named = (
-            (isinstance(node, ast.Name) and node.id == "_SOURCE_REGISTRY")
-            or (isinstance(node, ast.Attribute) and node.attr == "_SOURCE_REGISTRY")
-            or (isinstance(node, ast.Constant) and node.value == "_SOURCE_REGISTRY")
-        )
-        if not named:
-            continue
-        parent = parents.get(node)
-        if (
-            isinstance(parent, ast.AnnAssign)
-            and parent.target is node
-            and isinstance(parent.value, ast.Dict)
-            and not parent.value.keys
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign | ast.Delete):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AugAssign | ast.AnnAssign):
+            targets = [node.target]
+        if any(
+            isinstance(sub, ast.Attribute) and sub.attr in HOOKS
+            for target in targets
+            for sub in ast.walk(target)
         ):
-            continue
-        if isinstance(parent, ast.Attribute) and parent.attr == "get":
-            continue
-        offending.append(node.lineno)
-    return offending
+            offending.append(node.lineno)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in {"vars", "setattr", "delattr", "exec", "eval", "compile"}:
+                offending.append(node.lineno)
+        if isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__globals__"}:
+            offending.append(node.lineno)
+    return sorted(set(offending))
 
 
-def test_s1_the_source_registry_is_written_only_from_the_tests_tree() -> None:
-    root = SRC.parents[2]
-    skip = {".git", ".venv", "node_modules", "tests", "__pycache__", ".claude"}
-    checked = 0
-    for path in sorted(root.rglob("*.py")):
-        relative = path.relative_to(root)
-        if any(part in skip for part in relative.parts):
+def test_s1_nothing_outside_the_tests_tree_can_install_a_seam() -> None:
+    module = Path(pc.__file__).resolve()
+    checked = named = 0
+    for path in sorted(scan_targets()):
+        if not path.is_file():
             continue
         text = path.read_text(errors="replace")
         checked += 1
-        if path.resolve() == Path(pc.__file__).resolve():
-            assert registry_writes(text) == [], relative
-            definitions = re.findall(r"^_SOURCE_REGISTRY: .*$", text, flags=re.M)
-            assert definitions == ["_SOURCE_REGISTRY: dict[type, _SourceHooks] = {}"]
-            assert not any(name in text for name in SEAM_SURFACE)
-        else:
-            assert "_SOURCE_REGISTRY" not in text and "provider_credential_seams" not in text, (
-                relative
-            )
-    assert checked > 50
-    # Positive controls: every write form is caught.
+        assert "provider_credential_seams" not in text, path.relative_to(REPO)
+        if path.suffix == ".pth":
+            # A .pth line that starts with `import` runs at interpreter start.
+            assert not _MODULE.search(text), path.relative_to(REPO)
+            continue
+        if path.resolve() == module or _MODULE.search(text):
+            named += 1
+            assert hook_writes(text) == [], path.relative_to(REPO)
+    assert checked > 50 and named >= 1
+    text = module.read_text()
+    assert not any(name in text for name in (*SEAM_SURFACE, "_SOURCE_REGISTRY", "_SourceHooks"))
+    # Positive controls: the review's E1-E10 forms, against the hooks that remain.
     for write in (
-        "pc._SOURCE_REGISTRY[object] = hooks",
-        "pc._SOURCE_REGISTRY.update({object: hooks})",
-        "pc._SOURCE_REGISTRY.setdefault(object, hooks)",
-        "_SOURCE_REGISTRY = {object: hooks}",
-        "setattr(pc, '_SOURCE_REGISTRY', {})",
-        "registry = pc._SOURCE_REGISTRY",
+        "pc._wall_clock = lambda: 0.0",  # E10
+        "pc._underlying = accept_anything",
+        "pc.CredentialLedger._reserve_call = f",
+        "del pc._reserve_call",
+        "setattr(pc, '_under' + 'lying', f)",  # E1
+        "vars(pc)['_reserve' '_call'] = f",  # E2, E3
+        "pc._underlying.__globals__['_reserve_call'] = f",  # E4
+        "exec(base64.b64decode(blob))",  # E5
+        "pc.__dict__[chr(95) + 'wall_clock'] = f",  # E6
     ):
-        assert registry_writes(write), write
-    assert registry_writes("x = pc._SOURCE_REGISTRY.get(kind)") == []
-    assert registry_writes("_SOURCE_REGISTRY: dict[type, _SourceHooks] = {}") == []
+        assert hook_writes(write), write
+    assert hook_writes("value = pc._underlying(source)") == []
+    assert hook_writes("pattern = re.compile(r'x')") == []
+    for path in (
+        SRC / "opentour_cell" / "pilot" / "tests" / "test_x.py",  # E7
+        REPO / "conftest.py",  # E8
+        REPO / "training" / "tests" / "conftest.py",
+        REPO / "site.pth",  # E9
+    ):
+        assert scanned(path), path
+    for path in (TESTS_TREE / "pilot" / "x.py", REPO / ".venv" / "x.pth"):
+        assert not scanned(path), path
 
 
-def test_s2_a_fresh_process_has_no_seams_and_an_empty_registry() -> None:
+def test_s2_a_fresh_process_accepts_only_an_exact_mandate_ledger() -> None:
     script = (
         "import sys, types\n"
         "sys.modules['pytest'] = types.ModuleType('pytest')\n"
         "from opentour_cell.pilot import provider_credential as pc\n"
-        "print(len(pc._SOURCE_REGISTRY))\n"
+        "print(hasattr(pc, '_SOURCE_REGISTRY') or hasattr(pc, '_SourceHooks'))\n"
         f"print(any(hasattr(pc, n) for n in {SEAM_SURFACE!r}))\n"
+        "class Lookalike: pass\n"
+        "try:\n"
+        "    pc._underlying(Lookalike())\n"
+        "except pc.CredentialError as exc:\n"
+        "    print(exc.code)\n"
     )
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -1927,7 +2169,9 @@ def test_s2_a_fresh_process_has_no_seams_and_an_empty_registry() -> None:
         timeout=60,
         check=False,
     )
-    assert completed.stdout.split() == ["0", "False"], completed.stderr
+    assert completed.stdout.split() == ["False", "False", "mandate_source_untrusted"], (
+        completed.stderr
+    )
 
 
 def test_s3_production_ledger_has_no_clock_parameter(ledger_dir: Path) -> None:
@@ -1965,5 +2209,13 @@ def test_e1_evidence_tier_gates_and_the_not_proven_document() -> None:
         "mandate_store_mismatch",
         "ope-566",
         "reenrolment_requires_signed_owner_record",
+        # R1 and R2: what the pin cannot see, and where the trust sits.
+        "written into the existing file",
+        "edited in place",
+        "mandate_closed_observed",
+        "root of trust",
+        "per ledger",
     ):
         assert phrase in text, phrase
+    assert "restored at the same path" not in text
+    assert "_source_registry" not in text

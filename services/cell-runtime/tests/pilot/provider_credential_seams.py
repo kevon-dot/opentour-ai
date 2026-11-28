@@ -4,8 +4,10 @@
 today: ``learning_mandate`` forces ``max_cost_cents == 0`` and records no provider account or cost
 usage, so a real mandate can never authorize a paid provider dispatch. The seam adds a cap, a
 provider account and an in-memory cost tally on top of the real store's identity, revision,
-expiry, withdrawal state and fit/seconds reservation. ``register`` adds it to the module's
-otherwise empty source registry; ``use_clock`` replaces the module's wall clock for one test.
+expiry, withdrawal state and fit/seconds reservation. ``install`` accepts it as a mandate source
+for one test by replacing the module's private ``_underlying`` and ``_reserve_call`` through
+pytest's monkeypatch (the source module has no registry or hook); ``use_clock`` replaces the
+module's wall clock for one test.
 """
 
 from __future__ import annotations
@@ -13,8 +15,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import pytest
 from opentour_cell.pilot import provider_credential as pc
 from opentour_cell.pilot.learning_mandate import LearningMandates, MandateError
+
+# The module's own functions, captured before any test replaces them.
+REAL_UNDERLYING = pc._underlying
+REAL_RESERVE_CALL = pc._reserve_call
 
 
 class ProviderCapTestSeam:
@@ -64,13 +71,25 @@ class ProviderCapTestSeam:
         return result
 
 
-def register() -> None:
-    pc._SOURCE_REGISTRY[ProviderCapTestSeam] = pc._SourceHooks(
-        underlying=lambda seam: seam.mandates,
-        reserve=lambda seam, mandate_id, request, actor, cost: seam.reserve(
-            mandate_id, request, actor, cost
-        ),
-    )
+def install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept ``ProviderCapTestSeam`` as a mandate source until the test ends.
+
+    The seam must still wrap an exact ``LearningMandates``: the module's own check runs on it.
+    Every other source goes to the module's own functions unchanged.
+    """
+
+    def underlying(source: object) -> LearningMandates:
+        if type(source) is ProviderCapTestSeam:
+            return REAL_UNDERLYING(source.mandates)
+        return REAL_UNDERLYING(source)
+
+    def reserve_call(source: Any, request: Any, actor: str, cost: int) -> object:
+        if type(source) is ProviderCapTestSeam:
+            return source.reserve(request.mandate_id, request.reservation, actor, cost)
+        return REAL_RESERVE_CALL(source, request, actor, cost)
+
+    monkeypatch.setattr(pc, "_underlying", underlying)
+    monkeypatch.setattr(pc, "_reserve_call", reserve_call)
 
 
 def use_clock(clock: Callable[[], float]) -> None:

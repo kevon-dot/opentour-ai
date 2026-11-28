@@ -21,15 +21,21 @@ authorization this module issued, and hands it to the caller wrapped in a redact
   OPE-426 records a provider cap.
 * The mandate store is pinned in the ledger (``bind_mandate_store``): its scope, directory
   path, directory and database device/inode and a random store id written into it. Every
-  authorization binds that identity, and dispatch and resolution refuse any other store.
+  authorization binds that identity, and dispatch and resolution refuse any other store. A
+  restore written into the existing file, or a row edited in place, keeps that identity, so a
+  mandate this ledger has seen withdrawn, expired or at another revision is journaled once
+  (``mandate_closed``) and refused from then on, whatever the store says later.
+* Withdrawal, closures and the store pin are per ledger: the ledger directory is the root of
+  trust until OPE-566 signed records or a separate uid protect it.
 * Rotation retires the previous reference; revocation and withdrawal fence in-flight jobs. A
   withdrawn account stays withdrawn: re-enrolment is refused until signed owner records
   (OPE-566) exist. A fenced job's outcome stays unrecorded until a caller records what was
   observed. It is never assumed.
 
-There are no test seams here. Time is ``time.time``. A mandate source is an exact
-``LearningMandates`` or a type in ``_SOURCE_REGISTRY``, which is empty in this module; only the
-tests tree registers into it, and a repository test enforces that.
+There are no test seams or hooks here. Time is ``time.time`` and a mandate source is an exact
+``LearningMandates``. The tests replace the private functions ``_underlying`` and
+``_reserve_call`` with pytest's monkeypatch; a repository test checks that nothing outside the
+tests tree writes them or the clock.
 
 Not proven (see ``services/cell-runtime/docs/pilot-provider-credential.md``): no provider call is
 made, no provider-side revocation or refusal is witnessed, no provider-side budget is set, and the
@@ -53,7 +59,7 @@ import stat
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -372,6 +378,7 @@ class MandateView:
     provider: str | None
     account_id: str | None
     expires_at: int
+    closure: str | None = None  # "withdrawn" or "expired": terminal for an immutable mandate
 
 
 @dataclass(frozen=True)
@@ -465,6 +472,7 @@ class _State:
     active: dict[tuple[str, str], str] = field(default_factory=dict)
     withdrawn: set[tuple[str, str]] = field(default_factory=set)
     jobs: dict[str, _Job] = field(default_factory=dict)
+    closed: dict[str, str] = field(default_factory=dict)  # mandate id -> observed closure
     store: dict[str, Any] | None = None
     store_digest: str | None = None
     tail: str = _GENESIS
@@ -472,33 +480,26 @@ class _State:
 
 
 # --------------------------------------------------------------------------- mandate source
-@dataclass(frozen=True)
-class _SourceHooks:
-    """How a registered mandate source exposes its real store and reserves budget."""
-
-    underlying: Callable[[Any], LearningMandates]
-    reserve: Callable[[Any, str, Mapping[str, Any], str, int], Mapping[str, Any]]
-
-
-# Empty in this module and in every non-test module. Only the tests tree registers a type here
-# (a repository test enforces it). Python cannot stop same-process code from writing it.
-_SOURCE_REGISTRY: dict[type, _SourceHooks] = {}
-
-
+# A mandate source is an exact LearningMandates. There is no registry or other hook: the tests
+# replace `_underlying` and `_reserve_call` through pytest's monkeypatch, and a repository test
+# checks that nothing outside the tests tree writes them. Same-process code could still write
+# any module attribute; that is not a boundary this module can draw.
 def _trusted_source(source: object) -> Any:
     _underlying(source)
     return source
 
 
 def _underlying(source: object) -> LearningMandates:
-    if type(source) is LearningMandates:
-        return source
-    hooks = _SOURCE_REGISTRY.get(type(source))
-    _need(hooks is not None, "mandate_source_untrusted")
-    assert hooks is not None
-    mandates = hooks.underlying(source)
-    _need(type(mandates) is LearningMandates, "mandate_source_untrusted")
-    return mandates
+    _need(type(source) is LearningMandates, "mandate_source_untrusted")
+    assert isinstance(source, LearningMandates)
+    return source
+
+
+def _reserve_call(source: Any, request: DispatchRequest, actor: str, cost: int) -> object:
+    """The budget reservation itself. ``cost`` is unused until the mandate holds a cost cap."""
+    return source.reserve(  # pragma: no cover - unreachable until the mandate holds a cost cap
+        request.mandate_id, request.reservation, actor=actor
+    )
 
 
 _STORE_TABLE = "provider_credential_store"
@@ -614,6 +615,7 @@ def _mandate_view(receipt: Mapping[str, Any], now: int) -> MandateView:
             provider=None if provider is None else _ident(provider),
             account_id=None if account is None else _ident(account),
             expires_at=expires,
+            closure="withdrawn" if withdrawn else "expired" if expired or now >= expires else None,
         )
         _need(spec["owner_id"] == view.owner_id, "mandate_view_invalid")
     except (KeyError, TypeError, AttributeError, CredentialError):
@@ -643,7 +645,12 @@ _BODY_KEYS: dict[str, set[str]] = {
         "max_minor_units",
     },
     "job_outcome": {"job_ref", "outcome", "observed_by", "evidence_ref"},
+    "mandate_closed": {"mandate_id", "observed_revision", "cause"},
 }
+# Why a mandate was journaled closed. A LearningMandates mandate is immutable (its revision is a
+# digest of its spec), withdrawal is terminal and renewal mints a new mandate id, so each of
+# these is final: a store that later says otherwise was restored or edited in place.
+_CLOSURES = ("withdrawn", "expired", "revision_changed")
 
 
 def _canonical(value: object) -> bytes:
@@ -831,6 +838,12 @@ class CredentialLedger:
             _need(state.status[ref.reference_id] == "active", "reference_not_active")
             _need(ref.account not in state.withdrawn, "account_withdrawn")
             state.jobs[body["job_ref"]] = _Job(dict(body))
+        elif kind == "mandate_closed":
+            mandate_id = _ident(body["mandate_id"])
+            _digest_from(body["observed_revision"], _HEX64, "credential_ledger_corrupt")
+            _need(body["cause"] in _CLOSURES, "credential_ledger_corrupt")
+            _need(mandate_id not in state.closed, "credential_ledger_corrupt")
+            state.closed[mandate_id] = body["cause"]
         elif kind == "job_outcome":
             job = state.jobs[body["job_ref"]]
             _need(job.in_flight, "job_outcome_already_final")
@@ -1016,6 +1029,16 @@ class CredentialLedger:
             _need(Scope.FINE_TUNE in ref.scope, "reference_scope_lacks_fine_tune")
             view = _mandate_view(_inspect(source, request.mandate_id, actor), self._now())
             _need(view.mandate_id == request.mandate_id, "mandate_view_invalid")
+            if view.closure is not None:
+                self._observe_closure(state, view, view.closure)
+            journaled = {
+                job.body["mandate_revision"]
+                for job in state.jobs.values()
+                if job.body["mandate_id"] == view.mandate_id
+            }
+            if journaled and view.revision not in journaled:
+                self._observe_closure(state, view, "revision_changed")
+            _need(view.mandate_id not in state.closed, "mandate_closed_observed")
             _need(view.active, "mandate_not_active")
             _need(actor == view.delegate, "mandate_delegate_mismatch")
             _need(view.cap_minor_units > 0, "mandate_cap_required")
@@ -1072,16 +1095,27 @@ class CredentialLedger:
             self._append(state, "dispatch_authorized", body)
         return state.jobs[request.job_ref].authorization()
 
+    def _observe_closure(self, state: _State, view: MandateView, cause: str) -> NoReturn:
+        """Journal, once, that this mandate was seen closed; then refuse. The lock is held.
+
+        A restore written into the existing mandate file, or a row edited in place, keeps the
+        store's identity, so the pin cannot see it. Once journaled, the closure outlasts it.
+        """
+        if view.mandate_id not in state.closed:
+            body = {"mandate_id": view.mandate_id, "observed_revision": view.revision}
+            self._append(state, "mandate_closed", dict(body, cause=cause))
+        _fail("mandate_changed" if cause == "revision_changed" else "mandate_not_active")
+
+    def _record_closure(self, view: MandateView, cause: str) -> NoReturn:
+        with self._locked():
+            self._observe_closure(self._fold(), view, cause)
+
     @staticmethod
     def _reserve(source: Any, request: DispatchRequest, actor: str, cost: int) -> str:
         code: str | None = None
         result: Any = None
-        hooks = _SOURCE_REGISTRY.get(type(source))
         try:
-            if hooks is not None:
-                result = hooks.reserve(source, request.mandate_id, request.reservation, actor, cost)
-            else:  # pragma: no cover - unreachable until the mandate schema holds a cost cap
-                result = source.reserve(request.mandate_id, request.reservation, actor=actor)
+            result = _reserve_call(source, request, actor, cost)
         except CredentialError:
             raise
         except (MandateError, OSError, sqlite3.Error, TypeError, ValueError, KeyError) as exc:
@@ -1270,8 +1304,13 @@ class CredentialResolver:
             _inspect(_trusted_source(self.mandates), job.body["mandate_id"], job.body["actor"]),
             now,
         )
+        _need(view.mandate_id == job.body["mandate_id"], "mandate_view_invalid")
+        if view.closure is not None:
+            self.ledger._record_closure(view, view.closure)
+        if view.revision != job.body["mandate_revision"]:
+            self.ledger._record_closure(view, "revision_changed")
+        _need(view.mandate_id not in state.closed, "mandate_closed_observed")
         _need(view.active, "mandate_not_active")
-        _need(view.revision == job.body["mandate_revision"], "mandate_changed")
         _need(ref.locator_kind is LocatorKind.FILE, "locator_kind_unsupported")
         value, code = _read_secret(self._open(ref.locator), self.expected_uid)
         if code is not None:
