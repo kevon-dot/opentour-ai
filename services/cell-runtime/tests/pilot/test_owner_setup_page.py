@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from html import unescape
+from threading import Barrier
 from urllib.parse import urlencode
 
 import jwt
@@ -188,6 +190,7 @@ def test_current_browser_identity_and_form_controls_deny_without_catalog_disclos
         page.request(token=False, extras=((b"x-authenticated-subject", _SUBJECT.encode()),)),
         page.request(token=page.issue(sub="generated-other")),
         page.request(token=page.issue(iss="https://other.example.test")),
+        page.request(token=page.issue(aud="https://other.example.test")),
         page.request(token=page.issue(iat=1, auth_time=1, exp=2)),
         page.request(query=b"tenant=generated-other"),
     ):
@@ -233,6 +236,36 @@ def test_current_private_page_renews_and_can_withdraw_when_catalog_is_held(page)
     revoked = apply("revoke", paused["revision"])
     assert revoked["prior_revision"] == paused["revision"] and revoked["state"] == "revoke"
     assert page.setup.protocol() == before
+
+
+def test_two_signed_browser_edits_on_one_reviewed_revision_commit_only_once(page):
+    status, _, original = page.request()
+    assert status == 200
+    signed = []
+    for name in ("generated-competing-edit-a", "generated-competing-edit-b"):
+        form = page.form(original)
+        policy = json.loads(form["policy"])
+        policy["mandate"]["mandate_id"] = name
+        form["policy"] = json.dumps(policy)
+        status, _, preview = page.request(form=form)
+        assert status == 200
+        signed.append(page.submission(form, preview, page.kit.customer, page.kit.operator))
+
+    together = Barrier(2, timeout=5)
+
+    def submit(packet):
+        together.wait()
+        return page.request(form=packet)
+
+    with ThreadPoolExecutor(max_workers=2) as concurrent:
+        outcomes = sorted(concurrent.map(submit, signed), key=lambda result: result[0])
+    assert [status for status, _, _ in outcomes] == [200, 409]
+    current = page.setup.service.inspect(actor=page.setup.owner)["current"]
+    assert current["revision"] in outcomes[0][2]
+    assert 'href="/owner/setup">Review current settings</a>' in outcomes[1][2]
+    with page.setup.service.ledger._db(write=False) as db:
+        assert db.execute("SELECT count(*) FROM owner_settings_revisions").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM mandates").fetchone()[0] == 2
 
 
 def test_gateway_binding_change_before_commit_rolls_back_settings(page, monkeypatch):
