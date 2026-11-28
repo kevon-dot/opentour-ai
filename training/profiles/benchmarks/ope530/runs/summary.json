@@ -1,0 +1,1731 @@
+{
+ "source": "measurements.json",
+ "binding": {
+  "batch_id": "8910bd724775",
+  "measured_git_sha": "0bb0bec4ee9f3c5ef7670bc488171d496b36c411",
+  "git_tree_dirty": false,
+  "git_head_changed": false,
+  "started_at": "2026-11-28T00:37:56.248Z",
+  "finished_at": "2026-11-28T00:41:10.849Z",
+  "rows": 41,
+  "run_ids_unique": true,
+  "rows_bound_to_measured_sha": true,
+  "cache_method": "fadvise-dontneed (cold) or read-through (warm) before every process",
+  "loadavg_at_start": [
+   2.23046875,
+   2.49755859375,
+   2.8056640625
+  ],
+  "loadavg_at_finish": [
+   6.35791015625,
+   3.83642578125,
+   3.23876953125
+  ],
+  "machine": {
+   "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+   "logical_cpus": 4,
+   "mem_total_gib": 15.7,
+   "kernel": "6.18.44-fc-v880",
+   "machine": "x86_64",
+   "virtualization": "unknown"
+  }
+ },
+ "attempted": {
+  "A_product_cli:cold": 5,
+  "B_replica_fit:cold": 5,
+  "B_replica_predict:cold": 5,
+  "C_service_fit:cold": 5,
+  "A_product_cli:warm": 5,
+  "B_replica_fit:warm": 5,
+  "B_replica_predict:warm": 5,
+  "C_service_fit:warm": 5,
+  "D_batch_probe:warm": 1
+ },
+ "completed": {
+  "A_product_cli:cold": 5,
+  "B_replica_fit:cold": 5,
+  "B_replica_predict:cold": 5,
+  "C_service_fit:cold": 5,
+  "A_product_cli:warm": 5,
+  "B_replica_fit:warm": 5,
+  "B_replica_predict:warm": 5,
+  "C_service_fit:warm": 5,
+  "D_batch_probe:warm": 1
+ },
+ "failed": {},
+ "parity_failures": 0,
+ "tables": {
+  "cold": {
+   "A.prepare.wall_ms": {
+    "n": 5,
+    "median": 74.8,
+    "min": 69.0,
+    "worst": 80.6,
+    "values": [
+     80.6,
+     71.4,
+     74.8,
+     69.0,
+     76.9
+    ]
+   },
+   "A.prepare.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "A.fit.wall_ms": {
+    "n": 5,
+    "median": 2245.1,
+    "min": 2235.1,
+    "worst": 2391.0,
+    "values": [
+     2235.1,
+     2255.3,
+     2235.7,
+     2245.1,
+     2391.0
+    ]
+   },
+   "A.fit.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "A.replay-first.wall_ms": {
+    "n": 5,
+    "median": 1708.9,
+    "min": 1646.2,
+    "worst": 1976.3,
+    "values": [
+     1646.2,
+     1976.3,
+     1708.9,
+     1815.1,
+     1677.5
+    ]
+   },
+   "A.replay-first.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "A.replay-repeat.wall_ms": {
+    "n": 5,
+    "median": 1798.0,
+    "min": 1661.2,
+    "worst": 2095.0,
+    "values": [
+     1789.5,
+     2095.0,
+     1661.2,
+     1798.0,
+     1817.5
+    ]
+   },
+   "A.replay-repeat.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "A.verify.wall_ms": {
+    "n": 5,
+    "median": 74.7,
+    "min": 71.5,
+    "worst": 78.2,
+    "values": [
+     78.2,
+     74.7,
+     72.5,
+     74.8,
+     71.5
+    ]
+   },
+   "A.verify.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "A.fit.worker_elapsed_ms": {
+    "n": 5,
+    "median": 2026,
+    "min": 2015,
+    "worst": 2179,
+    "values": [
+     2025,
+     2029,
+     2026,
+     2015,
+     2179
+    ]
+   },
+   "A.replays_total_ms": {
+    "n": 5,
+    "median": 3495.0,
+    "min": 3370.1,
+    "worst": 4071.3,
+    "values": [
+     3435.7,
+     4071.3,
+     3370.1,
+     3613.1,
+     3495.0
+    ]
+   },
+   "A.end_to_end_ms": {
+    "n": 5,
+    "median": 6002.0,
+    "min": 5753.1,
+    "worst": 6472.7,
+    "values": [
+     5829.6,
+     6472.7,
+     5753.1,
+     6002.0,
+     6034.4
+    ]
+   },
+   "A.prepare_share_pct": {
+    "n": 5,
+    "median": 1.27,
+    "min": 1.1,
+    "worst": 1.38,
+    "values": [
+     1.38,
+     1.1,
+     1.3,
+     1.15,
+     1.27
+    ]
+   },
+   "A.fit_share_pct": {
+    "n": 5,
+    "median": 38.34,
+    "min": 34.84,
+    "worst": 39.62,
+    "values": [
+     38.34,
+     34.84,
+     38.86,
+     37.41,
+     39.62
+    ]
+   },
+   "A.verify_share_pct": {
+    "n": 5,
+    "median": 1.25,
+    "min": 1.15,
+    "worst": 1.34,
+    "values": [
+     1.34,
+     1.15,
+     1.26,
+     1.25,
+     1.18
+    ]
+   },
+   "A.replays_share_pct": {
+    "n": 5,
+    "median": 58.94,
+    "min": 57.92,
+    "worst": 62.9,
+    "values": [
+     58.94,
+     62.9,
+     58.58,
+     60.2,
+     57.92
+    ]
+   },
+   "A.loadavg_1m_at_phase_start": {
+    "n": 25,
+    "median": 3.0,
+    "min": 2.21,
+    "worst": 3.47,
+    "values": [
+     2.23,
+     2.21,
+     2.21,
+     2.21,
+     2.21,
+     2.91,
+     2.91,
+     3.0,
+     3.0,
+     3.0,
+     3.0,
+     2.92,
+     2.92,
+     2.92,
+     2.92,
+     3.43,
+     3.43,
+     3.47,
+     3.47,
+     3.47,
+     3.44,
+     3.4,
+     3.4,
+     3.45,
+     3.45
+    ]
+   },
+   "A.peak_rss_mb": {
+    "n": 5,
+    "median": 283.4,
+    "min": 283.1,
+    "worst": 283.7,
+    "values": [
+     283.1,
+     283.5,
+     283.2,
+     283.7,
+     283.4
+    ]
+   },
+   "B.fit.import_numeric_ms": {
+    "n": 5,
+    "median": 82.5,
+    "min": 73.3,
+    "worst": 92.2,
+    "values": [
+     73.3,
+     92.2,
+     91.2,
+     82.5,
+     77.7
+    ]
+   },
+   "B.fit.hash_inputs_ms": {
+    "n": 5,
+    "median": 258.0,
+    "min": 235.3,
+    "worst": 270.4,
+    "values": [
+     235.3,
+     260.8,
+     270.4,
+     258.0,
+     251.6
+    ]
+   },
+   "B.fit.tokenizer_load_ms": {
+    "n": 5,
+    "median": 70.2,
+    "min": 66.3,
+    "worst": 77.3,
+    "values": [
+     70.2,
+     70.1,
+     66.3,
+     77.3,
+     73.1
+    ]
+   },
+   "B.fit.model_map_ms": {
+    "n": 5,
+    "median": 0.9,
+    "min": 0.9,
+    "worst": 1.0,
+    "values": [
+     0.9,
+     0.9,
+     0.9,
+     1.0,
+     0.9
+    ]
+   },
+   "B.fit.tokenize_ms": {
+    "n": 5,
+    "median": 2.3,
+    "min": 2.0,
+    "worst": 2.8,
+    "values": [
+     2.0,
+     2.3,
+     2.0,
+     2.8,
+     2.3
+    ]
+   },
+   "B.fit.frozen_forward_ms": {
+    "n": 5,
+    "median": 1447.1,
+    "min": 1407.2,
+    "worst": 1584.7,
+    "values": [
+     1407.2,
+     1584.7,
+     1474.7,
+     1447.1,
+     1417.2
+    ]
+   },
+   "B.fit.optimizer_steps_ms": {
+    "n": 5,
+    "median": 14.7,
+    "min": 13.6,
+    "worst": 18.3,
+    "values": [
+     14.7,
+     13.6,
+     18.3,
+     15.7,
+     14.5
+    ]
+   },
+   "B.fit.rehash_base_ms": {
+    "n": 5,
+    "median": 234.0,
+    "min": 229.6,
+    "worst": 242.6,
+    "values": [
+     230.2,
+     239.4,
+     242.6,
+     229.6,
+     234.0
+    ]
+   },
+   "B.fit.interpreter_start_ms": {
+    "n": 5,
+    "median": 19.2,
+    "min": 16.9,
+    "worst": 26.2,
+    "values": [
+     21.6,
+     26.2,
+     16.9,
+     19.2,
+     18.9
+    ]
+   },
+   "B.fit.module_load_ms": {
+    "n": 5,
+    "median": 22.6,
+    "min": 21.0,
+    "worst": 30.7,
+    "values": [
+     22.7,
+     30.7,
+     21.8,
+     22.6,
+     21.0
+    ]
+   },
+   "B.fit.wall_ms": {
+    "n": 5,
+    "median": 2180.7,
+    "min": 2102.2,
+    "worst": 2346.9,
+    "values": [
+     2102.2,
+     2346.9,
+     2232.6,
+     2180.7,
+     2135.5
+    ]
+   },
+   "B.fit.optimizer_steps_share_of_wall_pct": {
+    "n": 5,
+    "median": 0.7,
+    "min": 0.58,
+    "worst": 0.82,
+    "values": [
+     0.7,
+     0.58,
+     0.82,
+     0.72,
+     0.68
+    ]
+   },
+   "B.fit.forward_share_of_wall_pct": {
+    "n": 5,
+    "median": 66.36,
+    "min": 66.05,
+    "worst": 67.52,
+    "values": [
+     66.94,
+     67.52,
+     66.05,
+     66.36,
+     66.36
+    ]
+   },
+   "B.fit.hash_share_of_wall_pct": {
+    "n": 5,
+    "median": 22.36,
+    "min": 21.31,
+    "worst": 22.98,
+    "values": [
+     22.14,
+     21.31,
+     22.98,
+     22.36,
+     22.74
+    ]
+   },
+   "B.fit.padding_pct": {
+    "n": 5,
+    "median": 0.98,
+    "min": 0.98,
+    "worst": 0.98,
+    "values": [
+     0.98,
+     0.98,
+     0.98,
+     0.98,
+     0.98
+    ]
+   },
+   "B.fit.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "B.predict.import_numeric_ms": {
+    "n": 5,
+    "median": 83.5,
+    "min": 76.4,
+    "worst": 84.3,
+    "values": [
+     83.9,
+     83.5,
+     81.3,
+     76.4,
+     84.3
+    ]
+   },
+   "B.predict.hash_inputs_ms": {
+    "n": 5,
+    "median": 239.4,
+    "min": 235.1,
+    "worst": 259.0,
+    "values": [
+     259.0,
+     239.4,
+     235.1,
+     238.1,
+     253.4
+    ]
+   },
+   "B.predict.tokenizer_load_ms": {
+    "n": 5,
+    "median": 69.3,
+    "min": 65.2,
+    "worst": 75.3,
+    "values": [
+     75.3,
+     67.8,
+     69.3,
+     70.6,
+     65.2
+    ]
+   },
+   "B.predict.model_map_ms": {
+    "n": 5,
+    "median": 0.9,
+    "min": 0.9,
+    "worst": 1.4,
+    "values": [
+     0.9,
+     0.9,
+     0.9,
+     0.9,
+     1.4
+    ]
+   },
+   "B.predict.tokenize_ms": {
+    "n": 5,
+    "median": 1.8,
+    "min": 1.6,
+    "worst": 2.1,
+    "values": [
+     1.6,
+     1.8,
+     1.8,
+     2.0,
+     2.1
+    ]
+   },
+   "B.predict.frozen_forward_ms": {
+    "n": 5,
+    "median": 1002.1,
+    "min": 895.0,
+    "worst": 1025.7,
+    "values": [
+     1025.7,
+     922.2,
+     1002.1,
+     1005.3,
+     895.0
+    ]
+   },
+   "B.predict.score_ms": {
+    "n": 5,
+    "median": 0.5,
+    "min": 0.4,
+    "worst": 4.0,
+    "values": [
+     0.4,
+     0.6,
+     4.0,
+     0.5,
+     0.5
+    ]
+   },
+   "B.predict.rehash_base_ms": {
+    "n": 5,
+    "median": 233.4,
+    "min": 229.9,
+    "worst": 246.8,
+    "values": [
+     246.8,
+     233.4,
+     245.9,
+     229.9,
+     232.3
+    ]
+   },
+   "B.predict.interpreter_start_ms": {
+    "n": 5,
+    "median": 20.1,
+    "min": 16.0,
+    "worst": 23.5,
+    "values": [
+     18.2,
+     20.1,
+     16.0,
+     21.0,
+     23.5
+    ]
+   },
+   "B.predict.module_load_ms": {
+    "n": 5,
+    "median": 23.3,
+    "min": 20.6,
+    "worst": 26.6,
+    "values": [
+     23.3,
+     22.8,
+     20.6,
+     25.1,
+     26.6
+    ]
+   },
+   "B.predict.wall_ms": {
+    "n": 5,
+    "median": 1693.4,
+    "min": 1607.3,
+    "worst": 1762.6,
+    "values": [
+     1762.6,
+     1618.5,
+     1699.9,
+     1693.4,
+     1607.3
+    ]
+   },
+   "B.predict.score_share_of_wall_pct": {
+    "n": 5,
+    "median": 0.03,
+    "min": 0.02,
+    "worst": 0.24,
+    "values": [
+     0.02,
+     0.04,
+     0.24,
+     0.03,
+     0.03
+    ]
+   },
+   "B.predict.forward_share_of_wall_pct": {
+    "n": 5,
+    "median": 58.19,
+    "min": 55.68,
+    "worst": 59.37,
+    "values": [
+     58.19,
+     56.98,
+     58.95,
+     59.37,
+     55.68
+    ]
+   },
+   "B.predict.hash_share_of_wall_pct": {
+    "n": 5,
+    "median": 28.7,
+    "min": 27.64,
+    "worst": 30.22,
+    "values": [
+     28.7,
+     29.21,
+     28.3,
+     27.64,
+     30.22
+    ]
+   },
+   "B.predict.padding_pct": {
+    "n": 5,
+    "median": 1.93,
+    "min": 1.93,
+    "worst": 1.93,
+    "values": [
+     1.93,
+     1.93,
+     1.93,
+     1.93,
+     1.93
+    ]
+   },
+   "B.predict.resident_at_start": {
+    "n": 5,
+    "median": 0.0,
+    "min": 0.0,
+    "worst": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "C.import_service_ms": {
+    "n": 5,
+    "median": 29.0,
+    "min": 28.5,
+    "worst": 30.4,
+    "values": [
+     30.1,
+     30.4,
+     29.0,
+     28.5,
+     28.9
+    ]
+   },
+   "C.validate_ms": {
+    "n": 5,
+    "median": 2.5,
+    "min": 2.0,
+    "worst": 7.6,
+    "values": [
+     2.0,
+     2.5,
+     7.6,
+     2.3,
+     2.8
+    ]
+   },
+   "C.worker_subprocess_ms": {
+    "n": 5,
+    "median": 2166.4,
+    "min": 2132.5,
+    "worst": 2319.5,
+    "values": [
+     2166.4,
+     2158.8,
+     2233.7,
+     2319.5,
+     2132.5
+    ]
+   },
+   "C.publish_ms": {
+    "n": 5,
+    "median": 2.7,
+    "min": 1.6,
+    "worst": 3.8,
+    "values": [
+     2.7,
+     3.6,
+     3.8,
+     2.2,
+     1.6
+    ]
+   },
+   "C.worker_internal_elapsed_ms": {
+    "n": 5,
+    "median": 2029,
+    "min": 1993,
+    "worst": 2182,
+    "values": [
+     2023,
+     2029,
+     2091,
+     2182,
+     1993
+    ]
+   },
+   "C.wall_ms": {
+    "n": 5,
+    "median": 2245.3,
+    "min": 2206.2,
+    "worst": 2392.4,
+    "values": [
+     2245.3,
+     2239.5,
+     2309.5,
+     2392.4,
+     2206.2
+    ]
+   }
+  },
+  "warm": {
+   "A.prepare.wall_ms": {
+    "n": 5,
+    "median": 61.1,
+    "min": 58.9,
+    "worst": 71.1,
+    "values": [
+     58.9,
+     60.1,
+     65.4,
+     71.1,
+     61.1
+    ]
+   },
+   "A.prepare.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "A.fit.wall_ms": {
+    "n": 5,
+    "median": 2175.9,
+    "min": 2118.8,
+    "worst": 2340.7,
+    "values": [
+     2118.8,
+     2175.9,
+     2259.3,
+     2150.6,
+     2340.7
+    ]
+   },
+   "A.fit.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "A.replay-first.wall_ms": {
+    "n": 5,
+    "median": 1638.5,
+    "min": 1597.2,
+    "worst": 1679.5,
+    "values": [
+     1638.5,
+     1679.5,
+     1619.4,
+     1656.5,
+     1597.2
+    ]
+   },
+   "A.replay-first.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "A.replay-repeat.wall_ms": {
+    "n": 5,
+    "median": 1628.3,
+    "min": 1612.7,
+    "worst": 1656.4,
+    "values": [
+     1618.7,
+     1628.7,
+     1628.3,
+     1612.7,
+     1656.4
+    ]
+   },
+   "A.replay-repeat.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "A.verify.wall_ms": {
+    "n": 5,
+    "median": 60.4,
+    "min": 58.8,
+    "worst": 63.6,
+    "values": [
+     58.8,
+     59.5,
+     62.6,
+     63.6,
+     60.4
+    ]
+   },
+   "A.verify.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "A.fit.worker_elapsed_ms": {
+    "n": 5,
+    "median": 2004,
+    "min": 1942,
+    "worst": 2154,
+    "values": [
+     1942,
+     2004,
+     2063,
+     1980,
+     2154
+    ]
+   },
+   "A.replays_total_ms": {
+    "n": 5,
+    "median": 3257.2,
+    "min": 3247.7,
+    "worst": 3308.2,
+    "values": [
+     3257.2,
+     3308.2,
+     3247.7,
+     3269.2,
+     3253.6
+    ]
+   },
+   "A.end_to_end_ms": {
+    "n": 5,
+    "median": 5603.7,
+    "min": 5493.7,
+    "worst": 5715.8,
+    "values": [
+     5493.7,
+     5603.7,
+     5635.0,
+     5554.5,
+     5715.8
+    ]
+   },
+   "A.prepare_share_pct": {
+    "n": 5,
+    "median": 1.07,
+    "min": 1.07,
+    "worst": 1.28,
+    "values": [
+     1.07,
+     1.07,
+     1.16,
+     1.28,
+     1.07
+    ]
+   },
+   "A.fit_share_pct": {
+    "n": 5,
+    "median": 38.83,
+    "min": 38.57,
+    "worst": 40.95,
+    "values": [
+     38.57,
+     38.83,
+     40.09,
+     38.72,
+     40.95
+    ]
+   },
+   "A.verify_share_pct": {
+    "n": 5,
+    "median": 1.07,
+    "min": 1.06,
+    "worst": 1.15,
+    "values": [
+     1.07,
+     1.06,
+     1.11,
+     1.15,
+     1.06
+    ]
+   },
+   "A.replays_share_pct": {
+    "n": 5,
+    "median": 58.86,
+    "min": 56.92,
+    "worst": 59.29,
+    "values": [
+     59.29,
+     59.04,
+     57.63,
+     58.86,
+     56.92
+    ]
+   },
+   "A.loadavg_1m_at_phase_start": {
+    "n": 25,
+    "median": 3.1,
+    "min": 2.23,
+    "worst": 3.61,
+    "values": [
+     2.25,
+     2.25,
+     2.25,
+     2.23,
+     2.23,
+     2.45,
+     2.9,
+     2.9,
+     2.9,
+     2.9,
+     2.94,
+     2.94,
+     3.1,
+     3.1,
+     3.1,
+     3.26,
+     3.32,
+     3.32,
+     3.29,
+     3.29,
+     3.49,
+     3.61,
+     3.61,
+     3.61,
+     3.61
+    ]
+   },
+   "A.peak_rss_mb": {
+    "n": 5,
+    "median": 284.7,
+    "min": 284.7,
+    "worst": 284.8,
+    "values": [
+     284.7,
+     284.7,
+     284.8,
+     284.7,
+     284.7
+    ]
+   },
+   "B.fit.import_numeric_ms": {
+    "n": 5,
+    "median": 49.9,
+    "min": 48.1,
+    "worst": 53.0,
+    "values": [
+     49.9,
+     48.8,
+     53.0,
+     48.1,
+     50.7
+    ]
+   },
+   "B.fit.hash_inputs_ms": {
+    "n": 5,
+    "median": 235.3,
+    "min": 234.5,
+    "worst": 239.4,
+    "values": [
+     234.5,
+     235.3,
+     239.4,
+     235.0,
+     236.1
+    ]
+   },
+   "B.fit.tokenizer_load_ms": {
+    "n": 5,
+    "median": 64.0,
+    "min": 62.8,
+    "worst": 78.5,
+    "values": [
+     62.8,
+     78.5,
+     63.3,
+     68.1,
+     64.0
+    ]
+   },
+   "B.fit.model_map_ms": {
+    "n": 5,
+    "median": 0.7,
+    "min": 0.6,
+    "worst": 0.7,
+    "values": [
+     0.7,
+     0.7,
+     0.6,
+     0.7,
+     0.7
+    ]
+   },
+   "B.fit.tokenize_ms": {
+    "n": 5,
+    "median": 1.1,
+    "min": 1.0,
+    "worst": 1.1,
+    "values": [
+     1.1,
+     1.1,
+     1.1,
+     1.0,
+     1.1
+    ]
+   },
+   "B.fit.frozen_forward_ms": {
+    "n": 5,
+    "median": 1446.4,
+    "min": 1432.7,
+    "worst": 1591.5,
+    "values": [
+     1445.1,
+     1470.6,
+     1591.5,
+     1446.4,
+     1432.7
+    ]
+   },
+   "B.fit.optimizer_steps_ms": {
+    "n": 5,
+    "median": 10.2,
+    "min": 9.9,
+    "worst": 15.3,
+    "values": [
+     9.9,
+     10.2,
+     15.3,
+     10.0,
+     10.3
+    ]
+   },
+   "B.fit.rehash_base_ms": {
+    "n": 5,
+    "median": 231.6,
+    "min": 228.5,
+    "worst": 236.9,
+    "values": [
+     228.5,
+     231.6,
+     236.5,
+     231.6,
+     236.9
+    ]
+   },
+   "B.fit.interpreter_start_ms": {
+    "n": 5,
+    "median": 16.1,
+    "min": 15.6,
+    "worst": 16.6,
+    "values": [
+     16.1,
+     15.6,
+     16.6,
+     16.4,
+     16.0
+    ]
+   },
+   "B.fit.module_load_ms": {
+    "n": 5,
+    "median": 19.6,
+    "min": 19.0,
+    "worst": 20.4,
+    "values": [
+     19.0,
+     19.6,
+     20.4,
+     19.7,
+     19.1
+    ]
+   },
+   "B.fit.wall_ms": {
+    "n": 5,
+    "median": 2102.0,
+    "min": 2091.8,
+    "worst": 2264.3,
+    "values": [
+     2091.8,
+     2136.7,
+     2264.3,
+     2102.0,
+     2091.8
+    ]
+   },
+   "B.fit.optimizer_steps_share_of_wall_pct": {
+    "n": 5,
+    "median": 0.48,
+    "min": 0.47,
+    "worst": 0.68,
+    "values": [
+     0.47,
+     0.48,
+     0.68,
+     0.48,
+     0.49
+    ]
+   },
+   "B.fit.forward_share_of_wall_pct": {
+    "n": 5,
+    "median": 68.83,
+    "min": 68.49,
+    "worst": 70.29,
+    "values": [
+     69.08,
+     68.83,
+     70.29,
+     68.81,
+     68.49
+    ]
+   },
+   "B.fit.hash_share_of_wall_pct": {
+    "n": 5,
+    "median": 22.13,
+    "min": 21.02,
+    "worst": 22.61,
+    "values": [
+     22.13,
+     21.85,
+     21.02,
+     22.2,
+     22.61
+    ]
+   },
+   "B.fit.padding_pct": {
+    "n": 5,
+    "median": 0.98,
+    "min": 0.98,
+    "worst": 0.98,
+    "values": [
+     0.98,
+     0.98,
+     0.98,
+     0.98,
+     0.98
+    ]
+   },
+   "B.fit.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "B.predict.import_numeric_ms": {
+    "n": 5,
+    "median": 51.8,
+    "min": 50.6,
+    "worst": 78.0,
+    "values": [
+     50.6,
+     51.8,
+     52.6,
+     78.0,
+     50.7
+    ]
+   },
+   "B.predict.hash_inputs_ms": {
+    "n": 5,
+    "median": 245.0,
+    "min": 238.1,
+    "worst": 285.5,
+    "values": [
+     242.3,
+     238.1,
+     260.5,
+     285.5,
+     245.0
+    ]
+   },
+   "B.predict.tokenizer_load_ms": {
+    "n": 5,
+    "median": 65.9,
+    "min": 64.2,
+    "worst": 76.7,
+    "values": [
+     64.3,
+     65.9,
+     66.2,
+     76.7,
+     64.2
+    ]
+   },
+   "B.predict.model_map_ms": {
+    "n": 5,
+    "median": 0.7,
+    "min": 0.6,
+    "worst": 0.7,
+    "values": [
+     0.7,
+     0.7,
+     0.6,
+     0.6,
+     0.7
+    ]
+   },
+   "B.predict.tokenize_ms": {
+    "n": 5,
+    "median": 0.8,
+    "min": 0.8,
+    "worst": 1.5,
+    "values": [
+     0.8,
+     0.8,
+     0.8,
+     1.5,
+     0.8
+    ]
+   },
+   "B.predict.frozen_forward_ms": {
+    "n": 5,
+    "median": 956.3,
+    "min": 913.1,
+    "worst": 1040.9,
+    "values": [
+     925.6,
+     956.3,
+     994.4,
+     1040.9,
+     913.1
+    ]
+   },
+   "B.predict.score_ms": {
+    "n": 5,
+    "median": 0.2,
+    "min": 0.2,
+    "worst": 0.2,
+    "values": [
+     0.2,
+     0.2,
+     0.2,
+     0.2,
+     0.2
+    ]
+   },
+   "B.predict.rehash_base_ms": {
+    "n": 5,
+    "median": 238.1,
+    "min": 229.9,
+    "worst": 274.0,
+    "values": [
+     238.1,
+     232.2,
+     242.6,
+     274.0,
+     229.9
+    ]
+   },
+   "B.predict.interpreter_start_ms": {
+    "n": 5,
+    "median": 15.6,
+    "min": 15.1,
+    "worst": 18.9,
+    "values": [
+     15.4,
+     15.6,
+     15.1,
+     18.9,
+     15.7
+    ]
+   },
+   "B.predict.module_load_ms": {
+    "n": 5,
+    "median": 20.6,
+    "min": 19.9,
+    "worst": 25.4,
+    "values": [
+     19.9,
+     20.1,
+     24.7,
+     25.4,
+     20.6
+    ]
+   },
+   "B.predict.wall_ms": {
+    "n": 5,
+    "median": 1607.0,
+    "min": 1564.3,
+    "worst": 1829.8,
+    "values": [
+     1582.2,
+     1607.0,
+     1682.3,
+     1829.8,
+     1564.3
+    ]
+   },
+   "B.predict.score_share_of_wall_pct": {
+    "n": 5,
+    "median": 0.01,
+    "min": 0.01,
+    "worst": 0.01,
+    "values": [
+     0.01,
+     0.01,
+     0.01,
+     0.01,
+     0.01
+    ]
+   },
+   "B.predict.forward_share_of_wall_pct": {
+    "n": 5,
+    "median": 58.5,
+    "min": 56.89,
+    "worst": 59.51,
+    "values": [
+     58.5,
+     59.51,
+     59.11,
+     56.89,
+     58.37
+    ]
+   },
+   "B.predict.hash_share_of_wall_pct": {
+    "n": 5,
+    "median": 30.36,
+    "min": 29.27,
+    "worst": 30.58,
+    "values": [
+     30.36,
+     29.27,
+     29.91,
+     30.58,
+     30.36
+    ]
+   },
+   "B.predict.padding_pct": {
+    "n": 5,
+    "median": 1.93,
+    "min": 1.93,
+    "worst": 1.93,
+    "values": [
+     1.93,
+     1.93,
+     1.93,
+     1.93,
+     1.93
+    ]
+   },
+   "B.predict.resident_at_start": {
+    "n": 5,
+    "median": 1.0,
+    "min": 1.0,
+    "worst": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "C.import_service_ms": {
+    "n": 5,
+    "median": 25.8,
+    "min": 24.0,
+    "worst": 27.2,
+    "values": [
+     24.0,
+     26.7,
+     27.2,
+     25.8,
+     24.9
+    ]
+   },
+   "C.validate_ms": {
+    "n": 5,
+    "median": 1.6,
+    "min": 1.5,
+    "worst": 2.5,
+    "values": [
+     1.5,
+     1.5,
+     1.6,
+     1.7,
+     2.5
+    ]
+   },
+   "C.worker_subprocess_ms": {
+    "n": 5,
+    "median": 2122.1,
+    "min": 2028.9,
+    "worst": 2323.4,
+    "values": [
+     2122.1,
+     2071.1,
+     2323.4,
+     2028.9,
+     2302.2
+    ]
+   },
+   "C.publish_ms": {
+    "n": 5,
+    "median": 3.9,
+    "min": 1.9,
+    "worst": 9.4,
+    "values": [
+     3.9,
+     1.9,
+     7.9,
+     1.9,
+     9.4
+    ]
+   },
+   "C.worker_internal_elapsed_ms": {
+    "n": 5,
+    "median": 2009,
+    "min": 1923,
+    "worst": 2200,
+    "values": [
+     2009,
+     1965,
+     2200,
+     1923,
+     2185
+    ]
+   },
+   "C.wall_ms": {
+    "n": 5,
+    "median": 2190.7,
+    "min": 2098.8,
+    "worst": 2398.1,
+    "values": [
+     2190.7,
+     2137.8,
+     2398.1,
+     2098.8,
+     2381.9
+    ]
+   }
+  }
+ },
+ "verdicts": [
+  "{\"protected_count\": 5, \"automatic\": 5, \"wrong_automatic\": 0, \"observed_operating_point\": \"met\", \"real_customer_acceptances\": 0, \"incremental_compute_cost_cents\": 0}"
+ ],
+ "artifact_sha256": [
+  "a5367d973f4de563973817de0d5734da1d2de95b9521e3762fdc2545bec7a3ab"
+ ],
+ "replay_output_sha256": [
+  "80a9f8958d54714fdc4478306e92fb464625f46517cd8e7273e077904fb09f3d"
+ ],
+ "token_lengths_fit": [
+  51,
+  50,
+  51,
+  51,
+  50,
+  51,
+  50,
+  50
+ ],
+ "useful_padded_fit": [
+  404,
+  408
+ ],
+ "runtime": {
+  "python": "3.12.16",
+  "numpy": "2.5.5",
+  "tokenizers": "0.21.4"
+ },
+ "token_lengths_predict": [
+  52,
+  51,
+  50,
+  50,
+  51
+ ],
+ "useful_padded_predict": [
+  254,
+  259
+ ],
+ "batch_probe": {
+  "run_id": "8910bd724775-warm-D_batch_probe",
+  "incumbent_batches": [
+   4,
+   4
+  ],
+  "merged_batches": [
+   8
+  ],
+  "max_abs_hidden_diff": 0.0,
+  "incumbent_ms": {
+   "n": 20,
+   "median": 1588.9,
+   "min": 1394.9,
+   "worst": 2143.1,
+   "values": [
+    1460.8,
+    1394.9,
+    1577.6,
+    1553.8,
+    1442.9,
+    1538.3,
+    1532.9,
+    1942.7,
+    1963.0,
+    2143.1,
+    1814.9,
+    1696.5,
+    2121.5,
+    1655.2,
+    1921.4,
+    1600.2,
+    1504.3,
+    1544.7,
+    1509.9,
+    1601.1
+   ]
+  },
+  "merged_ms": {
+   "n": 20,
+   "median": 1525.8,
+   "min": 1309.3,
+   "worst": 1689.6,
+   "values": [
+    1408.5,
+    1309.3,
+    1355.8,
+    1458.4,
+    1319.7,
+    1655.7,
+    1461.4,
+    1611.1,
+    1689.6,
+    1617.7,
+    1598.9,
+    1655.0,
+    1574.5,
+    1589.8,
+    1552.2,
+    1444.2,
+    1404.1,
+    1499.5,
+    1455.7,
+    1636.1
+   ]
+  },
+  "saving_ms": {
+   "n": 20,
+   "median": 97.8,
+   "min": -117.4,
+   "worst": 547.0,
+   "values": [
+    52.3,
+    85.6,
+    221.8,
+    95.4,
+    123.2,
+    -117.4,
+    71.5,
+    331.6,
+    273.4,
+    525.4,
+    216.0,
+    41.5,
+    547.0,
+    65.4,
+    369.2,
+    156.0,
+    100.2,
+    45.2,
+    54.2,
+    -35.0
+   ]
+  }
+ },
+ "opportunity_bound": {
+  "cold": {
+   "removable_ms": 114.3,
+   "fit_wall_ms_median": 2245.1,
+   "share_of_fit_wall_pct": 5.09
+  },
+  "warm": {
+   "removable_ms": 113.1,
+   "fit_wall_ms_median": 2175.9,
+   "share_of_fit_wall_pct": 5.2
+  }
+ }
+}
