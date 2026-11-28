@@ -166,7 +166,9 @@ owns differencing control across released cells.
 | `group_crosses_split` | verified, excluded by the partitioner | eligible |
 | `development_label_after_split` | verified, excluded by the partitioner | eligible |
 | `decision_absent` | current-eligibility retraction | eligible |
+| `label_superseded` | current-eligibility retraction (another correction now chosen) | eligible |
 | `settings_missing` | hold | none (hold) |
+| `source_revision_regressed` | hold | none (hold) |
 | `source_unbound` | hold | none (hold) |
 | `foreign_tenant_capture` | hold | none (hold) |
 | `capture_after_as_of` | hold | none (hold) |
@@ -209,7 +211,22 @@ owns differencing control across released cells.
   come from the recomputed manifest.
 - **Seed roots.** `to_seed_roots` takes no parents and no key from its caller: it recomputes
   the current parents from the worker store, reads the settings revision they name from the
-  pinned store and uses the producer's own label key.
+  pinned store and uses the producer's own label key. The case, prediction and source revision
+  come from the snapshot: the pair's case must equal the case the snapshot stored
+  (`seed_case_changed`), its prediction must match the snapshot's keyed `prediction_digest`
+  (`seed_prediction_changed`; the prediction is kept like a label, as an HMAC), and its capture
+  revision must equal the snapshot's (`seed_source_revision_changed`). The split seal groups by
+  the snapshot's cases and root families, so the pair cannot regroup it.
+- **Superseded labels.** Current eligibility retracts an as-of eligible example whose current
+  chosen correction (version or label digest) differs from the as-of one, as
+  `label_superseded`, even though the example is eligible again. A reopen or withdrawal
+  followed by a new final therefore never trains on the old label.
+- **Source revisions only move forward.** The producer keeps a per-source high-water mark of
+  the capture revisions it has accepted. A trigger or current-eligibility read whose capture is
+  older is held as `source_revision_regressed`, so a stale reader cannot undo a later
+  retraction.
+- **Retractions stick.** `training_parents` unions the retractions of every parents manifest it
+  stored for the snapshot, so once an example is retracted no later read re-admits it.
 - **Seal scope.** The seal covers `dataset_preparation` records only, so an evaluation or
   other record made after sealing never conflicts with it. Dataset records and sealing share
   one lock.
@@ -221,3 +238,7 @@ owns differencing control across released cells.
   snapshot. This assumes every writer goes through `SettingsBatchStore`.
 - **Mandate disclosure.** The standing mandate does not define which counters a receipt may
   disclose, so the settings batch carries `receipt_counters`.
+- **Left documented.** A revision forged on disk that names an older binding revision under
+  which its actor was bound passes the committer check (filesystem-writer class, like the other
+  pin forgeries). Withheld cells still show which reason codes are non-zero (attribute-level
+  disclosure). Differencing across receipts is OPE-526's.

@@ -51,6 +51,7 @@ from opentour_cell.pilot.candidate_snapshot import (
     PairReader,
     SnapshotProducer,
     label_digest,
+    prediction_digest,
 )
 from opentour_cell.pilot.learning_profile import (
     EVIDENCE_TIER,
@@ -501,7 +502,10 @@ class DependencyRecorder:
         Counts are published before any generation and come from these real parents alone, so
         unioning synthetic descendants (``union_synthetic``) cannot change them. A reopened or
         withdrawn correction is excluded from future training here even though the as-of
-        snapshot still shows what the reviewer inspected.
+        snapshot still shows what the reviewer inspected, and so is an example whose current
+        chosen correction differs from the as-of one (``label_superseded``). A retraction
+        recorded in any manifest this worker stored for the snapshot sticks: a later read
+        cannot re-admit the example.
         """
         identity = self.store_identity(tenant, workflow_ref)
         sealed = self.seal(tenant, workflow_ref, snapshot_digest)
@@ -516,7 +520,15 @@ class DependencyRecorder:
         need(current["settings_store"] == identity, "settings_store_mismatch")
         snapshot = self.producer.snapshot(tenant, workflow_ref, snapshot_digest)
         by_ref = {e["example_ref"]: e for e in snapshot["examples"]}
-        now = set(current["eligible"])
+        retracted: dict[str, Any] = {}
+        for item in current["retracted"]:
+            retracted.setdefault(item["example_ref"], item)
+        for stored in self._stored_manifests(tenant, workflow_ref, snapshot_digest):
+            for item in stored["retracted"]:
+                retracted.setdefault(item["example_ref"], item)
+        now = set(current["eligible"]) - set(retracted)
+        proposals = self.proposals(tenant, workflow_ref, snapshot_digest)
+        stale = sorted(p for p, used in proposals.items() if set(used) & set(retracted))
         held = set(sealed["held_root_families"])
         parents = []
         for entry in sealed["forward"]:
@@ -548,8 +560,8 @@ class DependencyRecorder:
                 "independent_root_families": len({p["root_family"] for p in parents}),
                 "verified_observed": current["counters"]["live"]["verified"],
             },
-            "retracted": current["retracted"],
-            "stale_proposals": current["stale_proposals"],
+            "retracted": [retracted[r] for r in sorted(retracted)],
+            "stale_proposals": [{"proposal_ref": p, "basis": "caller_asserted"} for p in stale],
             "holds": sealed["holds"],
             "evidence_tier": EVIDENCE_TIER,
         }
@@ -563,6 +575,21 @@ class DependencyRecorder:
             "parents_manifest_conflict",
         )
         return manifest
+
+    def _stored_manifests(
+        self, tenant: str, workflow_ref: str, snapshot_digest: str
+    ) -> list[dict[str, Any]]:
+        """Every training-parent manifest this worker stored for one snapshot, re-verified."""
+        folder = self._folder(tenant, workflow_ref, "parents")
+        found = []
+        for path in sorted(folder.glob("parents-*.json")) if folder.is_dir() else []:
+            claimed = read_pinned(folder, path.stem, "parents_manifest_tampered")
+            need(isinstance(claimed, dict), "parents_manifest_tampered")
+            stored = self.parents_manifest(tenant, workflow_ref, claimed.get("manifest_digest"))
+            need(path.stem == _parents_name(stored["manifest_digest"]), "parents_manifest_tampered")
+            if stored["snapshot_digest"] == snapshot_digest:
+                found.append(stored)
+        return found
 
     def parents_manifest(self, tenant: str, workflow_ref: str, manifest_digest: str) -> Any:
         """A training-parent manifest this worker produced, re-verified from its own store."""
@@ -651,6 +678,9 @@ def union_synthetic(
     )
     admitted, rejected = [], []
     for child in children:
+        if not isinstance(child, Mapping):
+            rejected.append({"child_ref": None, "reason": "malformed_child"})
+            continue
         child_ref, root = child.get("child_ref"), child.get("root_ref")
         if type(child_ref) is not str or type(root) is not str:
             rejected.append({"child_ref": None, "reason": "malformed_child"})
@@ -849,6 +879,9 @@ def to_seed_roots(
     assert held is not None
     settings: PilotSettings = held
     label_key = recorder.producer.label_key(tenant, workflow_ref)
+    snapshot = recorder.producer.snapshot(tenant, workflow_ref, snapshot_digest)
+    examples = {e["example_ref"]: e for e in snapshot["examples"]}
+    revisions = {s["source_ref"]: s["source_revision"] for s in snapshot["sources"]}
     captures = pair.by_ref()
     wanted = {p["example_ref"]: p for p in parents["parents"]}
     roots = []
@@ -879,17 +912,37 @@ def to_seed_roots(
                 label_digest(label_key, settings.tenant, ex, target) == parent["label_digest"],
                 "seed_label_changed",
             )
+            # Case, prediction and source revision come from the worker's snapshot, never the
+            # pair: the pair's values must equal what the snapshot recorded at capture.
+            example = examples[ex]
+            need(
+                type(mapped["case"]) is str and mapped["case"] == example["case"],
+                "seed_case_changed",
+            )
+            prediction = mapped["prediction"]
+            need(
+                type(prediction) is str
+                and prediction_digest(label_key, settings.tenant, ex, prediction)
+                == example["prediction_digest"],
+                "seed_prediction_changed",
+            )
+            revision = revisions[source.source_ref]
+            need(
+                type(captures[source.source_ref].source_revision) is int
+                and captures[source.source_ref].source_revision == revision,
+                "seed_source_revision_changed",
+            )
             roots.append(
                 SeedRoot(
                     root_ref=ex,
-                    case_ref=mapped["case"],
+                    case_ref=example["case"],
                     label_ref="lbl-" + parent["label_digest"][:32],
                     family_id=parent["root_family"],
                     split="training",
                     policy_revision=settings.policy_revision,
-                    source_revision=str(captures[source.source_ref].source_revision),
+                    source_revision=str(revision),
                     fields=fields,
-                    prediction=mapped["prediction"],
+                    prediction=prediction,
                     target=target,
                     target_verified=True,
                     target_verifier_ref=parent["verifier"],

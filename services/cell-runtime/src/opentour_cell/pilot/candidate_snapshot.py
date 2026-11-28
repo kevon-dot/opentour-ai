@@ -72,6 +72,7 @@ from opentour_cell.pilot.learning_profile import (
     Source,
     SourceCapture,
     SourcePair,
+    _numbered,
     count,
     format_time,
     local_key,
@@ -132,11 +133,13 @@ STATE_REASONS = frozenset(
         "group_crosses_split",
         "development_label_after_split",
         "decision_absent",
+        "label_superseded",
     }
 )
 HOLD_REASONS = frozenset(
     {
         "settings_missing",
+        "source_revision_regressed",
         "source_unbound",
         "foreign_tenant_capture",
         "capture_after_as_of",
@@ -163,6 +166,7 @@ _ELIGIBILITY_REASONS = frozenset(
         "group_crosses_split",
         "development_label_after_split",
         "decision_absent",
+        "label_superseded",
     }
 )
 _DISPUTED_REASONS = frozenset(
@@ -217,8 +221,17 @@ def example_ref(tenant: str, workflow_ref: str, source_ref: str, decision_id: st
 
 def label_digest(key: bytes, tenant: str, example: str, value: str) -> str:
     """HMAC-SHA256 under the producer's private key (``locally_keyed``, not a signature)."""
+    return _keyed(key, "opentour.pilot.label.v2", tenant, example, value)
+
+
+def prediction_digest(key: bytes, tenant: str, example: str, value: str) -> str:
+    """The decision's prediction, kept like a label: an HMAC, never the value itself."""
+    return _keyed(key, "opentour.pilot.prediction.v1", tenant, example, value)
+
+
+def _keyed(key: bytes, domain: str, tenant: str, example: str, value: str) -> str:
     need(type(key) is bytes and len(key) == 32, "label_key_missing")
-    message = canonical(["opentour.pilot.label.v2", tenant, example, value]).encode()
+    message = canonical([domain, tenant, example, value]).encode()
     return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
@@ -523,6 +536,9 @@ def reduce_pair(
             "automatic": decision.prediction not in settings.abstain_values,
             "inputs": inputs,
             "inputs_digest": digest(["opentour.pilot.inputs.v1", ex, dict(decision.features)]),
+            "prediction_digest": prediction_digest(
+                label_key, settings.tenant, ex, decision.prediction
+            ),
             "state": state,
             "reason": reason,
             "partition": None,
@@ -983,6 +999,8 @@ class SnapshotProducer:
                 return held("label_key_unusable")
             raise
         pair = read_pair(before)
+        if self._regressed(tenant, workflow_ref, pair):
+            return held("source_revision_regressed")
         after = self.settings.current(tenant, workflow_ref)
         previous = self.snapshots(tenant, workflow_ref)
         if after is None or after.digest != before.digest:
@@ -1011,6 +1029,7 @@ class SnapshotProducer:
             body = reduce_pair(before, pair, self._now(), label_key=key)
         except SnapshotHold as hold:
             return held(hold.reason)
+        self._advance(tenant, workflow_ref, pair)
         sequence = len(previous) + 1
         body["sequence"] = sequence
         body["intent"] = intent
@@ -1032,6 +1051,32 @@ class SnapshotProducer:
             except ProfileError:
                 return held("snapshot_commit_conflict")
         return receipt(body)
+
+    def _revisions(self, tenant: str, workflow_ref: str, source_ref: str) -> list[int]:
+        return _numbered(
+            self._folder(tenant, workflow_ref, "source-revisions") / source_ref, "rev-"
+        )
+
+    def _regressed(self, tenant: str, workflow_ref: str, pair: SourcePair) -> bool:
+        """True when a capture is older than the newest revision this worker has accepted for
+        that source: a stale reader cannot undo a later retraction."""
+        for cap in _well_formed(pair):
+            seen = self._revisions(tenant, workflow_ref, cap.source_ref)
+            if seen and cap.source_revision < seen[-1]:
+                return True
+        return False
+
+    def _advance(self, tenant: str, workflow_ref: str, pair: SourcePair) -> None:
+        """Record each accepted capture's source revision as the high-water mark."""
+        for cap in _well_formed(pair):
+            seen = self._revisions(tenant, workflow_ref, cap.source_ref)
+            if not seen or cap.source_revision > seen[-1]:
+                write_pinned(
+                    self._folder(tenant, workflow_ref, "source-revisions") / cap.source_ref,
+                    f"rev-{cap.source_revision:08d}",
+                    {"source_ref": cap.source_ref, "source_revision": cap.source_revision},
+                    "source_revision_conflict",
+                )
 
     @staticmethod
     def _rolled_back(previous: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1062,10 +1107,18 @@ class SnapshotProducer:
             "settings_store_mismatch",
         )
         key = self.label_key(tenant, workflow_ref)
+        pair = read_pair(settings)
+        if self._regressed(tenant, workflow_ref, pair):
+            return {
+                "schema": CURRENT_SCHEMA,
+                "state": "held",
+                "reason": "source_revision_regressed",
+            }
         try:
-            now = reduce_pair(settings, read_pair(settings), self._now(), label_key=key)
+            now = reduce_pair(settings, pair, self._now(), label_key=key)
         except SnapshotHold as hold:
             return {"schema": CURRENT_SCHEMA, "state": "held", "reason": hold.reason}
+        self._advance(tenant, workflow_ref, pair)
         current = {e["example_ref"]: e for e in now["examples"]}
         retracted = []
         for example in as_of["examples"]:
@@ -1073,12 +1126,14 @@ class SnapshotProducer:
                 continue
             later = current.get(example["example_ref"])
             if later is None or not later["eligible"]:
-                retracted.append(
-                    {
-                        "example_ref": example["example_ref"],
-                        "reason": "decision_absent" if later is None else later["reason"],
-                    }
-                )
+                reason = "decision_absent" if later is None else later["reason"]
+            elif _chosen(later) != _chosen(example):
+                # Still eligible, but on another correction (a reopen or withdrawal followed by
+                # a new final): the label the as-of snapshot admitted no longer stands.
+                reason = "label_superseded"
+            else:
+                continue
+            retracted.append({"example_ref": example["example_ref"], "reason": reason})
         gone = {r["example_ref"] for r in retracted}
         stale = sorted(p for p, used in (proposals or {}).items() if set(used) & gone)
         return {
@@ -1095,3 +1150,19 @@ class SnapshotProducer:
             "metrics": now["metrics"],
             "reason_codes": now["reason_codes"],
         }
+
+
+def _chosen(example: Mapping[str, Any]) -> tuple[Any, Any]:
+    correction = example.get("correction") or {}
+    return correction.get("version"), correction.get("label_digest")
+
+
+def _well_formed(pair: SourcePair) -> list[SourceCapture]:
+    return [
+        cap
+        for cap in pair.captures
+        if type(cap.source_ref) is str
+        and _TRIGGER.fullmatch(cap.source_ref)
+        and type(cap.source_revision) is int
+        and 0 <= cap.source_revision < 10**8
+    ]
