@@ -2335,7 +2335,8 @@ def test_refused_calls_leave_the_clock_mark_unchanged(tmp_path: Path) -> None:
     led.reserve("generated-budget", a0, verified_by=sc, now=TV_NOW)
     before = clock_mark(db_path)
     assert before == [(TV_GRANT.grant_ref, TV_NOW, sa._clock_digest(TV_GRANT.grant_ref, TV_NOW))]
-    later = TV_NOW + 200  # within tolerance, so it would move the mark if it were stored
+    later = TV_NOW + 200
+    WORKER_NOW["t"] = later  # the worker clock advances: a persisted refusal would move the mark
     forged = replace(TV_GRANT, budget=10**9)
     assert code_of(grant_budget, led, path, "generated-budget-2", grant=forged, now=later) == (
         "grant_conflict"
@@ -2479,3 +2480,93 @@ def test_non_integer_clock_with_recomputed_digest_is_refused(tmp_path: Path) -> 
     assert code_of(AllocationLedger(db_path).status, "generated-budget") == (
         "ledger_integrity_failed"
     )
+
+
+# V* (delta review of 2d513d3, same reviewer).
+# V1 / N1: the mark stores only the worker clock, so a caller's lead cannot trip a step-back.
+def test_n1_caller_lead_does_not_eat_the_step_back_tolerance(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0")
+    db_path = tmp_path / "alloc.db"
+    led = AllocationLedger(db_path)
+    grant_budget(led, path, now=TV_NOW + sa.CLOCK_TOLERANCE)  # the first mark write has a lead
+    assert clock_mark(db_path)[0][1] == TV_NOW
+    sc = scope(path, seal)
+    led.reserve(
+        "generated-budget",
+        allocate([family("a0")], policy(), verified_by=sc),
+        verified_by=sc,
+        now=TV_NOW + sa.CLOCK_TOLERANCE,  # 400: the caller is 300 s ahead
+    )
+    assert clock_mark(db_path)[0][1] == TV_NOW  # only the worker's 100 is stored
+    WORKER_NOW["t"] = TV_NOW - 1  # a 1 s step back
+    b0 = allocate([family("b0")], policy(), verified_by=sc)
+    assert led.reserve("generated-budget", b0, verified_by=sc, now=TV_NOW - 1)["used_units"] == 2
+
+
+# V2 (mutant N02): the skew boundary is inclusive at +300 s and refused at +301 s.
+def test_caller_skew_boundary(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0")
+    led = AllocationLedger()
+    grant_budget(led, path)
+    sc = scope(path, seal)
+    plan = allocate([family("a0")], policy(), verified_by=sc)
+    limit = TV_NOW + sa.CLOCK_TOLERANCE
+    assert code_of(led.reserve, "generated-budget", plan, verified_by=sc, now=limit + 1) == (
+        "clock_skew_refused"
+    )
+    assert led.reserve("generated-budget", plan, verified_by=sc, now=limit)["used_units"] == 1
+    # A planning budget ignores ``now`` but still refuses one too far ahead (fails closed).
+    led.open_budget("generated-plain", cap_units=1, cap_spend=1, unit_cost=1)
+    plain = allocate([family("p0")], policy())
+    assert code_of(led.reserve, "generated-plain", plain, now=limit + 1) == "clock_skew_refused"
+    assert led.reserve("generated-plain", plain, now=limit)["used_units"] == 1
+
+
+# V3 (mutants N07, N09): a step back within tolerance is allowed; the mark never decreases;
+# a regression heals by itself while release and status keep working.
+def test_step_back_tolerance_and_mark_never_decreases(tmp_path: Path) -> None:
+    path, seal = world(tmp_path, "a0", "b0", "c0")
+    db_path = tmp_path / "alloc.db"
+    led = AllocationLedger(db_path)
+    WORKER_NOW["t"] = 500
+    grant_budget(led, path, now=500)
+    assert clock_mark(db_path)[0][1] == 500
+    sc = scope(path, seal)
+    WORKER_NOW["t"] = 200  # exactly 300 s back: allowed
+    a0 = allocate([family("a0")], policy(), verified_by=sc)
+    assert led.reserve("generated-budget", a0, verified_by=sc, now=200)["used_units"] == 1
+    assert clock_mark(db_path)[0][1] == 500  # never decreases
+    WORKER_NOW["t"] = 199  # 301 s back: refused
+    b0 = allocate([family("b0")], policy(), verified_by=sc)
+    assert code_of(led.reserve, "generated-budget", b0, verified_by=sc, now=199) == (
+        "clock_regressed"
+    )
+    assert code_of(led.commit, "generated-budget", a0.allocation_id, now=199) == "clock_regressed"
+    assert led.status("generated-budget")["used_units"] == 1  # status keeps working
+    assert led.release("generated-budget", a0.allocation_id)["used_units"] == 0
+    WORKER_NOW["t"] = 600  # the worker clock catches up: it heals by itself
+    assert led.reserve("generated-budget", b0, verified_by=sc, now=600)["used_units"] == 1
+    assert clock_mark(db_path)[0][1] == 600
+
+
+# V4 (mutant N15): a dearer child never makes a line count negative against other lines.
+def test_dearer_child_does_not_undercount_other_lines(tmp_path: Path) -> None:
+    path, seal = ten_families(tmp_path)
+    led = AllocationLedger()
+    grant_budget(led, path, cap_spend=1)
+    grant_budget(led, path, "generated-budget-2", cap_spend=4)
+    sc = scope(path, seal)
+    one = allocate(
+        [family("a0", recipes=FULFIL)], policy(total_units=1, spend_ceiling=1), verified_by=sc
+    )
+    led.reserve("generated-budget", one, verified_by=sc, now=TV_NOW)
+    led.commit("generated-budget", one.allocation_id, now=TV_NOW)
+    four = allocate(
+        [family(f"a{i}", recipes=FULFIL) for i in range(1, 5)],
+        policy(total_units=4, spend_ceiling=4),
+        verified_by=sc,
+    )
+    led.reserve("generated-budget-2", four, verified_by=sc, now=TV_NOW)
+    tv_spend(path, "a0", seal, 5, "dear")  # charged 5 for a line of cost 1
+    # 10 - 5 spent - (0 for a0, floored) - 4 reserved = 1 (without the floor it would be 5).
+    assert grant_budget(led, path, "generated-budget-3")["cap_spend"] == 1

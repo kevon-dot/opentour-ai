@@ -96,15 +96,22 @@ OPE-516 link (read-only import of ``training_variants``; nothing here writes OPE
   other (``grant_conflict``); it cannot verify the first one. That pin is per allocation-ledger
   file, so a new file accepts any first grant (an inflated budget, a new ``grant_ref``): hence
   the ``_unverified`` labels above.
-* Time authority (as OPE-544): grant expiry is judged on ``max(_worker_now(), caller now)``.
+* Time authority, following the PR #224 pattern (the OPE-544 worker-clock follow-up, not yet
+  merged): grant expiry is judged on ``max(_worker_now(), caller now)``. (OPE-544's
+  ``consumption_lineage`` on main still compares a caller ``now`` with ``expires_at`` directly.)
   ``_worker_now`` is the worker's own clock in integer Unix seconds, the unit
   ``LearningMandates`` uses for ``expires_at``. OPE-516 defines no unit; if ``expires_at`` were in
   milliseconds the check would fail open, so the assumption is load-bearing. A caller ``now``
   more than ``CLOCK_TOLERANCE`` (300 s) ahead of the worker clock is refused
   (``clock_skew_refused``) and never stored, so a caller can neither extend a grant nor end it
-  early by more than that. A per-grant high-water mark (digest-covered, one row per pinned
-  grant) is written only inside an operation that succeeds, so a refused open, reserve or
-  commit never moves it; it detects a worker clock that stepped back (``clock_regressed``).
+  early by more than that; a planning budget's reserve refuses such a ``now`` too, although it
+  ignores it (fails closed). A per-grant high-water mark (digest-covered, one row per pinned
+  grant) holds the highest *worker* time seen, never a caller time, and never decreases. It is
+  written only inside an operation that succeeds, so a refused open, reserve or commit never
+  moves it. A worker clock more than 300 s behind it is ``clock_regressed``: every clocked
+  operation on that grant (open, reserve, commit) is refused until the worker clock catches up,
+  which heals by itself; ``release``, ``status``, ``live_lines`` and ``retract_family`` keep
+  working meanwhile.
 * A committed line whose generated child OPE-516 has charged is not counted again, up to the
   charged cost: children for the same ``(grant_ref, root_ref, recipe_id)`` that did not exist at
   its commit reduce its counted cost by what they were charged, never below zero. Children do
@@ -123,14 +130,17 @@ OPE-516 link (read-only import of ``training_variants``; nothing here writes OPE
   not consumed. Nothing here depends on ``LearningMandates`` reservation lifecycle state or on a
   reservation's residual family set (neither is readable; #225 gaps G1/G2).
 
-Integrity limits (no key custody exists). Plan ids, budget and grant row digests and the cohort
-digest are plain SHA-256 over content: self-consistent only, unsigned. A process running as the
-same uid can edit either sqlite file and recompute them. What is detected: a one-column edit
-(caps, unit cost, ``grant_ref``), downgrading a grant-bound budget to a planning budget,
-schema drift (exact column sets), a forged seal or cohort whose digest does not recompute, and a
-hand-built cohort with nothing held out. Caps of a grant-bound budget are re-checked against the
-pinned grant and live OPE-516 spend at every reserve, so a recomputed cap edit still cannot
-exceed the grant's headroom; the pinned grant itself lives in this file.
+Integrity limits (no key custody exists). Plan ids, the budget, grant-pin and ``grant_clock``
+row digests and the cohort digest are plain, unkeyed SHA-256 over content: self-consistent only,
+unsigned. A process running as the same uid can edit either sqlite file and recompute them. For
+the clock row that means a recomputed reset to 0 is accepted (it only drops step-back
+detection), and a recomputed huge value makes every clocked operation ``clock_regressed``, so a
+file writer can block the grant with it (fail closed, never an extension). What is detected: a
+one-column edit (caps, unit cost, ``grant_ref``), downgrading a grant-bound budget to a planning
+budget, schema drift (exact column sets), a forged seal or cohort whose digest does not
+recompute, and a hand-built cohort with nothing held out. Caps of a grant-bound budget are
+re-checked against the pinned grant and live OPE-516 spend at every reserve, so a recomputed cap
+edit still cannot exceed the grant's headroom; the pinned grant itself lives in this file.
 
 Simulated, not proven: every family, verification, cost and yield value is a generated
 sentinel input supplied by the caller. Tests prove software behavior only. Nothing here is
@@ -1463,7 +1473,10 @@ def _check_caller_now(now: object) -> int:
     """The caller's time is an int within ``CLOCK_TOLERANCE`` of the worker clock, or refused.
 
     A caller time only ever narrows the window, so a far-future value adds nothing and is
-    refused (``clock_skew_refused``) before anything is read or stored.
+    refused (``clock_skew_refused``) before anything is stored. Reserve and commit check it
+    before opening a transaction; the open path checks it after reading the OPE-516 ledger
+    identity, but before the grant pin or any budget row is touched. A planning budget's reserve
+    ignores ``now`` yet still refuses one that is too far ahead: this fails closed.
     """
     if not _int64(now):
         raise AllocationError("grant_link_invalid", "now")
@@ -1477,7 +1490,8 @@ def _worker_now() -> int:
     """The worker's own clock, in integer Unix seconds: the authority on grant expiry.
 
     Deliberately not a parameter of any entry point, so no caller can supply or replace it.
-    Tests pin it by patching this module attribute (a test-only seam, as in OPE-544).
+    Tests pin it by patching this module attribute: a test-only seam, following the PR #224
+    pattern (the OPE-544 worker-clock follow-up, not yet merged).
     OPE-516's ``Grant.expires_at`` is an unspecified int; Unix seconds is the unit the repo's
     ``LearningMandates`` uses for ``expires_at``, and is assumed here. The assumption matters:
     an ``expires_at`` in milliseconds would look ~1000x later and expiry would fail open.
@@ -1924,23 +1938,29 @@ class AllocationLedger:
         )
 
     def _clock(self, db: sqlite3.Connection, grant_ref: str, caller_now: int) -> int:
-        """Time used for expiry: ``max(_worker_now(), caller_now)``, as in OPE-544.
+        """Time used for expiry: ``max(_worker_now(), caller_now)`` (the PR #224 pattern).
+
+        PR #224 is the OPE-544 worker-clock follow-up, not yet merged.
 
         ``caller_now`` was refused before (``_check_caller_now``) if it is more than
         ``CLOCK_TOLERANCE`` ahead of the worker clock, so it can only narrow the window by that
-        much. The per-grant high-water mark detects a worker clock that stepped back
-        (``clock_regressed``). It is written inside the caller's transaction, so a refused
-        operation never moves it; a stored mark is therefore always before ``expires_at`` and
-        never ends a grant by itself.
+        much. The per-grant high-water mark holds the highest *worker* time seen (never a caller
+        time) and never decreases; a worker clock more than ``CLOCK_TOLERANCE`` behind it is
+        ``clock_regressed``. That refuses every clocked operation on the grant (open, reserve,
+        commit) until the worker clock catches up, and heals by itself; ``release``, ``status``,
+        ``live_lines`` and ``retract_family`` keep working meanwhile. The mark is written inside
+        the caller's transaction, so a refused operation never moves it; a stored mark is
+        therefore always before ``expires_at`` and never ends a grant by itself.
         """
         worker = _worker_now()
         stored = self._load_clock(db, grant_ref)
         if worker + CLOCK_TOLERANCE < stored:
             raise AllocationError("clock_regressed", f"{grant_ref}: {worker} < {stored}")
-        effective = max(worker, caller_now)
-        if effective > stored:
-            self._put_clock(db, grant_ref, effective)
-        return effective
+        if worker > stored:
+            # Only the worker clock is stored: a caller's lead must not eat into the step-back
+            # tolerance, and the mark never decreases.
+            self._put_clock(db, grant_ref, worker)
+        return max(worker, caller_now)
 
     # -- budgets -------------------------------------------------------------------------
 
