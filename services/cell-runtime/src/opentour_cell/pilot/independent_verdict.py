@@ -21,6 +21,15 @@ What it verifies, as three separately reported statements:
      mutable alias), the pinned base and inference configuration, and the same fit manifest the
      evaluator was given; every comparator reads back its frozen revision. Fields the readback
      cannot observe (tokenizer bytes, process reload) are reported as unavailable, not assumed;
+     For a managed provider or customer trainer candidate (``managed_fit``,
+     ``custom_trainer_fit``) statement 1 is ``provider_reported`` / ``trainer_reported``: the job
+     record (``ProviderJobRecord``) is bound by digest to the claim, reports terminal success,
+     and names the frozen parent and an immutable candidate id; weights are recorded as
+     ``provider_attested_opaque`` and no tensor-level evidence is claimed. Statement 2 needs a
+     readback whose immutable served model id (and parent and artifact digest, where reported)
+     match; a mutable alias, a missing job binding, a parent mismatch or a readback naming
+     another revision is an integrity failure and no inference runs. Real fine-tuning APIs do
+     not sign, so nothing on this route is called verified;
   3. ``paired_gain_cleared_gates``: on the same untouched population and fixed operating point,
      the candidate's paired improvement against each required comparator clears the registered
      practical threshold under family-level uncertainty, coverage, missing-output and
@@ -78,9 +87,10 @@ Raising the tier is the worker-side verifier's decision against the issuer regis
 
 Simulated: tests use generated sentinel populations and deterministic replay doubles. Not proven:
 no SmolLM2 weights or numeric interpreter run here, so the open-weight adapter is exercised only
-through injected entry points; no managed/custom provider route, no stochastic decoding, no Slack,
-watch, cycle or release wiring, and no customer evidence. Passing tests prove software behavior
-over generated data only.
+through injected entry points; the managed/custom provider route is exercised only through
+generated job records and provider doubles, with no real provider account, job or serving
+endpoint; no stochastic decoding, no Slack, watch, cycle or release wiring, and no customer
+evidence. Passing tests prove software behavior over generated data only.
 """
 
 from __future__ import annotations
@@ -139,8 +149,18 @@ CASE_VERDICTS = (
 _SHA = re.compile(r"[0-9a-f]{64}")
 _ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,127}")
 _KINDS = ("open_weight_fit", "simple_repair")
+# Managed provider / customer trainer candidates: candidate kind -> route of the job record.
+_PROVIDER_ROUTES = {"managed_fit": "managed_provider", "custom_trainer_fit": "custom_trainer"}
+# The terminal success state each route's job record must report.
+_JOB_DONE = {"managed_provider": "succeeded", "custom_trainer": "completed"}
+# Who makes the job statement. Never "verified": real fine-tuning APIs do not sign results.
+_JOB_REPORTER = {"managed_provider": "provider_reported", "custom_trainer": "trainer_reported"}
+# Identifier tails that name a moving pointer rather than one revision (format-only defence).
+_ALIASES = frozenset(
+    {"latest", "current", "default", "stable", "prod", "production", "live", "main", "head"}
+)
 # A tuned candidate must beat both the incumbent and the credible simple repair (OPE-528 AC).
-_TUNED_KINDS = ("open_weight_fit",)
+_TUNED_KINDS = ("open_weight_fit", *_PROVIDER_ROUTES)
 _TUNED_COMPARATORS = ("incumbent", "simple_repair")
 _SELECTION = ("frozen_before_readout", "after_protected_readout")
 _PAIR_FIELDS = ("comparable", "fixes", "new_errors", "unchanged_right", "unchanged_wrong")
@@ -404,8 +424,7 @@ class ClaimedResult:
             )
         ):
             raise VerdictInputError("invalid_claimed_result")
-        if self.candidate_kind not in _KINDS:
-            # Managed/custom provider verification is a separate route (not built here).
+        if self.candidate_kind not in (*_KINDS, *_PROVIDER_ROUTES):
             raise VerdictInputError("unsupported_candidate_route")
 
     def digest(self) -> str:
@@ -456,6 +475,90 @@ class EvaluatorSigner:
     key_id: str
     key_registry_revision: str
     sign: Callable[[bytes], str]
+
+
+@dataclass(frozen=True)
+class ProviderJobRecord:
+    """A managed provider's or customer trainer's own statement about one fine-tuning job.
+
+    Built by the caller from the connector's records (``managed_connector.ProviderJob`` plus the
+    provider's reported base model, or ``custom_trainer_connector.TrainerResult``). Nothing here
+    is authenticated: real fine-tuning APIs do not sign their job objects, and a trainer's shared
+    secret HMAC is checked by its connector, not by this evaluator. ``parent_revision`` must be
+    the parent the provider or trainer itself reports, not one copied from the request.
+    ``artifact_digest`` is the trainer's reported digest when it gives one; a managed provider's
+    weights are opaque and it gives none.
+    """
+
+    route: str
+    job_id: str
+    client_token: str
+    intent_sha256: str
+    state: str
+    parent_revision: str
+    candidate_id: str
+    artifact_digest: str | None = None
+    reporter_version: str | None = None
+
+    def well_formed(self) -> bool:
+        ids = (self.job_id, self.client_token, self.parent_revision, self.candidate_id)
+        return (
+            self.route in _JOB_DONE
+            and all(isinstance(v, str) and _ID.fullmatch(v) for v in ids)
+            and _is_sha(self.intent_sha256)
+            and isinstance(self.state, str)
+            and (self.artifact_digest is None or _is_sha(self.artifact_digest))
+            and (
+                self.reporter_version is None
+                or (
+                    isinstance(self.reporter_version, str)
+                    and _ID.fullmatch(self.reporter_version) is not None
+                )
+            )
+        )
+
+    def as_json(self) -> Json:
+        return {
+            "route": self.route,
+            "job_id": self.job_id,
+            "client_token": self.client_token,
+            "intent_sha256": self.intent_sha256,
+            "state": self.state,
+            "parent_revision": self.parent_revision,
+            "candidate_id": self.candidate_id,
+            "artifact_digest": self.artifact_digest,
+            "reporter_version": self.reporter_version,
+        }
+
+    def digest(self) -> str:
+        """The job binding a claim names in ``job_manifest_digest``."""
+        return digest(["opentour.pilot.provider-job-record.v1", self.as_json()])
+
+
+@dataclass(frozen=True)
+class ProviderEvidence:
+    """The evaluator's frozen expectation for a provider route plus the job record it got.
+
+    ``parent_model_id`` and ``candidate_id`` come from the frozen experiment, not from the
+    provider; the job record and the serving readback must both agree with them.
+    """
+
+    job: ProviderJobRecord | None
+    parent_model_id: str
+    candidate_id: str
+
+
+def provider_candidate_digest(route: str, parent_model_id: str, candidate_id: str) -> str:
+    """The claim's ``candidate_digest`` for a provider route: route, parent and immutable id."""
+    return digest(["opentour.pilot.provider-candidate.v1", route, parent_model_id, candidate_id])
+
+
+def _mutable_alias(identifier: object) -> bool:
+    """FORMAT ONLY: an id that is, or ends in, a moving-pointer name. Not proof of immutability."""
+    if not isinstance(identifier, str):
+        return True
+    lowered = identifier.lower()
+    return lowered in _ALIASES or re.split(r"[:@/]", lowered)[-1] in _ALIASES
 
 
 @dataclass(frozen=True)
@@ -1241,7 +1344,13 @@ class IndependentEvaluator:
         policy: GatePolicy,
         replays: Mapping[str, ArtifactReplay],
         fit_manifest: Mapping[str, Any] | None = None,
+        provider_evidence: ProviderEvidence | None = None,
     ) -> IndependentVerdict:
+        """Verify and score one claim. A provider route takes ``provider_evidence``.
+
+        Everything after the job and serving statements (replay, scoring, every gate, issuing)
+        is the same code for every route.
+        """
         claim.validate()
         policy.validate()
         if claim.candidate_kind in _TUNED_KINDS and not (
@@ -1280,10 +1389,10 @@ class IndependentEvaluator:
             reasons.add("integrity_failure", "scorer_failed_fixture_oracle")
         self._check_audit(audit_receipt, population, reasons)
         self._check_binding(claim, population, policy, reasons)
-        job = self._job_statement(claim, fit_manifest)
+        job = self._job_statement(claim, fit_manifest, provider_evidence)
         if job["status"] == "failed":
             reasons.add("integrity_failure", "job_" + job["reason"])
-        served, identities = self._served_statement(claim, policy, replays, job)
+        served, identities = self._served_statement(claim, policy, replays, job, provider_evidence)
         if served["status"] == "failed":
             reasons.add("integrity_failure", "served_" + served["reason"])
 
@@ -1393,7 +1502,19 @@ class IndependentEvaluator:
             # The slice veto must gate exactly the slices the bound operating point registered.
             reasons.add("integrity_failure", "critical_slices_not_bound_to_operating_point")
 
-    def _job_statement(self, claim: ClaimedResult, manifest: Mapping[str, Any] | None) -> Json:
+    def _job_statement(
+        self,
+        claim: ClaimedResult,
+        manifest: Mapping[str, Any] | None,
+        provider: ProviderEvidence | None = None,
+    ) -> Json:
+        route = _PROVIDER_ROUTES.get(claim.candidate_kind)
+        if route is not None:
+            if manifest is not None:
+                return {"status": "failed", "reason": "fit_manifest_on_a_provider_route"}
+            return self._provider_job_statement(claim, route, provider)
+        if provider is not None:
+            return {"status": "failed", "reason": "provider_evidence_on_a_non_provider_route"}
         if claim.candidate_kind == "simple_repair":
             if manifest is not None or claim.job_manifest_digest is not None:
                 return {"status": "failed", "reason": "fit_evidence_on_a_no_fit_repair"}
@@ -1448,16 +1569,119 @@ class IndependentEvaluator:
             "evidence": "unauthenticated_manifest_self_consistency",
         }
 
+    def _provider_job_statement(
+        self, claim: ClaimedResult, route: str, provider: ProviderEvidence | None
+    ) -> Json:
+        """Bind a provider or trainer job record to the frozen parent and immutable candidate.
+
+        The status is ``provider_reported`` or ``trainer_reported``, never "verified": the record
+        is the provider's own unauthenticated statement. Weights are opaque and recorded as
+        provider-attested; no tensor-level evidence is claimed or invented.
+        """
+
+        def failed(reason: str) -> Json:
+            return {"status": "failed", "reason": reason}
+
+        if provider is None or provider.job is None or claim.job_manifest_digest is None:
+            return failed("job_binding_missing")
+        job = provider.job
+        if not job.well_formed():
+            return failed("provider_job_record_malformed")
+        if not all(
+            isinstance(v, str) and _ID.fullmatch(v)
+            for v in (provider.parent_model_id, provider.candidate_id)
+        ):
+            return failed("provider_expectation_malformed")
+        if job.route != route:
+            return failed("job_route_mismatch")
+        if job.state != _JOB_DONE[route]:
+            return failed("job_not_completed")
+        if job.digest() != claim.job_manifest_digest:
+            return failed("designated_job_mismatch")
+        if _mutable_alias(provider.parent_model_id) or _mutable_alias(job.parent_revision):
+            return failed("parent_mutable_alias")
+        if job.parent_revision != provider.parent_model_id:
+            return failed("parent_mismatch")
+        if _mutable_alias(provider.candidate_id) or _mutable_alias(job.candidate_id):
+            return failed("candidate_id_mutable_alias")
+        if job.candidate_id != provider.candidate_id:
+            return failed("job_candidate_is_not_the_frozen_candidate")
+        candidate = provider_candidate_digest(route, provider.parent_model_id, job.candidate_id)
+        if candidate != claim.candidate_digest:
+            return failed("job_artifact_is_not_the_candidate")
+        return {
+            "status": _JOB_REPORTER[route],
+            "reason": "job_record_binds_parent_and_immutable_candidate",
+            "route": route,
+            "job_id": job.job_id,
+            "job_record_digest": job.digest(),
+            "parent_revision": job.parent_revision,
+            "candidate_id": job.candidate_id,
+            "candidate_digest": candidate,
+            "artifact_digest_reported": job.artifact_digest,
+            "weights": "provider_attested_opaque",
+            "tensor_evidence": "not_available",
+            "evidence": "unauthenticated_provider_statement",
+        }
+
+    def _provider_readback(
+        self,
+        claim: ClaimedResult,
+        served: Mapping[str, Any],
+        provider: ProviderEvidence | None,
+        job: Json,
+        drift: Json,
+    ) -> str | None:
+        """Check a provider serving readback names the evaluated revision. ``None`` if bound."""
+        route = _PROVIDER_ROUTES[claim.candidate_kind]
+        if provider is None:
+            return "provider_expectation_missing"
+        if served.get("route") != route:
+            return "route_mismatch"
+        served_id = served.get("served_model_id")
+        kind = served.get("identity_kind")
+        if not (isinstance(served_id, str) and _ID.fullmatch(served_id)):
+            return "identity_unverifiable"
+        if kind == "mutable_alias" or _mutable_alias(served_id):
+            return "identity_mutable_alias"
+        if kind != "immutable_model_id":
+            return "identity_unverifiable"
+        if served_id != provider.candidate_id:
+            return "candidate_served_other_revision"
+        if (
+            provider_candidate_digest(route, provider.parent_model_id, served_id)
+            != claim.candidate_digest
+        ):
+            return "candidate_served_other_artifact"
+        if "parent_revision" in served:
+            if served["parent_revision"] != provider.parent_model_id:
+                return "parent_mismatch"
+            drift["parent_revision"] = "checked"
+        else:
+            drift["parent_revision"] = "unavailable"
+        reported = job.get("artifact_digest_reported")
+        if "artifact_digest" in served and reported is not None:
+            if served["artifact_digest"] != reported:
+                return "candidate_served_other_revision"
+            drift["artifact_digest"] = "checked"
+        else:
+            drift["artifact_digest"] = "unavailable"
+        drift["served_model_id"] = "checked"
+        drift["identity_kind"] = "checked"
+        return None
+
     def _served_statement(
         self,
         claim: ClaimedResult,
         policy: GatePolicy,
         replays: Mapping[str, ArtifactReplay],
         job: Json,
+        provider: ProviderEvidence | None = None,
     ) -> tuple[Json, dict[str, str]]:
         expected = {"candidate": claim.candidate_digest, **claim.comparator_digests}
         identities: dict[str, str] = {}
         drift: Json = {}
+        provider_route = claim.candidate_kind in _PROVIDER_ROUTES
         for name in ("candidate", *policy.required_comparators, *policy.optional_comparators):
             if name not in replays:
                 continue
@@ -1467,6 +1691,13 @@ class IndependentEvaluator:
                 served = dict(replays[name].served_identity())
             except Exception:
                 return {"status": "failed", "reason": "serving_readback_unavailable"}, identities
+            if name == "candidate" and provider_route:
+                # Opaque weights: the readback names the served model, never a tensor digest.
+                refusal = self._provider_readback(claim, served, provider, job, drift)
+                if refusal is not None:
+                    return {"status": "failed", "reason": refusal}, identities
+                identities[name] = claim.candidate_digest
+                continue
             artifact = served.get("artifact_sha256")
             if not _is_sha(artifact):
                 return {"status": "failed", "reason": "served_identity_mutable_alias"}, identities
@@ -1498,9 +1729,11 @@ class IndependentEvaluator:
             identities[name] = str(artifact)
         if "candidate" not in identities:
             return {"status": "failed", "reason": "candidate_not_replayed"}, identities
+        evidence = {"serving_evidence": "provider_reported_readback"} if provider_route else {}
         return {
             "status": "readback_consistent",
             "reason": "replay_readback_names_frozen_revisions",
+            **evidence,
             "served": dict(sorted(identities.items())),
             "drift_checks": dict(sorted(drift.items())),
         }, identities
@@ -1941,6 +2174,61 @@ class IndependentEvaluator:
         if record["rows"]:
             self._mark_viewed(key, population)
         return IndependentVerdict(document, signature, replayed=False)
+
+
+# --------------------------------------------------------------------------- provider adapter
+
+
+class ProviderReplay:
+    """``ArtifactReplay`` over a provider- or trainer-served candidate, via injected callables.
+
+    ``readback_fn`` returns the provider's serving readback (``route``, ``served_model_id``,
+    ``identity_kind`` and, where the provider reports them, ``parent_revision`` and
+    ``artifact_digest``). ``predict_fn(candidate_id, inputs)`` returns the outputs plus the model
+    id the provider says served that batch; a batch served by any other id is refused, so a
+    provider-side alias swap mid-replay is an integrity failure rather than a scored arm. It
+    never imports or drives the managed/custom connectors; the caller wires them in.
+    """
+
+    def __init__(
+        self,
+        *,
+        route: str,
+        parent_model_id: str,
+        candidate_id: str,
+        readback_fn: Callable[[], Mapping[str, Any]],
+        predict_fn: Callable[
+            [str, list[dict[str, str]]], tuple[Sequence[Mapping[str, Any] | None], str]
+        ],
+        batch_size: int = 64,
+    ) -> None:
+        if route not in _JOB_DONE or type(batch_size) is not int or batch_size < 1:
+            raise VerdictInputError("invalid_provider_replay")
+        self._route = route
+        self._parent = parent_model_id
+        self._candidate = candidate_id
+        self._readback = readback_fn
+        self._predict = predict_fn
+        self._batch = batch_size
+
+    def served_identity(self) -> Mapping[str, Any]:
+        return dict(self._readback())
+
+    def predict(
+        self, features: Sequence[Mapping[str, str]], *, expected_artifact: str
+    ) -> Sequence[Mapping[str, Any] | None]:
+        if expected_artifact != provider_candidate_digest(
+            self._route, self._parent, self._candidate
+        ):
+            raise ValueError("provider_candidate_lineage_mismatch")
+        out: list[Mapping[str, Any] | None] = []
+        for start in range(0, len(features), self._batch):
+            batch = [dict(f) for f in features[start : start + self._batch]]
+            outputs, served_by = self._predict(self._candidate, batch)
+            if served_by != self._candidate:
+                raise ValueError("provider_served_other_revision")
+            out.extend(outputs)
+        return out
 
 
 # --------------------------------------------------------------------------- open-weight adapter

@@ -296,6 +296,7 @@ def run(
     manifest=MANIFEST,
     receipt=None,
     ev=None,
+    provider=None,
     **claim_over,
 ):
     pol = pol or policy()
@@ -306,6 +307,7 @@ def run(
         policy=pol,
         replays=replays or scenario.replays(),
         fit_manifest=manifest,
+        provider_evidence=provider,
     )
     # Invariant on every verdict here (review 577a774 F5): verified_gain iff reproduced.
     doc = verdict.document
@@ -2102,3 +2104,333 @@ def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(tmp_
     assert ev.authorize(view, effect="improvement_alert")["reason"] == "verdict_revoked"
     with pytest.raises(iv.VerdictInputError, match="unknown_consumer_effect"):
         ev.authorize(win.document, effect="slack_post")
+
+
+# ----------------------------------------------------------------- P: managed/custom route
+# Generated sentinel job records and provider doubles only; no real provider, account or job.
+
+PARENT = "generated-provider-base-r20260101"
+CANDIDATE_IDS = {
+    "managed_provider": "ft:generated-provider-base:sentinel-org::cand0001",
+    "custom_trainer": "generated-trainer-artifact-0001",
+}
+KINDS = {"managed_provider": "managed_fit", "custom_trainer": "custom_trainer_fit"}
+DONE = {"managed_provider": "succeeded", "custom_trainer": "completed"}
+TRAINER_DIGEST = sha("trainer-reported-artifact-bytes")
+
+
+def provider_job(route, /, **over):
+    values = {
+        "route": route,
+        "job_id": "generated-provider-job-0001",
+        "client_token": "generated-client-token-0001",
+        "intent_sha256": sha("provider-fit-intent"),
+        "state": DONE[route],
+        "parent_revision": PARENT,
+        "candidate_id": CANDIDATE_IDS[route],
+        "artifact_digest": TRAINER_DIGEST if route == "custom_trainer" else None,
+        "reporter_version": "generated-trainer-v1" if route == "custom_trainer" else None,
+    }
+    values.update(over)
+    return iv.ProviderJobRecord(**values)
+
+
+def readback_for(route, /, **over):
+    out = {
+        "route": route,
+        "served_model_id": CANDIDATE_IDS[route],
+        "identity_kind": "immutable_model_id",
+        "parent_revision": PARENT,
+    }
+    if route == "custom_trainer":
+        out["artifact_digest"] = TRAINER_DIGEST
+    out.update(over)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+class ProviderDouble:
+    """A generated provider: serves the scenario's candidate predictions under one model id."""
+
+    def __init__(self, preds, *, served_by=None, fail=False):
+        self.preds, self.served_by, self.fail = preds, served_by, fail
+        self.calls: list[tuple[str, int]] = []
+
+    def predict(self, model_id, inputs):
+        if self.fail:
+            raise ConnectionError("generated_provider_unavailable")
+        self.calls.append((model_id, len(inputs)))
+        return [self.preds[f["case_ref"]] for f in inputs], self.served_by or model_id
+
+
+def provider_run(tmp_path, s, route, *, job="default", evidence=None, readback=None, **over):
+    """Run the provider route; any piece can be replaced to make an adverse case."""
+    job = provider_job(route) if job == "default" else job
+    evidence = evidence or iv.ProviderEvidence(job, PARENT, CANDIDATE_IDS[route])
+    double = over.pop("double", None) or ProviderDouble(s.preds["candidate"])
+    rb = readback_for(route) if readback is None else readback
+    replay = iv.ProviderReplay(
+        route=route,
+        parent_model_id=PARENT,
+        candidate_id=CANDIDATE_IDS[route],
+        readback_fn=rb if callable(rb) else (lambda: rb),
+        predict_fn=double.predict,
+    )
+    values = {
+        "candidate_kind": KINDS[route],
+        "candidate_digest": iv.provider_candidate_digest(route, PARENT, CANDIDATE_IDS[route]),
+        "job_manifest_digest": job.digest() if job is not None else None,
+        "manifest": None,
+        "replays": s.replays(candidate=replay),
+        "provider": evidence,
+        **over,
+    }
+    return run(tmp_path, s, **values), double
+
+
+@pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
+def test_p1_provider_route_win_is_provider_reported_never_verified(tmp_path, route):
+    s = Scenario([("WR", 80), ("RR", 50)])
+    v, double = provider_run(tmp_path, s, route)
+    doc = v.document
+    assert v.outcome == "verified_gain" and doc["verdict"] == "reproduced"
+    job = doc["statements"]["job_produced_candidate"]
+    reporter = {"managed_provider": "provider_reported", "custom_trainer": "trainer_reported"}
+    assert job["status"] == reporter[route]
+    assert job["parent_revision"] == PARENT and job["candidate_id"] == CANDIDATE_IDS[route]
+    assert job["weights"] == "provider_attested_opaque"
+    assert job["tensor_evidence"] == "not_available"
+    assert job["evidence"] == "unauthenticated_provider_statement"
+    assert "manifest_states_training_steps" not in job  # no invented training evidence
+    served = doc["statements"]["candidate_served_evaluation"]
+    assert served["status"] == "readback_consistent"
+    assert served["serving_evidence"] == "provider_reported_readback"
+    assert served["drift_checks"] == {
+        "artifact_digest": "checked" if route == "custom_trainer" else "unavailable",
+        "identity_kind": "checked",
+        "parent_revision": "checked",
+        "served_model_id": "checked",
+    }
+    statements = json.dumps([job, served])
+    assert "verified" not in statements and "sha256" not in json.dumps(job["weights"])
+    assert doc["candidate_kind"] == KINDS[route]
+    assert doc["effects"]["improvement_alert_eligible"] is True
+    assert {m for m, _ in double.calls} == {CANDIDATE_IDS[route]}
+    assert [n for _, n in double.calls] == [64, 64, 2]
+
+
+@pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
+@pytest.mark.parametrize(
+    "plan,pol_over,expected",
+    [
+        (CLEAN_WIN, {}, "verified_gain"),
+        (B4, {}, "inconclusive"),
+        ([("RW", 120), ("RR", 80)], {}, "regression"),
+        ([("WR", 120), ("RR", 77), ("RR", 3), ("MW", 5)], {"max_missing": 5}, "regression"),
+        ([("RR", 170), ("DR", 29), ("DW", 1)], {}, "regression"),  # slice veto on DW
+        ([("WR", 110), ("WM", 10), ("RR", 80)], {}, "inconclusive"),
+    ],
+)
+def test_p2_scoring_and_gates_are_identical_to_the_open_weight_path(
+    tmp_path, route, plan, pol_over, expected
+):
+    total = sum(count for _, count in plan)
+
+    def last_eight(index, codes):
+        return (CRITICAL,) if index >= total - 8 else ()
+
+    s = Scenario(plan, slice_of=last_eight)
+    pol = policy(critical_slices=(CRITICAL,), **pol_over)
+    open_weight = run(tmp_path / "open", s, pol=pol).document
+    provider, _ = provider_run(tmp_path / "provider", s, route, pol=pol)
+    doc = provider.document
+    assert open_weight["outcome"] == expected
+    for field_name in ("outcome", "verdict", "reasons", "comparisons", "effects"):
+        assert doc[field_name] == open_weight[field_name], field_name
+    assert (
+        doc["statements"]["paired_gain_cleared_gates"]
+        == (open_weight["statements"]["paired_gain_cleared_gates"])
+    )
+
+
+@pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
+@pytest.mark.parametrize(
+    "case,reason",
+    [
+        ("job_missing", "job_binding_missing"),
+        ("claim_names_no_job", "job_binding_missing"),
+        ("evidence_missing", "job_binding_missing"),
+        ("job_running", "job_not_completed"),
+        ("job_other_route", "job_route_mismatch"),
+        ("claim_names_other_job", "designated_job_mismatch"),
+        ("parent_mismatch", "parent_mismatch"),
+        ("parent_alias", "parent_mutable_alias"),
+        ("candidate_alias", "candidate_id_mutable_alias"),
+        ("candidate_bare_alias", "candidate_id_mutable_alias"),
+        ("job_other_candidate", "job_candidate_is_not_the_frozen_candidate"),
+        ("claim_other_candidate", "job_artifact_is_not_the_candidate"),
+        ("malformed_record", "provider_job_record_malformed"),
+        ("fit_manifest_given", "fit_manifest_on_a_provider_route"),
+    ],
+)
+def test_p3_job_binding_refusals_hold_before_any_inference(tmp_path, route, case, reason):
+    s = Scenario(CLEAN_WIN)
+    other = {"managed_provider": "custom_trainer", "custom_trainer": "managed_provider"}[route]
+    alias = CANDIDATE_IDS[route].rsplit(":", 1)[0] + ":latest"
+    jobs = {
+        "job_running": provider_job(route, state="running"),
+        "job_other_route": provider_job(route, route=other, state=DONE[other]),
+        "parent_mismatch": provider_job(route, parent_revision="generated-provider-base-r2"),
+        "job_other_candidate": provider_job(route, candidate_id="generated-other-candidate-9"),
+        "malformed_record": provider_job(route, intent_sha256="not-a-digest"),
+    }
+    over: dict = {}
+    if case == "job_missing":
+        over = {"job": None, "evidence": iv.ProviderEvidence(None, PARENT, CANDIDATE_IDS[route])}
+    elif case == "claim_names_no_job":
+        over = {"job_manifest_digest": None}
+    elif case == "evidence_missing":
+        over = {"provider": None}
+    elif case == "claim_names_other_job":
+        over = {"job_manifest_digest": provider_job(route, job_id="generated-job-2").digest()}
+    elif case == "parent_alias":
+        job = provider_job(route, parent_revision="generated-provider-base:latest")
+        over = {
+            "job": job,
+            "evidence": iv.ProviderEvidence(
+                job, "generated-provider-base:latest", CANDIDATE_IDS[route]
+            ),
+        }
+    elif case in ("candidate_alias", "candidate_bare_alias"):
+        cid = alias if case == "candidate_alias" else "latest"
+        job = provider_job(route, candidate_id=cid)
+        over = {
+            "job": job,
+            "evidence": iv.ProviderEvidence(job, PARENT, cid),
+            "candidate_digest": iv.provider_candidate_digest(route, PARENT, cid),
+        }
+    elif case == "claim_other_candidate":
+        over = {"candidate_digest": iv.provider_candidate_digest(route, PARENT, "generated-x-1")}
+    elif case == "fit_manifest_given":
+        over = {"manifest": MANIFEST}
+    elif case in jobs:
+        over = {"job": jobs[case]}
+    v, double = provider_run(tmp_path, s, route, **over)
+    doc = held(v, "integrity_failure", "job_" + reason)
+    assert doc["statements"]["job_produced_candidate"] == {"status": "failed", "reason": reason}
+    assert double.calls == [] and doc["comparisons"] == {}
+    if case == "claim_other_candidate":
+        # Each statement is reported on its own: the readback also refuses the claimed digest.
+        assert doc["statements"]["candidate_served_evaluation"] == {
+            "status": "failed",
+            "reason": "candidate_served_other_artifact",
+        }
+
+
+@pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
+@pytest.mark.parametrize(
+    "readback,reason",
+    [
+        ({"identity_kind": "mutable_alias"}, "served_identity_mutable_alias"),
+        ({"served_model_id": "generated-provider-base:latest"}, "served_identity_mutable_alias"),
+        ({"identity_kind": None}, "served_identity_unverifiable"),
+        ({"identity_kind": "endpoint"}, "served_identity_unverifiable"),
+        ({"served_model_id": None}, "served_identity_unverifiable"),
+        (
+            {"served_model_id": "generated-other-revision-2"},
+            "served_candidate_served_other_revision",
+        ),
+        ({"parent_revision": "generated-provider-base-r2"}, "served_parent_mismatch"),
+        ({"route": "open_weight"}, "served_route_mismatch"),
+    ],
+)
+def test_p4_serving_readback_must_name_the_evaluated_immutable_revision(
+    tmp_path, route, readback, reason
+):
+    s = Scenario(CLEAN_WIN)
+    v, double = provider_run(tmp_path, s, route, readback=readback_for(route, **readback))
+    doc = held(v, "integrity_failure", reason)
+    assert doc["statements"]["candidate_served_evaluation"]["status"] == "failed"
+    # The job statement stands on its own: a failed readback limits the claim to the job.
+    assert doc["statements"]["job_produced_candidate"]["status"].endswith("_reported")
+    assert double.calls == []
+
+
+def test_p5_trainer_digest_mismatch_and_unavailable_provider_hold(tmp_path):
+    s = Scenario(CLEAN_WIN)
+    rb = readback_for("custom_trainer", artifact_digest=sha("other-trainer-bytes"))
+    held(
+        provider_run(tmp_path / "a", s, "custom_trainer", readback=rb)[0],
+        "integrity_failure",
+        "served_candidate_served_other_revision",
+    )
+
+    def unavailable():
+        raise ConnectionError("generated_provider_unavailable")
+
+    for route in ("managed_provider", "custom_trainer"):
+        held(
+            provider_run(tmp_path / ("b" + route), s, route, readback=unavailable)[0],
+            "integrity_failure",
+            "served_serving_readback_unavailable",
+        )
+        down = ProviderDouble(s.preds["candidate"], fail=True)
+        held(
+            provider_run(tmp_path / ("c" + route), s, route, double=down)[0],
+            "integrity_failure",
+            "candidate_replay_failed",
+        )
+        # A batch the provider says another model served is refused, never scored.
+        swapped = ProviderDouble(s.preds["candidate"], served_by="generated-other-revision-2")
+        v, _ = provider_run(tmp_path / ("d" + route), s, route, double=swapped)
+        doc = held(v, "integrity_failure", "candidate_replay_failed")
+        assert doc["comparisons"] == {}
+
+
+def test_p6_retry_after_a_lost_result_returns_the_stored_verdict_without_a_provider_call(
+    tmp_path,
+):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    first, d1 = provider_run(tmp_path, s, "managed_provider", ev=ev)
+    again, d2 = provider_run(tmp_path, s, "managed_provider", ev=ev)
+    assert not first.replayed and again.replayed and again.document == first.document
+    assert d1.calls and d2.calls == []
+
+
+def test_p7_route_scope_and_tuned_comparator_rule(tmp_path):
+    s = Scenario(CLEAN_WIN)
+    evidence = iv.ProviderEvidence(
+        provider_job("managed_provider"), PARENT, CANDIDATE_IDS["managed_provider"]
+    )
+    held(
+        run(tmp_path / "a", s, provider=evidence),
+        "integrity_failure",
+        "job_provider_evidence_on_a_non_provider_route",
+    )
+    only_incumbent = Scenario(CLEAN_WIN, comparators=("incumbent",))
+    with pytest.raises(iv.VerdictInputError, match="requires_incumbent_and_simple_repair"):
+        provider_run(
+            tmp_path / "b",
+            only_incumbent,
+            "managed_provider",
+            pol=policy(required_comparators=("incumbent",)),
+        )
+    with pytest.raises(iv.VerdictInputError, match="unsupported_candidate_route"):
+        run(tmp_path / "c", s, candidate_kind="managed_provider")  # a route name, not a kind
+    replay = iv.ProviderReplay(
+        route="managed_provider",
+        parent_model_id=PARENT,
+        candidate_id=CANDIDATE_IDS["managed_provider"],
+        readback_fn=dict,
+        predict_fn=ProviderDouble(s.preds["candidate"]).predict,
+    )
+    with pytest.raises(ValueError, match="provider_candidate_lineage_mismatch"):
+        replay.predict([{"case_ref": "case-0000"}], expected_artifact=CANDIDATE)
+    with pytest.raises(iv.VerdictInputError, match="invalid_provider_replay"):
+        iv.ProviderReplay(
+            route="open_weight",
+            parent_model_id=PARENT,
+            candidate_id="x",
+            readback_fn=dict,
+            predict_fn=ProviderDouble({}).predict,
+        )
