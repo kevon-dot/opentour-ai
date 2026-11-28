@@ -115,6 +115,7 @@ class Site:
         scope = json.loads(TEMPLATE.read_text())
         scope.update(
             mandate_id=mandate_id,
+            workflow=WORKFLOW,
             owner_id=OWNER,
             delegate=DELEGATE,
             trainer=DELEGATE,
@@ -145,6 +146,8 @@ class Site:
         workflow: str = WORKFLOW,
         expires_at: int | None = None,
         permissions: tuple[str, ...] = (),
+        mandate_id: str = MANDATE,
+        expected_exit: int = 0,
     ) -> Path:
         selection = self.directory / f"{name}.json"
         argv = [
@@ -166,7 +169,7 @@ class Site:
             "--workflow",
             workflow,
             "--mandate",
-            MANDATE,
+            mandate_id,
             "--grant-ref",
             f"grant-{name}",
             "--expires-at",
@@ -174,7 +177,7 @@ class Site:
         ]
         for permission in permissions:
             argv += ["--permission", permission]
-        assert lr.main(argv) == 0
+        assert lr.main(argv) == expected_exit
         return selection
 
     def open(self, selection: Path, *, ledger: object = "default", plans=None):
@@ -417,7 +420,7 @@ def test_schedule_reads_fit_count_and_records_a_hold_once_the_cap_is_spent(tmp_p
             "source_revision": "a" * 64,
             "trace_sha256": "b" * 64,
             "correction_sha256": "c" * 64,
-            "workflow": "purchase-routing",
+            "workflow": WORKFLOW,
             "connector": "replace-with-approved-readonly-mcp-connection",
             "trace_source": "workflow-trace",
             "correction_source": "verified-outcomes",
@@ -494,7 +497,7 @@ def test_wrong_role_cross_tenant_and_foreign_workflow_are_refused(tmp_path):
     operator, operator_service = site.open(
         site.authorize("slack-operator", role="operator", actor="custodian")
     )
-    foreign, foreign_service = site.open(site.authorize("other-flow", workflow="workflow-other"))
+    assert not site.authorize("other-flow", workflow="workflow-other", expected_exit=2).exists()
     plan_ref = site.publish()
     run = submit(service, slack, plan_ref, "click")["run_ref"]
     for principal, handler in ((reviewer, reviewer_service), (operator, operator_service)):
@@ -505,10 +508,6 @@ def test_wrong_role_cross_tenant_and_foreign_workflow_are_refused(tmp_path):
     # The reviewer reads status without aggregate usage; the operator sees usage.
     assert "usage" not in reviewer_service.status(reviewer, run)
     assert "usage" in operator_service.status(operator, run)
-    with pytest.raises(lr.LearningRunError, match="learning_run_unavailable"):
-        foreign_service.status(foreign, run)
-    with pytest.raises(lr.LearningRunError, match="learning_run_unavailable"):
-        submit(foreign_service, foreign, plan_ref, "cross-workflow")
     other_slack, other_service = other.open(other.authorize("slack-owner"))
     with pytest.raises(lr.LearningRunError, match="learning_run_unavailable"):
         other_service.status(other_slack, run)
@@ -1103,3 +1102,21 @@ def test_run_cap_counts_the_whole_renewal_lineage(tmp_path):
     )
     assert renewed["state"] == "held" and renewed["reason_code"] == "standing_run_budget_exhausted"
     assert site.counts()["lr_runs"] == 1
+
+
+def test_second_mandate_on_same_workflow_cannot_read_or_control_prior_run(site):
+    owner, original = site.open(site.authorize("slack-original"))
+    plan_ref = site.publish()
+    run = submit(original, owner, plan_ref, "click")["run_ref"]
+    site.registry.enroll(site.spec("other-mandate"), actor=OWNER)
+    foreign, service = site.open(
+        site.authorize("different-owner-grant", mandate_id="other-mandate")
+    )
+    for operation in (
+        lambda: service.status(foreign, run),
+        lambda: service.cancel(foreign, run, "cancel"),
+        lambda: submit(service, foreign, plan_ref, "retry"),
+    ):
+        with pytest.raises(lr.LearningRunError):
+            operation()
+    assert original.status(owner, run)["state"] == "queued"

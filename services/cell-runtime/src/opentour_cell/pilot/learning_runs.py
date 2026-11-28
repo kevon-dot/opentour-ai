@@ -434,6 +434,12 @@ class LearningRuns:
             with self._db() as db:
                 for statement in _SCHEMA:
                     db.execute(statement)
+                if not any(
+                    row["name"] == "grant_mandate"
+                    for row in db.execute("PRAGMA table_info(lr_runs)")
+                ):
+                    db.execute("ALTER TABLE lr_runs ADD COLUMN grant_mandate TEXT")
+                    db.execute("UPDATE lr_runs SET grant_mandate=mandate_id")
         except (OSError, sqlite3.Error) as error:
             raise LearningRunError("private_learning_runs_required") from error
 
@@ -541,15 +547,15 @@ class LearningRuns:
         return "evaluate_and_improve", None
 
     def _budget_hold(
-        self, db: sqlite3.Connection, tenant: str, mandate: MandateState, effective: str
+        self, db: sqlite3.Connection, scope: LearningScope, mandate: MandateState, effective: str
     ) -> str | None:
         # Count the whole renewal lineage, as the mandate's own usage does; renewal never resets.
         lineage = mandate.lineage or (mandate.mandate_id,)
         admitted = db.execute(
-            "SELECT count(*) FROM lr_runs WHERE tenant=? "
+            "SELECT count(*) FROM lr_runs WHERE tenant=? AND json_extract(plan,'$.engagement_epoch')=? "
             f"AND mandate_id IN ({','.join('?' * len(lineage))}) "
             "AND (state IN ('queued','benchmark_only') OR dispatched=1)",
-            (tenant, *lineage),
+            (scope.tenant, scope.engagement_epoch, *lineage),
         ).fetchone()[0]
         if max(admitted, mandate.runs_used) >= mandate.max_runs:
             return "standing_run_budget_exhausted"
@@ -572,13 +578,23 @@ class LearningRuns:
             "release_authority": RELEASE_AUTHORITY,
         }
 
+    @staticmethod
+    def _within_scope(row: sqlite3.Row, scope: LearningScope) -> bool:
+        plan = LearningPlan.from_document(json.loads(row["plan"]))
+        return (
+            plan.tenant == scope.tenant
+            and plan.engagement_epoch == scope.engagement_epoch
+            and plan.workflow_ref == scope.workflow_ref
+            and row["grant_mandate"] == scope.mandate_id
+        )
+
     def _run(
         self, db: sqlite3.Connection, principal: LearningPrincipal, scope: LearningScope, run: str
     ) -> sqlite3.Row:
         row: sqlite3.Row | None = db.execute(
             "SELECT * FROM lr_runs WHERE tenant=? AND run_ref=?", (principal.tenant, run)
         ).fetchone()
-        _need(row is not None and row["workflow_ref"] == scope.workflow_ref)
+        _need(row is not None and self._within_scope(row, scope))
         assert row is not None
         return row
 
@@ -684,9 +700,53 @@ class LearningRuns:
 
     # ---- endpoint handlers (TLS gateway and local Slack Socket Mode) ---------------------
 
+    def preview(self, principal: LearningPrincipal) -> Json | None:
+        """Read the sealed plan and allowed controls without admitting or dispatching work."""
+        _identity(principal)
+        with self.authority.guard(principal, write=False) as scope:
+            self._permit(principal, scope, "read")
+            mandate = self._mandate(scope, principal)
+            if mandate is None:
+                return None
+            plan = self._plan(scope, mandate)
+            if isinstance(plan, PlanUnavailable):
+                return None
+            with self._db(write=False) as db:
+                latest = db.execute(
+                    "SELECT run_ref FROM lr_runs WHERE tenant=? AND plan_ref=? AND grant_mandate=? "
+                    "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                    (scope.tenant, plan.plan_ref, scope.mandate_id),
+                ).fetchone()
+                allowed = (
+                    principal.role == "owner"
+                    and "start" in scope.permissions
+                    and self._mandate_hold(mandate) is None
+                )
+                return {
+                    "plan_ref": plan.plan_ref,
+                    "workflow_ref": plan.workflow_ref,
+                    "engagement": plan.engagement_epoch,
+                    "model_route": plan.model_route_ref,
+                    "benchmark_ref": plan.benchmark_ref,
+                    "mandate_ref": mandate.mandate_id,
+                    "max_fits": mandate.max_fits,
+                    "spend_cap_cents": 0,
+                    "schedule": "paused" if mandate.state == "paused" else "unverified",
+                    "can_benchmark": allowed
+                    and self._budget_hold(db, scope, mandate, "benchmark_only") is None,
+                    "can_improve": allowed
+                    and mandate.training
+                    and plan.training_capable
+                    and self._budget_hold(db, scope, mandate, "evaluate_and_improve")
+                    is None,
+                    "can_cancel": "cancel" in scope.permissions,
+                    "current_run": latest["run_ref"] if latest else None,
+                }
+
     def submit(self, principal: LearningPrincipal, request: SubmitRequest) -> Json:
         _identity(principal)
         _need(isinstance(request, SubmitRequest), "invalid_arguments")
+        parse_submit(asdict(request))
         with self.authority.guard(principal, write=True) as scope:
             self._permit(principal, scope, "start")
             return self._submit(principal, scope, request, self._mandate(scope, principal))
@@ -709,7 +769,7 @@ class LearningRuns:
             "SELECT * FROM lr_runs WHERE tenant=? AND intent=?", (principal.tenant, intent)
         ).fetchone()
         _need(key is None or run is not None)
-        _need(run is None or run["workflow_ref"] == scope.workflow_ref)
+        _need(run is None or self._within_scope(run, scope))
         return run
 
     def _remember(
@@ -771,7 +831,7 @@ class LearningRuns:
         with self._db() as db:
             run = self._known(db, principal, scope, intent, key_hash)
             if run is None:
-                budget = self._budget_hold(db, principal.tenant, mandate, effective)
+                budget = self._budget_hold(db, scope, mandate, effective)
                 if budget is not None:
                     return self._hold(budget)
                 self._capacity(db, principal.tenant, "lr_runs", MAX_RUNS)
@@ -779,9 +839,9 @@ class LearningRuns:
                 state = "queued" if effective == "evaluate_and_improve" else "benchmark_only"
                 db.execute(
                     "INSERT INTO lr_runs (tenant,run_ref,intent,workflow_ref,plan_ref,plan,"
-                    "operation,effective,mandate_id,mandate_revision,owner,state,reason_code,"
+                    "operation,effective,mandate_id,mandate_revision,owner,state,reason_code,grant_mandate,"
                     "evidence,cancel_requested,dispatched,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'[]',0,0,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'[]',0,0,?,?)",
                     (
                         principal.tenant,
                         run_ref,
@@ -796,6 +856,7 @@ class LearningRuns:
                         mandate.owner_id,
                         state,
                         reason,
+                        scope.mandate_id,
                         now,
                         now,
                     ),
@@ -983,8 +1044,14 @@ class LearningRuns:
                     str(row["run_ref"])
                     for row in db.execute(
                         "SELECT run_ref FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+                        "AND json_extract(plan,'$.engagement_epoch')=? AND grant_mandate=? "
                         "AND state='cancellation_pending'",
-                        (scope.tenant, scope.workflow_ref),
+                        (
+                            scope.tenant,
+                            scope.workflow_ref,
+                            scope.engagement_epoch,
+                            scope.mandate_id,
+                        ),
                     )
                 ]
             outcome = self._tick_outcome(principal, scope, mandate)
@@ -1002,9 +1069,10 @@ class LearningRuns:
         with self._db(write=False) as db:
             busy = db.execute(
                 "SELECT run_ref,state FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+                "AND json_extract(plan,'$.engagement_epoch')=? AND grant_mandate=? "
                 "AND state NOT IN ('completed','failed','refused','canceled') "
                 "ORDER BY created_at,rowid LIMIT 1",
-                (scope.tenant, scope.workflow_ref),
+                (scope.tenant, scope.workflow_ref, scope.engagement_epoch, scope.mandate_id),
             ).fetchone()
         plan = self._plan(scope, mandate)
         if isinstance(plan, LearningPlan):
@@ -1048,8 +1116,9 @@ class LearningRuns:
             return
         for row in db.execute(
             "SELECT * FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+            "AND json_extract(plan,'$.engagement_epoch')=? AND grant_mandate=? "
             "AND state IN ('queued','benchmark_only')",
-            (scope.tenant, scope.workflow_ref),
+            (scope.tenant, scope.workflow_ref, scope.engagement_epoch, scope.mandate_id),
         ).fetchall():
             reason = self._fence(row, mandate)
             if reason is not None:
@@ -1103,16 +1172,29 @@ class LearningRuns:
                 # must stop it, seal it and settle measured usage. New work needs active authority.
                 row = db.execute(
                     "SELECT * FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+                    "AND json_extract(plan,'$.engagement_epoch')=? AND grant_mandate=? "
                     "AND state IN ('running','verifying','held','cancellation_pending') "
                     "AND lease IS NOT NULL AND lease_expires<? ORDER BY created_at,rowid LIMIT 1",
-                    (scope.tenant, scope.workflow_ref, now),
+                    (
+                        scope.tenant,
+                        scope.workflow_ref,
+                        scope.engagement_epoch,
+                        scope.mandate_id,
+                        now,
+                    ),
                 ).fetchone()
                 if row is None and self._mandate_hold(mandate) is None:
                     row = db.execute(
                         "SELECT * FROM lr_runs WHERE tenant=? AND workflow_ref=? "
+                        "AND json_extract(plan,'$.engagement_epoch')=? AND grant_mandate=? "
                         "AND state IN ('queued','benchmark_only') AND cancel_requested=0 "
                         "ORDER BY created_at,rowid LIMIT 1",
-                        (scope.tenant, scope.workflow_ref),
+                        (
+                            scope.tenant,
+                            scope.workflow_ref,
+                            scope.engagement_epoch,
+                            scope.mandate_id,
+                        ),
                     ).fetchone()
                 if row is None:
                     return None
@@ -1640,6 +1722,7 @@ class LocalMandateSource:
             mandate_id, head, lineage = self._current(registry, scope.mandate_id)
             details = registry.inspect(mandate_id)
             spec = details["scope"]
+            _need(spec["workflow"] == scope.workflow_ref, "standing_mandate_unavailable")
             if head == "pause":
                 state = "paused"
             elif head == "revoke" or details["withdrawn"]:
@@ -1841,6 +1924,7 @@ def _authorize(args: argparse.Namespace) -> Json:
     registry = LearningMandates(directory, args.tenant, engagement)
     details = registry.inspect(args.mandate, actor=args.owner)
     spec = details["scope"]
+    _need(spec["workflow"] == args.workflow, "learning_run_unavailable")
     with registry.guard_registered_owner(args.owner):
         _need(spec["owner_id"] == args.owner, "registered_owner_approval_required")
     if args.role == "owner":
