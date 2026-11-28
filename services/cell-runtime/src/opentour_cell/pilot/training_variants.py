@@ -8,15 +8,35 @@ that sees the policy and the changed fields, but never the proposed label, can.
 Everything here is a worker-local, deterministic, no-spend port. Generators and validators are
 supplied by the caller; this module performs no model calls and fits nothing.
 
+Fit gate: a training-mode plan names a fit *reservation*; whether that fit is open is read,
+read-only, from the worker's own `LearningMandates` ledger (the standing learning mandate's
+reservation, which already enforces recurrence class confirmation and the fit budget). The
+caller cannot declare a fit open, and this module never reserves a fit, so variants can neither
+unlock a fit nor request a second one. One root's training augmentation binds to at most one
+in-flight fit experiment. Retracting or reopening a root marks every experiment derived from it
+stale and invalidates its pending proposals; final outcomes and earlier records are kept.
+
+Trust labels (see `TRUST`): `target_verified`, `verifier_independent`, the `Grant`,
+`approved_validators` and the split seal are caller-asserted; no worker record of target
+verification or of the generation grant exists in this cell. None of them can make a child
+fit-eligible on its own: admission also needs the worker-held fit reservation and agreement with
+the ledger's own policy re-derivation, and a verifier identical to the generator or to the fit's
+delegate/trainer is refused whatever the flags say. The manifest digest is self-consistent only
+and unsigned; no signing or key-custody contract exists.
+
 Recorded gaps: (R2) a retracted root keeps its case/label, so a case cannot be re-registered
 under a new root_ref after reopening (needs an explicit reopen operation the spec does not
 define); (R4) the seal digest is not part of the root pin, so children of a later plan carry
 that plan's split_digest while manifests use the root's stored one; (R5) ledger files made by
-earlier revisions are not migrated (nothing is released).
+earlier revisions are not migrated (nothing is released); (G1) `LearningMandates` exposes no
+read-only reservation lifecycle state, so a child can still bind to a reservation whose fit was
+already claimed or settled; (G2) the reservation's residual revision is recorded but not bound
+to the root's family; (G3) the variant ledger trusts whichever mandate ledger the worker wires
+in; nothing signs that binding.
 
-Simulated, not proven: all generators, validators, grants and fit gates are caller-supplied
-local doubles. Nothing here is provider, customer-evidence or fit-qualification evidence, and a
-validated child is never a real observation.
+Simulated, not proven: all generators, validators and grants are caller-supplied local doubles.
+Nothing here is provider, customer-evidence or fit-qualification evidence, and a validated child
+is never a real observation.
 """
 
 from __future__ import annotations
@@ -34,6 +54,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
+from opentour_cell.pilot.learning_mandate import LearningMandates, MandateError
 from opentour_cell.pilot.operating_point import digest
 from opentour_cell.pilot.simple_repair import identifier
 from opentour_cell.pilot.text_classifier import TrainingError
@@ -67,9 +88,33 @@ _RETRYABLE = frozenset(
         "decision_input_missing",
         "policy_clause_missing",
         "unverified_target",
+        "verifier_not_independent",
         "policy_revision_mismatch",
+        "fit_already_bound",
+        "fit_experiment_stale",
     }
 )
+# A pending proposal: awaiting validation, or a rejection a replay would re-evaluate.
+_PENDING_REJECTIONS = _RETRYABLE
+
+# Fit experiment states (one per worker-held fit reservation).
+EXPERIMENT_IN_FLIGHT = "in_flight"
+EXPERIMENT_STALE = "stale"
+FIT_GATE_SOURCE = "learning_mandate_reservation"
+
+# What each input's authority actually is. Reported verbatim in every manifest.
+TRUST: Mapping[str, str] = MappingProxyType(
+    {
+        "fit_gate": "worker_ledger:" + FIT_GATE_SOURCE,
+        "target_verified": "caller_asserted",
+        "verifier_independent": "caller_asserted_refuted_by_generator_or_fit_delegate_identity",
+        "grant": "caller_asserted",
+        "approved_validators": "caller_asserted_pinned_at_first_registration",
+        "validator_label": "checked_against_ledger_policy_rederivation",
+        "split_seal": "caller_asserted_pinned_at_first_registration",
+    }
+)
+SEAL_KIND = "digest_self_consistent_only"
 
 
 @dataclass(frozen=True)
@@ -164,10 +209,15 @@ class SplitSeal:
 
 @dataclass(frozen=True)
 class FitGate:
-    """Standing recurrence, budget, independent split and verifier gates, decided elsewhere."""
+    """Reference to a fit reservation held by the worker's `LearningMandates` ledger.
 
-    open: bool
-    reference: str
+    Deliberately carries no open/closed state: the ledger reads the reservation (standing
+    recurrence class, fit budget, expiry, withdrawal and delegate) from the worker's own
+    mandate record. A caller can name a reservation, never open one.
+    """
+
+    reservation_id: str
+    actor: str
 
 
 @dataclass(frozen=True)
@@ -287,6 +337,80 @@ def render_with_spans(policy: Policy, fields: Mapping[str, str]) -> tuple[str, l
     return "\n".join(parts), spans
 
 
+def _ident(value: object) -> str:
+    """An identity is an exact `str` (no subclass can override equality or hashing)."""
+    if type(value) is not str:
+        raise TrainingError("invalid_identity_type")
+    return identifier(value)
+
+
+def _text_field(value: object) -> str:
+    if type(value) is not str:
+        raise TrainingError("invalid_identity_type")
+    return value
+
+
+def _flag(value: object) -> bool:
+    if type(value) is not bool:
+        raise TrainingError("invalid_flag_type")
+    return value
+
+
+def _int(value: object) -> int:
+    if type(value) is not int:
+        raise TrainingError("invalid_integer_type")
+    return value
+
+
+def _check_plan(plan: GenerationPlan, now: object) -> None:
+    """Reject look-alike identities and truthy non-booleans before anything is compared."""
+    if type(plan) is not GenerationPlan:
+        raise TrainingError("invalid_plan_type")
+    _int(now)
+    _ident(plan.plan_ref)
+    root, grant, gen = plan.root, plan.grant, plan.generator
+    if type(root) is not SeedRoot or type(grant) is not Grant or type(gen) is not Generator:
+        raise TrainingError("invalid_plan_type")
+    for name in ("root_ref", "case_ref", "label_ref", "family_id"):
+        _ident(getattr(root, name))
+    for name in ("policy_revision", "source_revision", "prediction", "target"):
+        _text_field(getattr(root, name))
+    _text_field(root.target_verifier_ref)
+    _flag(root.target_verified)
+    _flag(root.verifier_independent)
+    _ident(grant.grant_ref)
+    for flag in (
+        grant.generation_authorized,
+        grant.training_authorized,
+        grant.execution_location_approved,
+    ):
+        _flag(flag)
+    _int(grant.budget)
+    _int(grant.expires_at)
+    if type(grant.approved_external_teachers) is not frozenset:
+        raise TrainingError("invalid_identity_type")
+    for ref in grant.approved_external_teachers:
+        _text_field(ref)
+    _text_field(gen.ref)
+    _text_field(gen.revision)
+    _flag(gen.external)
+    if type(plan.approved_validators) is not frozenset:
+        raise TrainingError("invalid_identity_type")
+    for ref in plan.approved_validators:
+        _text_field(ref)
+    _int(plan.max_children_per_root)
+    _int(plan.max_children_per_family)
+    for proposal in plan.proposals:
+        if type(proposal) is not ProposedChild:
+            raise TrainingError("invalid_plan_type")
+        _int(proposal.cost)
+    if plan.fit_gate is not None:
+        if type(plan.fit_gate) is not FitGate:
+            raise TrainingError("invalid_fit_gate")
+        _ident(plan.fit_gate.reservation_id)
+        _ident(plan.fit_gate.actor)
+
+
 def _pin(plan: GenerationPlan) -> str:
     """Digest of everything about a root that must never change after first registration."""
     root, policy = plan.root, plan.policy
@@ -310,8 +434,29 @@ def _pin(plan: GenerationPlan) -> str:
     )
 
 
+def _verifier_reason(seed: SeedRoot, generator: Generator, fit: Json | None) -> str | None:
+    """Refute a caller-asserted independent verification from identities the ledger knows."""
+    if not (
+        seed.target_verified is True
+        and seed.verifier_independent is True
+        and _identity(seed.target_verifier_ref)
+    ):
+        return "unverified_target"
+    who = _identity(seed.target_verifier_ref)
+    dependent = {_identity(generator.ref)}
+    if fit is not None:
+        dependent |= {_identity(str(fit.get(k, ""))) for k in ("delegate", "trainer")}
+    return "verifier_not_independent" if who in dependent else None
+
+
 def _seed_reason(
-    seed: SeedRoot, policy: Policy, grant: Grant, seal: SplitSeal, now: int
+    seed: SeedRoot,
+    policy: Policy,
+    grant: Grant,
+    seal: SplitSeal,
+    now: int,
+    generator: Generator,
+    fit: Json | None,
 ) -> tuple[str, Json | None] | None:
     if seed.split == "protected":
         return "protected_seed", None
@@ -322,13 +467,17 @@ def _seed_reason(
         return "cross_split_family", None
     if seal.cases.get(seed.case_ref) != (seed.family_id,):
         return "case_family_mismatch", None
-    if not (seed.target_verified and seed.target_verifier_ref and seed.verifier_independent):
-        return "unverified_target", None
+    verifier = _verifier_reason(seed, generator, fit)
+    if verifier is not None:
+        return verifier, None
     if seed.policy_revision != policy.revision:
         return "policy_revision_mismatch", None
-    if not (grant.generation_authorized and grant.training_authorized) or now >= grant.expires_at:
+    if (
+        not (grant.generation_authorized is True and grant.training_authorized is True)
+        or now >= grant.expires_at
+    ):
         return "grant_missing", None
-    if not grant.execution_location_approved:
+    if grant.execution_location_approved is not True:
         return "execution_location_unapproved", None
     if any(name not in policy.decision_fields for name in seed.fields):
         return "field_not_permitted", None
@@ -372,13 +521,30 @@ CREATE TABLE IF NOT EXISTS children (
     cost INTEGER NOT NULL,
     record TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS experiments (
+    reservation_id TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL,
+    record TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS experiment_roots (
+    reservation_id TEXT NOT NULL, root_ref TEXT NOT NULL,
+    PRIMARY KEY (reservation_id, root_ref)
+);
 """
 
 
 class VariantLedger:
-    """Durable, replay-safe store of root state, children, spend and manifests."""
+    """Durable, replay-safe store of root state, children, spend, experiments and manifests.
 
-    def __init__(self, path: Path | str = ":memory:") -> None:
+    `fit_authority` is the worker's own learning-mandate ledger. Without it, no training-mode
+    child can ever pass the fit gate.
+    """
+
+    def __init__(
+        self, path: Path | str = ":memory:", *, fit_authority: LearningMandates | None = None
+    ) -> None:
+        if fit_authority is not None and type(fit_authority) is not LearningMandates:
+            raise TrainingError("fit_authority_must_be_worker_mandate_ledger")
+        self._fit_authority = fit_authority
         self._path = str(path)
         self._shared: sqlite3.Connection | None = None
         if self._path == ":memory:":
@@ -459,9 +625,18 @@ class VariantLedger:
 
     def submit(self, plan: GenerationPlan, *, now: int) -> SubmitResult:
         """Record each proposal once. Replaying the same plan adds no rows and spends nothing."""
-        identifier(plan.plan_ref)
+        _check_plan(plan, now)
         if plan.mode not in {"preview", "training"}:
             raise TrainingError("invalid_mode")
+        # Read the worker-held reservation before taking this ledger's write lock.
+        gate_status, fit = self._resolve_fit_gate(plan)
+        fit_info: Json | None = None
+        if plan.mode == "training":
+            fit_info = {
+                "source": FIT_GATE_SOURCE,
+                "reservation_id": plan.fit_gate.reservation_id if plan.fit_gate else None,
+                "status": gate_status or "reserved",
+            }
         ids: list[str] = []
         created = replayed = not_attempted = 0
         stopped = False
@@ -483,7 +658,9 @@ class VariantLedger:
             else:
                 seed_block = (
                     self._lineage_block(db, root)
-                    or _seed_reason(root, plan.policy, plan.grant, plan.seal, now)
+                    or _seed_reason(
+                        root, plan.policy, plan.grant, plan.seal, now, plan.generator, fit
+                    )
                     or (self._duplicate_case(db, root) if row is None else None)
                 )
             if row is None and seed_block is None:
@@ -512,6 +689,12 @@ class VariantLedger:
                     "INSERT OR IGNORE INTO root_scopes (root_ref, mode, grant_ref) VALUES (?,?,?)",
                     (root.root_ref, plan.mode, plan.grant.grant_ref),
                 )
+            fit_reason: str | None = None
+            if plan.mode == "training":
+                if fit is None:
+                    fit_reason = "fit_gate_closed"
+                elif not invalid_root and seed_block is None:
+                    fit_reason = self._bind_experiment(db, plan, fit)
             for index, proposal in enumerate(plan.proposals):
                 if stopped:
                     not_attempted += 1
@@ -527,9 +710,9 @@ class VariantLedger:
                     ids.append(str(existing[0]))
                     replayed += 1
                     continue
-                base = self._base_record(plan, proposal, index)
+                base = {**self._base_record(plan, proposal, index), "fit_gate": fit_info}
                 disposition, reason, cost, record, hit_stop = self._evaluate(
-                    db, plan, proposal, base, invalid_root, seed_block
+                    db, plan, proposal, base, invalid_root, seed_block, fit_reason
                 )
                 stopped = stopped or hit_stop
                 if existing is None:
@@ -575,6 +758,76 @@ class VariantLedger:
                 ids.append(cid)
         return SubmitResult(tuple(ids), created, replayed, stopped, not_attempted)
 
+    def _resolve_fit_gate(self, plan: GenerationPlan) -> tuple[str | None, Json | None]:
+        """Read the plan's fit reservation from the worker's mandate ledger (read-only).
+
+        Returns (why_closed, None) or (None, permission). Never reserves or claims a fit.
+        """
+        if plan.mode != "training":
+            return None, None
+        if self._fit_authority is None:
+            return "no_worker_fit_authority", None
+        gate = plan.fit_gate
+        if gate is None:
+            return "fit_reservation_absent", None
+        try:
+            fit = self._fit_authority.grant(gate.reservation_id, actor=gate.actor)
+        except MandateError as exc:
+            return str(exc) or "fit_reservation_unavailable", None
+        if fit.get("reservation_id") != gate.reservation_id or "train" not in fit.get(
+            "allowed_uses", ()
+        ):
+            return "fit_reservation_outside_training_scope", None
+        return None, fit
+
+    @staticmethod
+    def _bind_experiment(db: sqlite3.Connection, plan: GenerationPlan, fit: Json) -> str | None:
+        """Bind this root's training augmentation to one in-flight fit experiment.
+
+        A stale experiment never takes new children, and a root already bound to another
+        in-flight reservation cannot be bound to a second one (no doubled fit).
+        """
+        rid = str(fit["reservation_id"])
+        root_ref = plan.root.root_ref
+        found = db.execute(
+            "SELECT state FROM experiments WHERE reservation_id=?", (rid,)
+        ).fetchone()
+        if found is not None and found[0] != EXPERIMENT_IN_FLIGHT:
+            return "fit_experiment_stale"
+        other = db.execute(
+            "SELECT e.reservation_id FROM experiment_roots r JOIN experiments e"
+            " ON e.reservation_id=r.reservation_id WHERE r.root_ref=? AND e.state=?"
+            " AND e.reservation_id<>? LIMIT 1",
+            (root_ref, EXPERIMENT_IN_FLIGHT, rid),
+        ).fetchone()
+        if other is not None:
+            return "fit_already_bound"
+        if found is None:
+            record: Json = {
+                "reservation_id": rid,
+                "source": FIT_GATE_SOURCE,
+                "mandate_id": fit.get("mandate_id"),
+                "mandate_revision": fit.get("mandate_revision"),
+                "run_id": fit.get("run_id"),
+                "plan_revision": fit.get("plan_revision"),
+                "intake_revision": fit.get("intake_revision"),
+                "residual_revision": fit.get("residual_revision"),
+                "delegate": fit.get("delegate"),
+                "opened_by_plan_ref": plan.plan_ref,
+                "state": EXPERIMENT_IN_FLIGHT,
+                "reason": "",
+                "history": [],
+            }
+            db.execute(
+                "INSERT INTO experiments (reservation_id, state, reason, record) VALUES (?,?,'',?)",
+                (rid, EXPERIMENT_IN_FLIGHT, json.dumps(record, sort_keys=True)),
+            )
+        db.execute(
+            "INSERT OR IGNORE INTO experiment_roots (reservation_id, root_ref) VALUES (?,?)",
+            (rid, root_ref),
+        )
+        return None
+
     @staticmethod
     def _duplicate_case(db: sqlite3.Connection, root: SeedRoot) -> tuple[str, Json | None] | None:
         """One real case or label is one root: re-registering it never adds a mistake."""
@@ -613,13 +866,14 @@ class VariantLedger:
         base: Json,
         invalid_root: bool,
         seed_block: tuple[str, Json | None] | None,
+        fit_reason: str | None,
     ) -> tuple[str, str, int, Json, bool]:
         if invalid_root:
             return REJECTED, "root_invalidated", 0, self._bare(base), False
         if seed_block is not None:
             extra: Json = {"request": seed_block[1]} if seed_block[1] else {}
             return REJECTED, seed_block[0], 0, {**self._bare(base), **extra}, False
-        reason, request, record = self._static_checks(db, plan, proposal, base)
+        reason, request, record = self._static_checks(db, plan, proposal, base, fit_reason)
         cost = proposal.cost if reason is None else 0
         stop = False
         if reason is None and (
@@ -666,6 +920,7 @@ class VariantLedger:
             "split_digest",
             "recipe",
             "generator",
+            "fit_gate",
         )
         return {k: base[k] for k in keep}
 
@@ -711,7 +966,11 @@ class VariantLedger:
 
     @staticmethod
     def _static_checks(
-        db: sqlite3.Connection, plan: GenerationPlan, proposal: ProposedChild, base: Json
+        db: sqlite3.Connection,
+        plan: GenerationPlan,
+        proposal: ProposedChild,
+        base: Json,
+        fit_reason: str | None,
     ) -> tuple[str | None, Json | None, Json]:
         root, policy, gen = plan.root, plan.policy, plan.generator
         recipe = plan.recipes.get(proposal.recipe_id)
@@ -719,8 +978,9 @@ class VariantLedger:
             return "unapproved_external_teacher", None, base
         if recipe is None:
             return "unapproved_recipe", None, base
-        if plan.mode == "training" and not (plan.fit_gate and plan.fit_gate.open):
-            return "fit_gate_closed", None, base
+        if plan.mode == "training" and fit_reason is not None:
+            # Decided only by the worker-held reservation and this ledger's experiments.
+            return fit_reason, None, base
         if any(name not in root.fields for name in proposal.edits):
             return "invented_field", None, base
         if (
@@ -789,6 +1049,13 @@ class VariantLedger:
         never from the caller. Serves first calls and late callbacks alike: an invalidated child
         or a retracted root can never be admitted by a callback.
         """
+        _ident(child_id)
+        if decision is not None:
+            if type(decision) is not ValidatorDecision:
+                raise TrainingError("invalid_validator_decision")
+            _text_field(decision.validator_ref)
+            if decision.label is not None:
+                _text_field(decision.label)
         with self._tx() as db:
             row = db.execute(
                 "SELECT record, root_ref, mode, family_id FROM children WHERE child_id=?",
@@ -872,10 +1139,16 @@ class VariantLedger:
             )
 
     def retract_root(self, root_ref: str, family_id: str, reason: str) -> tuple[str, ...]:
-        """Reopen/revoke a parent: invalidate every descendant; nothing can re-admit them."""
-        identifier(root_ref)
-        identifier(family_id)
-        identifier(reason)
+        """Reopen/revoke a parent: invalidate its live descendants and pending proposals, and mark
+        every fit experiment derived from it stale. Nothing can re-admit them.
+
+        Final outcomes (quarantined or finally rejected children) are left exactly as recorded,
+        and every changed record keeps its prior disposition, reason and history. Returns the
+        invalidated child ids; `experiments()` shows the stale experiments.
+        """
+        _ident(root_ref)
+        _ident(family_id)
+        _ident(reason)
         with self._tx() as db:
             stored = db.execute(
                 "SELECT family_id FROM roots WHERE root_ref=?", (root_ref,)
@@ -891,18 +1164,64 @@ class VariantLedger:
             )
             prior: list[str] = []
             rows = db.execute(
-                "SELECT child_id, record FROM children WHERE root_ref=? AND disposition<>?"
+                "SELECT child_id, disposition, reason, record FROM children WHERE root_ref=?"
                 " ORDER BY seq",
-                (root_ref, INVALIDATED),
+                (root_ref,),
             ).fetchall()
-            for child_id, rec_json in rows:
+            for child_id, disposition, why, rec_json in rows:
+                live = disposition in _LIVE
+                pending = disposition == REJECTED and why in _PENDING_REJECTIONS
+                if not (live or pending):
+                    continue  # final outcomes and earlier invalidations are not rewritten
                 rec: Json = json.loads(rec_json)
-                rec["prior_disposition"] = rec["disposition"]
+                rec["prior_disposition"] = disposition
+                rec["prior_reason"] = why
+                rec["history"] = [
+                    *rec.get("history", []),
+                    {"disposition": disposition, "reason": why, "plan_ref": rec.get("plan_ref")},
+                ]
                 rec["weight"] = None
                 self._update(db, child_id, INVALIDATED, f"root_{reason}", rec)
                 prior.append(str(child_id))
+            self._stale_experiments(db, root_ref, f"root_{reason}")
             self._reweigh(db, family_id)
             return tuple(prior)
+
+    @staticmethod
+    def _stale_experiments(db: sqlite3.Connection, root_ref: str, why: str) -> None:
+        """Every in-flight experiment that includes this root can no longer be committed."""
+        for rid, state, rec_json in db.execute(
+            "SELECT e.reservation_id, e.state, e.record FROM experiments e JOIN experiment_roots r"
+            " ON r.reservation_id=e.reservation_id WHERE r.root_ref=? AND e.state=?"
+            " ORDER BY e.reservation_id",
+            (root_ref, EXPERIMENT_IN_FLIGHT),
+        ).fetchall():
+            rec: Json = json.loads(rec_json)
+            rec["history"] = [*rec.get("history", []), {"state": state, "reason": rec["reason"]}]
+            rec.update(state=EXPERIMENT_STALE, reason=why, stale_root_ref=root_ref)
+            db.execute(
+                "UPDATE experiments SET state=?, reason=?, record=? WHERE reservation_id=?",
+                (EXPERIMENT_STALE, why, json.dumps(rec, sort_keys=True), rid),
+            )
+
+    def experiments(self) -> list[Json]:
+        """Fit experiments with their member roots, in reservation order."""
+        with self._tx() as db:
+            rows = db.execute(
+                "SELECT reservation_id, record FROM experiments ORDER BY reservation_id"
+            ).fetchall()
+            out = []
+            for rid, rec_json in rows:
+                roots = [
+                    str(r[0])
+                    for r in db.execute(
+                        "SELECT root_ref FROM experiment_roots WHERE reservation_id=?"
+                        " ORDER BY root_ref",
+                        (rid,),
+                    )
+                ]
+                out.append({**json.loads(rec_json), "root_refs": roots})
+            return out
 
     def children(self, root_ref: str | None = None) -> list[Json]:
         with self._tx() as db:
@@ -927,7 +1246,9 @@ class VariantLedger:
         mode: Mode,
         coverage_required_groups: int | None = None,
     ) -> Json:
-        """Sealed manifest for one (seal, policy revision, grant, mode) scope.
+        """Manifest for one (seal, policy revision, grant, mode) scope.
+
+        Its `manifest_digest` is self-consistent only and unsigned (see `seal`).
 
         Family and mistake counts are derived from the ledger's own admitted roots and the
         sealed split, never from caller-supplied roots.
@@ -1011,6 +1332,15 @@ class VariantLedger:
                 "real_independent_groups": len(families),
                 "filled": len(families) >= coverage_required_groups,
             }
+        scoped_roots = {r["root_ref"] for r in rows} | {ref for ref, _ in live_roots}
+        body["experiments"] = [
+            {k: e.get(k) for k in ("reservation_id", "state", "reason", "root_refs")}
+            for e in (self.experiments() if mode == "training" else [])
+            if scoped_roots & set(e["root_refs"])
+        ]
+        body["trust"] = dict(TRUST)
+        # Exactly what the "seal" is: a digest over this body, recomputable by anyone. Nothing
+        # signs it and no key custody exists, so it proves self-consistency only.
+        body["seal"] = {"kind": SEAL_KIND, "signed": False, "digest_field": "manifest_digest"}
         body["manifest_digest"] = digest(body)
-        body["sealed"] = True
         return body
