@@ -315,6 +315,9 @@ def run(
     # Invariant on every verdict here (review 577a774 F5): verified_gain iff reproduced.
     doc = verdict.document
     assert (doc["outcome"] == "verified_gain") == (doc["verdict"] == "reproduced")
+    if iv.REGISTERED_POLICY_FLOOR is None:
+        # Re-review M2: with no D11 floor registered, no verdict here makes any effect eligible.
+        assert not any(doc["effects"].values())
     return verdict
 
 
@@ -371,7 +374,13 @@ def test_c1_clean_win_verifies_all_three_statements_and_is_alert_eligible(tmp_pa
     assert doc["comparisons"]["simple_repair"]["required"] is True
     assert doc["policy"]["required_comparators"] == ["incumbent", "simple_repair"]
     assert float(pair["uncertainty"]["lower"]) > 0.02
-    assert doc["effects"]["improvement_alert_eligible"] is True
+    # The verdict's own gates cleared, but no D11 policy floor is registered, so no effect.
+    assert doc["alert_gates"] == {
+        "cleared": True,
+        "policy_floor": "unset",
+        "policy_floor_hold": "policy_floor_unset",
+    }
+    assert doc["effects"]["improvement_alert_eligible"] is False
     assert doc["effects"]["release_request_eligible"] is False
 
 
@@ -1508,6 +1517,27 @@ def test_q1d_nothing_a_producer_can_rename_evades_the_content_register(tmp_path,
     )
 
 
+def test_q1g_feature_order_never_changes_content_with_several_values(tmp_path):
+    """Mutant: an unsorted value list must fail when two content values swap positions."""
+
+    def two_values(c):
+        return {**c.features, "context": "generated-context-" + c.features["text"][-4:]}
+
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, respelled(Scenario(CLEAN_WIN), two_values), ev=ev).outcome == (
+        "verified_gain"
+    )
+    swapped = respelled(
+        Scenario(CLEAN_WIN, prefix="swapped-", content_prefix=""),
+        lambda c: dict(reversed(list(two_values(c).items()))),
+    )
+    held(
+        run(tmp_path, swapped, ev=ev, result_revision=sha("swapped")),
+        "inconclusive",
+        "decision_content_seen_in_scored_cohort",
+    )
+
+
 def test_q1e_decision_content_itself_is_not_normalised(tmp_path):
     """Changed decision text is a new input, so it is a fresh cohort; ids still are not."""
     ev = evaluator(tmp_path)
@@ -1876,12 +1906,32 @@ def custody_files(tmp_path, sub):
     return sorted(p.name for p in (tmp_path / "evaluator-custody" / sub).glob("*.json"))
 
 
-def test_v1_revoked_verified_gain_reads_as_stale_and_every_consumer_check_refuses(tmp_path):
+TEST_FLOOR = iv.PolicyFloor(
+    floor_id="generated-test-floor-r1",
+    max_alpha_bps=500,
+    min_improvement_bps=200,
+    min_families=2,
+    min_coverage_floor_bps=7000,
+    max_missing=5,
+)
+
+
+@pytest.fixture
+def registered_floor(monkeypatch):
+    """Stands in for a future owner D11 decision. Test-only: the shipped registry is empty."""
+    monkeypatch.setattr(iv, "REGISTERED_POLICY_FLOOR", TEST_FLOOR)
+    return TEST_FLOOR
+
+
+def test_v1_revoked_verified_gain_reads_as_stale_and_every_consumer_check_refuses(
+    tmp_path, registered_floor
+):
     ev = evaluator(tmp_path)
     s = Scenario(CLEAN_WIN)
     replays = s.replays()
     v = run(tmp_path, s, ev=ev, replays=replays)
     assert v.outcome == "verified_gain"
+    # With a floor registered, the gain authorizes an alert until it is revoked.
     assert ev.authorize(v.document, effect="improvement_alert")["authorized"] is True
     assert ev.read_verdict(v.verdict_key) == v.document
     r = ev.revoke_verdict(v.verdict_key, reason="claim_corrected", issued_by=EVALUATOR)
@@ -2167,7 +2217,126 @@ def test_v11_each_seal_layer_is_checked_on_its_own(tmp_path):
     assert ev.correction_notice(a.verdict_key, watch_fired=True) is not None
 
 
-def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(tmp_path):
+def test_v12_review_m2_no_effect_on_a_gain_while_the_policy_floor_is_unset(tmp_path):
+    """Re-review M2: authorize(improvement_alert) returned True with D11 undecided."""
+    assert iv.REGISTERED_POLICY_FLOOR is None  # the shipped registry is empty
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    assert v.outcome == "verified_gain" and v.document["alert_gates"]["cleared"] is True
+    for effect in ("improvement_alert", "release_request", "handoff_request"):
+        assert ev.authorize(v.document, effect=effect) == {
+            "authorized": False,
+            "effect": effect,
+            "reason": "policy_floor_unset",
+            "state": "verified_gain",
+        }
+    # A non-win is not a gain: its refusal stays effect_not_eligible.
+    b4 = run(tmp_path, Scenario(B4, prefix="b4-"), ev=ev)
+    assert ev.authorize(b4.document, effect="improvement_alert")["reason"] == "effect_not_eligible"
+
+
+def test_v13_no_caller_supplied_policy_lifts_the_floor_hold(tmp_path):
+    """The floor is the owner's, read from the module: nothing a producer sends can lift it."""
+    import inspect
+
+    assert list(inspect.signature(iv.IndependentEvaluator.authorize).parameters) == [
+        "self",
+        "document",
+        "effect",
+    ]
+    for name in ("evaluate", "__init__"):
+        params = inspect.signature(getattr(iv.IndependentEvaluator, name)).parameters
+        assert not any("floor" in p for p in params)
+    ev = evaluator(tmp_path)
+    # The strictest policy a producer could preregister, plus terms naming a "floor".
+    t = {**terms_for(), "policy_floor": "satisfied", "registered_policy_floor": "d11-approved"}
+    strict = policy(
+        alpha_bps=1,
+        minimum_improvement_bps=2000,
+        min_families=200,
+        coverage_floor_bps=10000,
+        max_coverage_loss_bps=0,
+        max_missing=0,
+        operating_point_terms=t,
+        operating_point_digest=digest(t),
+    )
+    v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=strict)
+    assert v.outcome == "verified_gain"
+    assert ev.authorize(v.document, effect="improvement_alert")["reason"] == "policy_floor_unset"
+    # A document rewritten to claim the floor is met is not the stored verdict.
+    forged = {
+        **v.document,
+        "alert_gates": {"cleared": True, "policy_floor": "satisfied", "policy_floor_hold": None},
+        "effects": {**v.document["effects"], "improvement_alert_eligible": True},
+    }
+    assert ev.authorize(forged, effect="improvement_alert")["reason"] == (
+        "verdict_document_mismatch"
+    )
+    # Re-reading the stored verdict does not lift it either.
+    again = run(tmp_path, Scenario(CLEAN_WIN), ev=ev, pol=strict)
+    assert again.replayed
+    assert ev.authorize(again.document, effect="improvement_alert")["reason"] == (
+        "policy_floor_unset"
+    )
+
+
+def test_v14_the_d11_seam_applies_a_registered_floor_and_refuses_a_laxer_policy(
+    tmp_path, monkeypatch
+):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    held_before = run(tmp_path, s, ev=ev)  # issued while no floor existed
+    monkeypatch.setattr(iv, "REGISTERED_POLICY_FLOOR", TEST_FLOOR)
+    # A floor registered later applies to the earlier verdict without re-scoring it.
+    out = ev.authorize(held_before.document, effect="improvement_alert")
+    assert out["authorized"] is True and out["reason"] == "verdict_current_and_eligible"
+    assert ev.authorize(held_before.document, effect="release_request")["reason"] == (
+        "effect_not_eligible"
+    )
+    fresh = run(tmp_path / "fresh", s)
+    assert fresh.document["alert_gates"]["policy_floor"] == "satisfied"
+    assert fresh.document["effects"]["improvement_alert_eligible"] is True
+    lax = policy(alpha_bps=900)
+    lax_v = run(tmp_path / "lax", s, pol=lax)
+    assert lax_v.outcome == "verified_gain"
+    assert lax_v.document["alert_gates"]["policy_floor_hold"] == (
+        "policy_floor_below_registered_floor"
+    )
+    assert evaluator(tmp_path / "lax").authorize(lax_v.document, effect="improvement_alert")[
+        "reason"
+    ] == ("policy_below_registered_floor")
+    assert TEST_FLOOR.shortfalls(lax.as_json()) == ["alpha_bps"]
+    assert TEST_FLOOR.shortfalls({}) == [
+        "alpha_bps",
+        "minimum_improvement_bps",
+        "min_families",
+        "coverage_floor_bps",
+        "max_missing",
+    ]
+    for name, value in (
+        ("minimum_improvement_bps", 199),
+        ("min_families", 1),
+        ("coverage_floor_bps", 6999),
+        ("max_missing", 6),
+        ("alpha_bps", 501),
+    ):
+        assert TEST_FLOOR.shortfalls({**policy().as_json(), name: value}) == [name]
+    assert TEST_FLOOR.shortfalls(policy().as_json()) == []
+    # Each bound is inclusive at the floor's own value.
+    at_floor = {
+        "alpha_bps": 500,
+        "minimum_improvement_bps": 200,
+        "min_families": 2,
+        "coverage_floor_bps": 7000,
+        "max_missing": 5,
+    }
+    assert TEST_FLOOR.shortfalls(at_floor) == []
+    assert TEST_FLOOR.shortfalls({**at_floor, "max_missing": "5"}) == ["max_missing"]
+
+
+def test_v10_consumer_check_refuses_forged_unknown_and_ineligible_documents(
+    tmp_path, registered_floor
+):
     ev = evaluator(tmp_path)
     win = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
     non_win = run(tmp_path, Scenario(B4, prefix="b4-"), ev=ev)
@@ -2300,7 +2469,8 @@ def test_p1_provider_route_win_is_provider_reported_never_verified(tmp_path, rou
     statements = json.dumps([job, served])
     assert "verified" not in statements and "sha256" not in json.dumps(job["weights"])
     assert doc["candidate_kind"] == KINDS[route]
-    assert doc["effects"]["improvement_alert_eligible"] is True
+    assert doc["alert_gates"]["cleared"] is True  # same gates as open weight; D11 floor unset
+    assert doc["effects"]["improvement_alert_eligible"] is False
     assert {m for m, _ in double.calls} == {CANDIDATE_IDS[route]}
     assert [n for _, n in double.calls] == [64, 64, 2]
 

@@ -184,6 +184,59 @@ _EFFECT_FLAGS = {
 _NO_EFFECTS = {flag: False for flag in _EFFECT_FLAGS.values()}
 
 
+@dataclass(frozen=True)
+class PolicyFloor:
+    """A registered minimum verdict policy (master PRD owner decision D11).
+
+    A verdict's preregistered policy is the producer's own choice; this floor is the owner's.
+    A verdict may drive an effect only when its bound policy is at least this strict.
+    """
+
+    floor_id: str
+    max_alpha_bps: int
+    min_improvement_bps: int
+    min_families: int
+    min_coverage_floor_bps: int
+    max_missing: int
+
+    def shortfalls(self, policy: Mapping[str, Any]) -> list[str]:
+        def value(name: str) -> int | None:
+            v = policy.get(name) if isinstance(policy, Mapping) else None
+            return v if type(v) is int else None
+
+        checks: tuple[tuple[str, Callable[[int], bool]], ...] = (
+            ("alpha_bps", lambda v: v <= self.max_alpha_bps),
+            ("minimum_improvement_bps", lambda v: v >= self.min_improvement_bps),
+            ("min_families", lambda v: v >= self.min_families),
+            ("coverage_floor_bps", lambda v: v >= self.min_coverage_floor_bps),
+            ("max_missing", lambda v: v <= self.max_missing),
+        )
+        out = []
+        for name, ok in checks:
+            v = value(name)
+            if v is None or not ok(v):
+                out.append(name)
+        return out
+
+
+# D11 SEAM. The owner has not decided a minimum verdict policy (alpha, minimum improvement,
+# minimum families, coverage, the comparator-gap allowance and whether a tie at the ceiling
+# counts), so NO floor is registered and every effect a verified_gain could drive holds with
+# ``policy_floor_unset``. As with the OPE-526 audit/verdict issuer hold in comparison_packet,
+# there is no re-enable path short of a reviewed code change here: registering a floor means
+# replacing this ``None`` with the owner's ``PolicyFloor`` (and adding any D11 terms it lacks).
+# It is never a caller argument, a policy field or an environment setting.
+REGISTERED_POLICY_FLOOR: PolicyFloor | None = None
+
+
+def policy_floor_status(policy: Mapping[str, Any]) -> str:
+    """``unset`` (no D11 floor registered), ``satisfied`` or ``below_registered_floor``."""
+    floor = REGISTERED_POLICY_FLOOR
+    if floor is None:
+        return "unset"
+    return "below_registered_floor" if floor.shortfalls(policy) else "satisfied"
+
+
 class VerdictInputError(ValueError):
     """Structurally invalid or out-of-scope input. No verdict is produced or stored."""
 
@@ -1300,7 +1353,11 @@ class IndependentEvaluator:
         Every consumer (eligibility, watch, report, release gate) calls this with the document it
         holds before acting. It refuses a revoked key, an expired verdict, a document that is not
         the one stored under its key (including an older archived generation), and an effect the
-        verdict did not make eligible. Custody tampering raises ``CustodyError``.
+        verdict did not make eligible. Any effect on a ``verified_gain`` also refuses with
+        ``policy_floor_unset`` while no D11 floor is registered (``REGISTERED_POLICY_FLOOR``),
+        and with ``policy_below_registered_floor`` when the verdict's policy is laxer than it.
+        There is deliberately no argument for a policy or a floor here. Custody tampering raises
+        ``CustodyError``.
         """
         if effect not in _EFFECT_FLAGS:
             raise VerdictInputError("unknown_consumer_effect")
@@ -1324,7 +1381,21 @@ class IndependentEvaluator:
             return refuse("verdict_document_mismatch", "unverified")
         if int(time.time()) > stored.document["not_after"]:
             return refuse("verdict_expired", "expired")
-        if stored.document["effects"].get(_EFFECT_FLAGS[effect]) is not True:
+        held_doc = stored.document
+        if held_doc["outcome"] == "verified_gain":
+            # D11: no consumer acts on a gain until an owner-registered floor exists and the
+            # verdict's bound policy meets it. Read from this module, never from the caller.
+            floor = policy_floor_status(held_doc["policy"])
+            if floor != "satisfied":
+                return refuse(
+                    "policy_floor_unset" if floor == "unset" else "policy_below_registered_floor",
+                    stored.outcome,
+                )
+        if effect == "improvement_alert":
+            eligible = held_doc.get("alert_gates", {}).get("cleared")
+        else:
+            eligible = held_doc["effects"].get(_EFFECT_FLAGS[effect])
+        if eligible is not True:
             return refuse("effect_not_eligible", stored.outcome)
         return {
             "authorized": True,
@@ -2128,6 +2199,7 @@ class IndependentEvaluator:
             reproduced
             and statements["candidate_served_evaluation"]["status"] == "readback_consistent"
         )
+        floor = policy_floor_status(policy.as_json())
         primary = policy.required_comparators[0]
         body: Json = {
             "schema_version": VERDICT,
@@ -2177,9 +2249,17 @@ class IndependentEvaluator:
             "predictions_commitment": self._commit(record),
             "predictions_custody": "evaluator_private_retention_limited",
             "effects": {
-                "improvement_alert_eligible": alert,
+                # Held until a D11 policy floor is registered and met (``policy_floor_status``).
+                "improvement_alert_eligible": alert and floor == "satisfied",
                 "release_request_eligible": False,
                 "handoff_request_eligible": False,
+            },
+            # What the verdict's own gates decided, kept apart from the owner's floor so a
+            # later registered floor can be applied by ``authorize`` without re-scoring.
+            "alert_gates": {
+                "cleared": alert,
+                "policy_floor": floor,
+                "policy_floor_hold": None if floor == "satisfied" else "policy_floor_" + floor,
             },
             "evidence": {
                 # This exported document: a plain digest anyone can recompute. The keyed seal
