@@ -22,15 +22,20 @@ from opentour_training.evaluation.eve_benchmark import (
     ArmRun,
     BenchmarkError,
     BenchmarkResult,
+    DevelopmentFinding,
+    DispositionRegistry,
     EveCase,
     ExclusionRecord,
     FitRow,
     FrozenManifest,
+    HeldoutInputs,
     ReferenceJudgment,
     assess_development,
     freeze_manifest,
+    manifest_from_json,
     manifest_to_json,
     record_one_disposition,
+    reload_scorecard,
     score_heldout,
     verify_isolation,
     write_once,
@@ -120,11 +125,8 @@ def simulate_arm(cfg: ArmConfig, cases: Sequence[EveCase], manifest: FrozenManif
     )
 
 
-def run_fixture_benchmark(
-    *, include_repair: bool = True, heldout_cases: int = 30
-) -> BenchmarkResult:
-    fx = build_fixture_set(heldout_cases=heldout_cases)
-    manifest = freeze_manifest(
+def _generated_manifest(fx: FixtureSet) -> FrozenManifest:
+    return freeze_manifest(
         benchmark_id="generated-eve-benchmark-1",
         evidence_tier="generated",
         development_cases=fx.development_cases,
@@ -140,6 +142,13 @@ def run_fixture_benchmark(
         min_recurring_families=2,
         adjudicator_kind="generated_fixture",
     )
+
+
+def generated_inputs(
+    manifest: FrozenManifest, *, include_repair: bool = True, heldout_cases: int = 30
+) -> tuple[HeldoutInputs, DevelopmentFinding]:
+    """Regenerate the deterministic frozen inputs of a generated run, bound to ``manifest``."""
+    fx = build_fixture_set(heldout_cases=heldout_cases)
     cfgs = {c.arm_id: c for c in ARM_CONFIGS}
     dev_base = simulate_arm(cfgs[BASELINE_ARM], fx.development_cases, manifest)
     dev_rep = simulate_arm(cfgs[REPAIR_ARM], fx.development_cases, manifest)
@@ -152,23 +161,64 @@ def run_fixture_benchmark(
     )
     fit_rows: list[FitRow] = []  # baseline arm is not fitted; simple repair is a retrieval switch
     prompts = [c.question for c in fx.heldout_cases]
-    iso = verify_isolation(
-        manifest, fit_rows=fit_rows, prompt_texts=prompts, heldout_key=fx.heldout_key
-    )
     eligible = tuple(c for c in fx.heldout_cases if c.case_id in manifest.heldout_eligible)
     runs = [simulate_arm(cfgs[BASELINE_ARM], eligible, manifest)]
     if include_repair:
         runs.append(simulate_arm(cfgs[REPAIR_ARM], eligible, manifest))
+    return HeldoutInputs(fx.heldout_cases, fx.heldout_key, fit_rows, prompts, runs), finding
+
+
+def run_fixture_benchmark(
+    *, include_repair: bool = True, heldout_cases: int = 30
+) -> BenchmarkResult:
+    manifest = _generated_manifest(build_fixture_set(heldout_cases=heldout_cases))
+    inputs, finding = generated_inputs(
+        manifest, include_repair=include_repair, heldout_cases=heldout_cases
+    )
+    iso = verify_isolation(
+        manifest,
+        fit_rows=inputs.fit_rows,
+        prompt_texts=inputs.prompt_texts,
+        heldout_key=inputs.heldout_key,
+    )
     card = score_heldout(
         manifest,
-        heldout_cases=fx.heldout_cases,
-        heldout_key=fx.heldout_key,
-        fit_rows=fit_rows,
-        prompt_texts=prompts,
+        heldout_cases=inputs.heldout_cases,
+        heldout_key=inputs.heldout_key,
+        fit_rows=inputs.fit_rows,
+        prompt_texts=inputs.prompt_texts,
         isolation=iso,
-        runs=runs,
+        runs=inputs.runs,
     )
     return BenchmarkResult(manifest, finding, card)
+
+
+def reload_generated(directory: Path) -> BenchmarkResult:
+    """Re-admit a generated run written by ``run-generated`` by re-scoring it from scratch.
+
+    The written scorecard alone cannot be verified (see ``reload_scorecard``); for generated
+    fixtures the frozen inputs are deterministic, so they are regenerated and the run is
+    accepted only if it reproduces the written scorecard digest exactly.
+    """
+    try:
+        raw_manifest = json.loads((directory / "manifest.json").read_bytes())
+        raw_card = json.loads((directory / "scorecard.json").read_bytes())
+    except (OSError, ValueError):
+        raise BenchmarkError("scorecard_json_invalid") from None
+    if type(raw_manifest) is not dict or set(raw_manifest) != {"body", "manifest_digest"}:
+        raise BenchmarkError("manifest_not_frozen_or_tampered")
+    if type(raw_manifest["body"]) is not dict:
+        raise BenchmarkError("manifest_not_frozen_or_tampered")
+    manifest = manifest_from_json(raw_manifest)
+    body = raw_card.get("body") if type(raw_card) is dict else None
+    arms = body.get("arms") if type(body) is dict else None
+    try:  # a wrong guess cannot pass: the recomputed digest must equal the written one
+        inputs, finding = generated_inputs(
+            manifest, include_repair=type(arms) is dict and REPAIR_ARM in arms
+        )
+    except (KeyError, TypeError, AttributeError):  # a re-digested manifest of another shape
+        raise BenchmarkError("scorecard_not_reproduced") from None
+    return BenchmarkResult(manifest, finding, reload_scorecard(raw_card, manifest, inputs))
 
 
 # ---------------------------------------------------------------- prepared-export replay adapter
@@ -232,21 +282,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--baseline-only", action="store_true")
     run.add_argument("--disposition", default=None)
+    dispose = sub.add_parser(
+        "dispose-generated",
+        help="record the disposition for a generated run written earlier, after inspection",
+    )
+    dispose.add_argument("--from", dest="source", type=Path, required=True)
+    dispose.add_argument("--disposition", required=True)
+    dispose.add_argument("--copy-to", type=Path, default=None)
     args = p.parse_args(argv)
+    # No owner is named in the generated freeze, so this id is recorded as caller-asserted and
+    # cannot satisfy the named-owner gate. The registry comes from the worker's configuration
+    # (OPENTOUR_EVE_DISPOSITION_REGISTRY), never from --out or --copy-to.
+    owner, at = "generated-owner-1", "2026-01-01T00:00:00Z"
     try:
-        result = run_fixture_benchmark(include_repair=not args.baseline_only)
-        out: Path = args.out
-        write_once(out / "manifest.json", manifest_to_json(result.manifest))
-        write_once(out / "scorecard.json", result.scorecard.to_json())
-        if result.finding is not None:
-            write_once(out / "development.json", result.finding.to_json())
-        if args.disposition:
-            # No owner is named in the generated freeze, so this id is recorded as
-            # caller-asserted and cannot satisfy the named-owner gate.
+        if args.cmd == "dispose-generated":
+            registry = DispositionRegistry.from_environment()
+            result = reload_generated(args.source)
             record_one_disposition(
-                out, result.scorecard, result.finding, disposition=args.disposition,
-                owner_id="generated-owner-1", recorded_at="2026-01-01T00:00:00Z",
+                registry, result.scorecard, result.finding, disposition=args.disposition,
+                owner_id=owner, recorded_at=at, copy_to=args.copy_to,
             )  # fmt: skip
+        else:
+            configured = DispositionRegistry.from_environment() if args.disposition else None
+            result = run_fixture_benchmark(include_repair=not args.baseline_only)
+            out: Path = args.out
+            write_once(out / "manifest.json", manifest_to_json(result.manifest))
+            write_once(out / "scorecard.json", result.scorecard.to_json())
+            if result.finding is not None:
+                write_once(out / "development.json", result.finding.to_json())
+            if configured is not None:
+                record_one_disposition(
+                    configured, result.scorecard, result.finding, disposition=args.disposition,
+                    owner_id=owner, recorded_at=at, copy_to=out,
+                )  # fmt: skip
     except BenchmarkError as exc:
         print(f"REFUSED {exc.code}: {exc}", file=sys.stderr)
         return 2
