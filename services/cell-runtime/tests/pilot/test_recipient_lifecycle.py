@@ -65,6 +65,7 @@ class Fixture:
                 rollback_authorization_ref=rollback.authorization_ref,
                 environment_ref=rollback.environment_ref,
                 restored_version=rollback.expected_fallback_version,
+                rollback_operation_receipt_ref="operation-generated-one",
                 serving_readback_ref="readback-generated-one",
             )
         else:
@@ -234,6 +235,9 @@ def test_wrong_observer_cannot_turn_replay_into_rollback(receipt_fixture, change
         {"restored_version": "b" * 64},
         {"rollback_authorization_ref": "newer-authorization"},
         {"serving_readback_ref": "invalid ref"},
+        {"rollback_operation_receipt_ref": "invalid ref"},
+        {"rollback_operation_receipt_ref": "readback-generated-one"},
+        {"serving_readback_ref": "separately-approved-rollback"},
         {"observed_at": "1970-01-01T00:00:00Z"},
     ],
 )
@@ -302,6 +306,7 @@ def test_rollback_claim_requires_operation_and_independent_restored_readback(rec
     assert claim["release_ref"] == policy.binding.release_ref
     assert claim["restored_version"] == rollback.expected_fallback_version
     assert claim["serving_readback_ref"] == observed.serving_readback_ref
+    assert claim["rollback_operation_receipt_ref"] == observed.operation_receipt_ref
     receipt_fixture.record("rollback", payload_updates=claim)
     assert receipt_fixture.projection().rollback is not None
     for change in (
