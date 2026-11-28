@@ -252,3 +252,88 @@ def test_chart_selection_rechecks_frozen_receipt_and_named_grant(tmp_path, monke
     h.action(view, "ot_result_open", pin)
     assert screen(h, view).get("callback_id") != "ot_arm_chart"
     assert counts(h) == before
+
+
+@pytest.mark.parametrize("surface", ["home", "slash"])
+def test_scoped_monthly_answer_checks_live_membership_and_signed_receipt_at_render(
+    tmp_path, monkeypatch, surface
+):
+    from datetime import date
+
+    from opentour_cell.pilot import scoped_query_report
+    from opentour_cell.pilot.training import LocalTrainingStore
+    from test_live_authority import SignedCase
+    from test_reviewer_workflow import restart
+
+    live = SignedCase(tmp_path / "authority")
+    live.body["actors"][ACTOR] = ["inspect"]
+    live.write()
+    h = Harness(tmp_path / "workspace", organization="org-a")
+    h.config["directory"] = str(live.directory)
+    h.config["users"][ACTOR]["datasets"] = [live.body["dataset_ref"]]
+    pin = dict(
+        workflow_ref=live.workflow,
+        publication_file="customer-month.json",
+        custodian_key_id="issuer-01",
+    )
+    hidden = dict(
+        pin, workflow_ref="unrelated-confidential", publication_file="unrelated-month.json"
+    )
+    h.config["monthly_invoice_reports"] = dict(timezone="America/New_York", workflows=[hidden, pin])
+    h.save()
+    h.store = LocalTrainingStore(live.directory / "training.sqlite3", "org-a", existing_only=True)
+    restart(h)
+    calls = []
+    report = scoped_query_report.MonthlyInvoiceReport(
+        date(2026, 10, 1), date(2026, 11, 1), "America/New_York", 0, 0, 0
+    )
+    receipt = [report, "generated-digest"]
+
+    def read(directory, publication_file, scope, *, timezone, at, custodian_key_id):
+        assert directory == live.directory and publication_file == pin["publication_file"]
+        assert (
+            scope.workflow_ref == live.workflow and scope.engagement_epoch == h.store.engagement_id
+        )
+        assert timezone == report.timezone and custodian_key_id == pin["custodian_key_id"]
+        calls.append(publication_file)
+        return tuple(receipt) if receipt else None
+
+    monkeypatch.setattr(scoped_query_report, "open_signed_monthly_invoice_report", read)
+    before = counts(h)
+
+    def ask():
+        prompt = "Which workflows had recurring invoice code errors last month?"
+        if surface == "slash":
+            return h.launch(prompt=prompt)
+        click(h, publish(h, monkeypatch, ACTOR), "ot_app_prompt", ACTOR)
+        v = list(h.slack.screens)[-1]
+        h.form(v, {"command": {"command": {"value": prompt}}})
+        return v
+
+    v = ask()
+    assert screen(h, v)["callback_id"] == "ot_monthly_invoice" and len(calls) == 2
+    answer = text(h, v)
+    assert "2026-10-01 through 2026-10-31 (America/New_York)" in answer
+    assert "0 recurring errors among 0 verified decisions" in answer and live.workflow in answer
+    assert hidden["workflow_ref"] not in answer
+    from dataclasses import replace
+
+    receipt[0] = replace(report, recurring_errors=3, verified_decisions=42, excluded_decisions=5)
+    assert "3 recurring errors among 42 verified decisions. Excluded decisions: 5." in text(
+        h, ask()
+    )
+    receipt.clear()
+    assert screen(h, ask())["callback_id"] == "ot_query_hold"
+    receipt.extend((report, "generated-digest"))
+    original = h.app.journal.admit_view
+
+    def revoke(kind, **kw):
+        if kind == "ot_monthly_invoice":
+            del live.body["actors"][ACTOR]
+            live.write()
+        return original(kind, **kw)
+
+    monkeypatch.setattr(h.app.journal, "admit_view", revoke)
+    denied = ask()
+    assert live.workflow not in text(h, denied) and "verified decisions" not in text(h, denied)
+    assert hidden["workflow_ref"] not in text(h, denied) and counts(h) == before

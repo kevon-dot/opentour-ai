@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from opentour_cell.pilot.intake_mcp import REF_PATTERN, IntakePrincipal
 from opentour_cell.pilot.live_evidence import LiveEvidence, LiveScope, binding_candidate
@@ -35,6 +36,7 @@ from opentour_cell.pilot.scoped_query_plan import (
     WorkflowDiscovery,
     plan_query,
 )
+from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
 from opentour_cell.pilot.starter_setup import StarterBinding, StarterPreview, StarterSetup
 from opentour_cell.pilot.status_questions import (
     ApprovalEvidence,
@@ -170,6 +172,52 @@ def _json(value: object) -> str:
 
 
 @dataclass(frozen=True)
+class MonthlyReportPin:
+    workflow_ref: str
+    publication_file: str
+    custodian_key_id: str
+
+
+@dataclass(frozen=True)
+class MonthlyReportSettings:
+    timezone: str
+    workflows: tuple[MonthlyReportPin, ...]
+
+    @classmethod
+    def parse(cls, doc: Json) -> MonthlyReportSettings:
+        _check(isinstance(doc, dict) and doc.keys() == {"timezone", "workflows"})
+        timezone = doc["timezone"]
+        _check(isinstance(timezone, str) and 0 < len(timezone) <= 128)
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            raise Refused() from None
+        rows = doc["workflows"]
+        _check(isinstance(rows, list) and 1 <= len(rows) <= 20)
+        pins = []
+        for row in rows:
+            _check(
+                isinstance(row, dict)
+                and row.keys() == {"workflow_ref", "publication_file", "custodian_key_id"}
+            )
+            pin = MonthlyReportPin(**row)
+            _check(
+                isinstance(pin.workflow_ref, str) and re.fullmatch(REF_PATTERN, pin.workflow_ref)
+            )
+            _check(
+                isinstance(pin.publication_file, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,110}\.json", pin.publication_file)
+            )
+            _check(
+                isinstance(pin.custodian_key_id, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,126}[a-z0-9]", pin.custodian_key_id)
+            )
+            pins.append(pin)
+        _check(len({pin.workflow_ref for pin in pins}) == len(pins))
+        return cls(timezone, tuple(pins))
+
+
+@dataclass(frozen=True)
 class Settings:
     organization: str
     team: str
@@ -190,6 +238,7 @@ class Settings:
     config_path: Path | None = None
     explicit_recipient: bool = True
     live_workflow_ref: str = ""
+    monthly_invoice_reports: MonthlyReportSettings | None = None
     starter_setup: StarterBinding | None = None
 
     @property
@@ -238,6 +287,7 @@ class Settings:
             "workflow_label",
             "starter_setup",
             "live_workflow_ref",
+            "monthly_invoice_reports",
         }
         _check(isinstance(doc, dict) and required <= doc.keys() <= required | optional)
         _check(isinstance(doc["organization"], str) and LOCAL_ID.fullmatch(doc["organization"]))
@@ -305,6 +355,9 @@ class Settings:
             path,
             explicit_recipient=explicit_recipient,
             live_workflow_ref=live_workflow,
+            monthly_invoice_reports=MonthlyReportSettings.parse(doc["monthly_invoice_reports"])
+            if "monthly_invoice_reports" in doc
+            else None,
             starter_setup=StarterBinding.parse(doc["starter_setup"])
             if "starter_setup" in doc
             else None,
@@ -1642,6 +1695,78 @@ class Workbench:
                 return workflow, pin, facts
         except Exception:
             return None
+
+    def _monthly_discovery(
+        self, cfg: Settings, actor: str
+    ) -> tuple[tuple[str, MonthlyInvoiceReport, str], ...]:
+        from opentour_cell.pilot.live_authority import PrivateLiveAuthority
+        from opentour_cell.pilot.scoped_query_report import open_signed_monthly_invoice_report
+        from opentour_cell.pilot.workflow_benchmarks import BenchmarkScope
+
+        setup = cfg.monthly_invoice_reports
+        if setup is None:
+            return ()
+        now = datetime.now(UTC)
+        principal = IntakePrincipal(cfg.organization, actor, "slack")
+        visible = []
+        for pin in setup.workflows:
+            admitted = False
+            try:
+                authority = PrivateLiveAuthority(cfg.directory, cfg.organization, pin.workflow_ref)
+                with authority.guard(principal, pin.workflow_ref) as scope:
+                    _check(
+                        scope.can_inspect
+                        and scope.tenant == cfg.organization
+                        and scope.workflow_ref == pin.workflow_ref
+                        and scope.engagement_epoch == self.store.engagement_id
+                    )
+                    _check(cfg.permission(actor, "inspect", scope.dataset_ref)["aggregate"])
+                    admitted = True
+                    verified = open_signed_monthly_invoice_report(
+                        cfg.directory,
+                        pin.publication_file,
+                        BenchmarkScope(scope.tenant, scope.engagement_epoch, scope.workflow_ref),
+                        timezone=setup.timezone,
+                        at=now,
+                        custodian_key_id=pin.custodian_key_id,
+                    )
+                    if verified is None:
+                        return ()
+                    report, revision = verified
+                    protected = self.journal.opaque(
+                        "month",
+                        [
+                            scope.authority_revision,
+                            scope.dataset_revision,
+                            self._policy(cfg, actor),
+                            pin.publication_file,
+                            pin.custodian_key_id,
+                            revision,
+                        ],
+                    )
+                visible.append((pin.workflow_ref, report, protected))
+            except (ImportError, ValueError, OSError, KeyError, sqlite3.Error):
+                if admitted:
+                    return ()
+        return tuple(visible)
+
+    def _monthly_question(
+        self, cfg: Settings, actor: str, view: str, plan: WorkflowDiscovery
+    ) -> None:
+        rows = self._monthly_discovery(cfg, actor) if cfg.monthly_invoice_reports else ()
+        token = self.journal.context(actor, cfg.channel, view, "monthly_question")
+        if not rows:
+            self._show(view, self.views.query_hold_modal(token, plan))
+            return
+        self._show(
+            view,
+            self.views.monthly_invoice_answer(
+                token, [(workflow, report) for workflow, report, _ in rows]
+            ),
+            authorize=lambda: _check(
+                self._monthly_discovery(self.settings(check_engagement=False), actor) == rows
+            ),
+        )
 
     def _chart_match(
         self, cfg: Settings, actor: str, source: str, version: int
@@ -4602,7 +4727,10 @@ class Workbench:
         if isinstance(plan, ArmChart):
             self._chart_picker(cfg, actor, view, plan)
             return
-        if isinstance(plan, WorkflowDiscovery) or plan == QueryHold.VERSION_REQUIRED:
+        if isinstance(plan, WorkflowDiscovery):
+            self._monthly_question(cfg, actor, view, plan)
+            return
+        if plan == QueryHold.VERSION_REQUIRED:
             ctx = self.journal.context(actor, cfg.channel, view, "query_hold")
             self._show(view, self.views.query_hold_modal(ctx, plan))
             return

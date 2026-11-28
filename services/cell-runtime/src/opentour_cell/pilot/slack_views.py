@@ -7,7 +7,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from opentour_cell.pilot.readout import INPUT_VERSION, MAX_CASES, OUTPUT_VERSION, evaluate_manifest
@@ -24,6 +24,7 @@ from opentour_cell.pilot.text_classifier import (
 
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
+    from opentour_cell.pilot.scoped_query_report import MonthlyInvoiceReport
 
 from opentour_cell.pilot.training_data import EVALUATION_FIELDS, FIELD_NAMES
 
@@ -812,6 +813,25 @@ def frozen_rule_chart(
         else:
             blocks.append(_section(f"{label} · 0/0 · rate unavailable"))
     return _modal("Frozen comparison", "ot_arm_chart", context, blocks)
+
+
+def monthly_invoice_answer(context: str, rows: Sequence[tuple[str, MonthlyInvoiceReport]]) -> Block:
+    first = rows[0][1]
+    through = first.end - timedelta(days=1)
+    blocks = [
+        _section(
+            f"Recurring invoice-code errors · {first.start} through {through} ({first.timezone})"
+        )
+    ]
+    for workflow, report in rows:
+        blocks.append(
+            _section(
+                f"{_display(workflow)} · {report.recurring_errors} recurring errors "
+                f"among {report.verified_decisions} verified decisions. "
+                f"Excluded decisions: {report.excluded_decisions}."
+            )
+        )
+    return _modal("Monthly invoice errors", "ot_monthly_invoice", context, blocks)
 
 
 def query_hold_modal(context: str, plan: ArmChart | WorkflowDiscovery | QueryHold) -> Block:
