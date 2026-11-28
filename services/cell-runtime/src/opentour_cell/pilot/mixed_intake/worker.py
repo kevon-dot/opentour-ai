@@ -290,6 +290,28 @@ def idempotency_key(draft_key: str) -> str:
     return "mixed-intake-" + draft_key[:48]
 
 
+def provably_unbound(error: BaseException) -> bool:
+    """Whether an OPE-505 queue refusal provably bound nothing (no run, no key).
+
+    `DurableIntake.submit_intake` runs its whole body in one `BEGIN IMMEDIATE` transaction that
+    `_db` rolls back on any exception and commits only on a clean exit, inside the authority
+    guard. A typed `IntakeError` therefore reaches the caller from exactly three places:
+
+    - the guard's entry (selection, sealed grant, withdrawal, expiry), before the transaction;
+    - the body, where `_db` rolls the transaction back before re-raising;
+    - the guard's exit, after the commit, when releasing the engagement or owner guard fails.
+      `LocalStarterAuthority.setup_grant` wraps every such failure (`OSError`, `sqlite3.Error`,
+      `ManifestError`, `MandateError`, `TrainingError`) as `IntakeError(...) from error`, and the
+      guards themselves never raise `IntakeError`.
+
+    So a refusal with no `__cause__` was raised before OPE-505 committed anything. A refusal
+    with a cause may follow a commit and is never treated as unbound (fail closed). The same
+    rule makes a cause-bearing refusal raised in the body (an `sqlite3.Error` inside the
+    transaction) count as possibly bound: conservative, never unsafe.
+    """
+    return isinstance(error, AdmissionError) and error.__cause__ is None
+
+
 def parent_matches(lineage: object, expected: str | None) -> bool:
     """OPE-505's own parent run, captured at submit, is exactly the expected parent."""
     return type(lineage) is dict and lineage.get("parent_run") == expected
@@ -374,9 +396,12 @@ class StarterBenchmarkSink:
     `reconciled: true` and `provenance: ope505_receipt_at_submit`, only if it is not superseded
     and its receipt verifies, including OPE-505's parent at submit. A receipt that fails on its
     lineage is held with a lineage reason, and its refusal marker is written in the same
-    transaction as the decision. OPE-505 itself adjudicates the idempotency key: a retry always
-    submits, and an OPE-505 refusal of a key already bound to an earlier intent is held as
-    `OPE505_INTENT_CHANGED`.
+    transaction as the decision. A directly recorded admission carries the receipt's fields,
+    and is held as `OPE505_LINEAGE_MISMATCH` unless the record-time `get_run` confirms them.
+    An ancestor's submit frees its successor (under the same intent) only when OPE-505 provably
+    bound nothing (`provably_unbound`); every other outcome counts as binding. OPE-505 itself
+    adjudicates the idempotency key: a retry always submits, and an OPE-505 refusal of a key
+    already bound to an earlier intent is held as `OPE505_INTENT_CHANGED`.
 
     The final checks and the ledger writes run in `BEGIN IMMEDIATE` transactions, backed by
     unique indexes, so concurrent dispatchers record at most one admission per draft and per
@@ -701,10 +726,17 @@ class StarterBenchmarkSink:
                 workflow_ref=None,
             )
             try:
-                # OPE-505's queue admission is one transaction: a refusal binds nothing.
+                # OPE-505's queue admission is one transaction (see `provably_unbound`).
                 receipt = admission.intake.submit_intake(principal, request)
             except AdmissionError as error:
-                self._outcome(session, draft_key, attempt, "refused", str(error))
+                unbound = provably_unbound(error)
+                self._outcome(
+                    session,
+                    draft_key,
+                    attempt,
+                    "bound_nothing" if unbound else "refused",
+                    str(error),
+                )
                 # OPE-505 refuses a key already bound to an earlier intent (as a conflict, or as
                 # unavailable once that intent's grant moved on).
                 if str(error) == "idempotency_conflict" or (
@@ -764,11 +796,19 @@ class StarterBenchmarkSink:
                 expected, parent = self._expected_parent(db, draft_key, workflow, identity)
                 if not parent_matches(lineage, expected):
                     raise IntakeError("OPE505_LINEAGE_MISMATCH")
+                assert lineage is not None
+                # The record-time read must confirm what OPE-505 reported at submit.
+                if (
+                    benchmark is None
+                    or benchmark.benchmark_ref != lineage["benchmark_ref"]
+                    or benchmark.version != lineage["benchmark_version"]
+                    or status.workflow_ref != lineage["workflow_ref"]
+                ):
+                    raise IntakeError("OPE505_LINEAGE_MISMATCH")
             except IntakeError as error:
                 self._refusal(db, draft_key, receipt.run_ref, error.code)
                 hold = error
             else:
-                assert lineage is not None
                 self.store.log(
                     db,
                     session,
@@ -780,17 +820,18 @@ class StarterBenchmarkSink:
                         "run_ref": receipt.run_ref,
                         "correlation_ref": receipt.correlation_ref,
                         "run_state": receipt.state,
-                        "workflow_ref": status.workflow_ref,
-                        "benchmark_ref": benchmark.benchmark_ref if benchmark else None,
-                        "benchmark_version": benchmark.version if benchmark else None,
-                        "benchmark_state": benchmark.benchmark_state if benchmark else None,
+                        # The submit-time receipt, confirmed by the record-time read above.
+                        "workflow_ref": lineage["workflow_ref"],
+                        "benchmark_ref": lineage["benchmark_ref"],
+                        "benchmark_version": lineage["benchmark_version"],
+                        "benchmark_state": lineage["benchmark_state"],
                         **link,
                         "lineage_parent_draft_key": parent["draft_key"] if parent else None,
                         "lineage_parent": parent,
                         # OPE-505's own lineage field for the benchmark this run admitted.
                         "ope505_parent_run": lineage["parent_run"],
                         "reconciled": False,
-                        "provenance": "ope505_read_at_record",
+                        "provenance": "ope505_receipt_confirmed_at_record",
                     },
                 )
         if hold is not None:

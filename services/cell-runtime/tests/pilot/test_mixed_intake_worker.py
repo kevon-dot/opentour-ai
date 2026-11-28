@@ -498,7 +498,8 @@ def test_freeze_admits_one_ope505_benchmark_draft_through_the_production_intake(
         "reconciled",
         "provenance",
     }
-    assert ope505["reconciled"] is False and ope505["provenance"] == "ope505_read_at_record"
+    assert ope505["reconciled"] is False
+    assert ope505["provenance"] == "ope505_receipt_confirmed_at_record"
     assert ope505["lineage_parent"] is None
     assert ope505["predecessor_draft_key"] is None and ope505["ope505_parent_run"] is None
     assert ope505["benchmark_state"] == "draft" and ope505["benchmark_version"] == 1
@@ -1907,6 +1908,165 @@ def test_an_ancestor_submit_that_bound_nothing_never_blocks_its_successor(
     assert ope505["state"] == "admitted" and ope505["benchmark_version"] == 1
     assert ope505["ope505_parent_run"] is None and ope505["lineage_parent"] is None
     assert world.ope505_rows("intake_runs") == 1
+
+
+def test_k11_the_ancestors_check_and_submit_record_are_one_serialized_step(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review F1 (K11): a successor can never check between its ancestor's check and its
+    submit record, so only one of the two ever reaches OPE-505 under one intent."""
+    world = World(tmp_path / "w")
+    w, sid = scanned(world)
+    stale = w.call(OWNER, FREEZE, {"session_id": sid})  # frozen, not dispatched: no grant yet
+    assert stale["ope505"]["state"] == "not_configured"
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    world.starter()
+    original = entry.StarterBenchmarkSink._lineage
+    ancestor_checked, successor_checked = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def lineage(db, draft_key, identity, workflow, link, run_ref=None):  # type: ignore[no-untyped-def]
+        if run_ref is not None:
+            return original(db, draft_key, identity, workflow, link, run_ref)
+        order.append(draft_key)
+        if draft_key == stale["draft_key"]:
+            original(db, draft_key, identity, workflow, link, run_ref)
+            ancestor_checked.set()
+            # Serialized, the successor cannot even be frozen until this commits: times out.
+            successor_checked.wait(2.0)
+            return None
+        try:
+            return original(db, draft_key, identity, workflow, link, run_ref)
+        finally:
+            successor_checked.set()
+
+    monkeypatch.setattr(entry.StarterBenchmarkSink, "_lineage", staticmethod(lineage))
+    sweeper = world.worker()
+    swept: list[Json] = []
+    thread = threading.Thread(target=lambda: swept.append(sweeper.dispatch_pending()))
+    thread.start()
+    assert ancestor_checked.wait(30)
+    fresh = w.call(OWNER, FREEZE, {"session_id": sid})
+    thread.join(60)
+    assert fresh["supersedes"] == stale["draft_key"]
+    assert fresh["ope505"] == {
+        "state": "held",
+        "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
+    }
+    # The ancestor, serialized first, either recorded before its successor was frozen or was
+    # superseded before recording; both are legitimate. What may never happen is two submits.
+    assert swept[0]["admitted"] == [stale["draft_key"]] or swept[0]["held"] == [
+        {"draft_key": stale["draft_key"], "reason": "DRAFT_SUPERSEDED"}
+    ]
+    submits = [p["draft_key"] for _, p in ledger_rows(world, "ope505_submit")]
+    assert submits == [stale["draft_key"]]  # the successor never submitted
+    assert world.ope505_rows("intake_keys") == 1 and world.ope505_rows("intake_runs") == 1
+
+
+@pytest.mark.parametrize("proof", ["cause_free_refusal", "refusal_with_a_cause", "lost_reply"])
+def test_f2_only_a_provably_unbound_ancestor_submit_frees_its_successor(
+    tmp_path: Path, monkeypatch, proof: str
+) -> None:
+    """Review F2: OPE-505 refused the ancestor's submit; the successor may submit under the same
+    grant only when the worker can prove OPE-505 bound nothing."""
+    from opentour_cell.pilot.intake_admission import DurableIntake
+    from opentour_cell.pilot.intake_mcp import IntakeError as AdmissionError
+
+    world = World(tmp_path / "w")
+    selection = world.starter()
+    w, sid = scanned(world)
+    original = DurableIntake.submit_intake
+    withdrawn = selection.parent / "starter-intake-withdrawn-generated-starter.json"
+
+    def refuse(self, actor, request):  # type: ignore[no-untyped-def]
+        if proof == "cause_free_refusal":
+            _private(withdrawn, {})  # OPE-505's own guard refuses before its transaction
+            return original(self, actor, request)
+        if proof == "refusal_with_a_cause":
+            try:
+                raise OSError("generated guard release failure")
+            except OSError as error:  # the shape of a failure after OPE-505 could commit
+                raise AdmissionError("intake_unavailable") from error
+        raise OSError("generated lost reply")
+
+    monkeypatch.setattr(DurableIntake, "submit_intake", refuse)
+    first = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert first["ope505"] == {"state": "held", "reason": "OPE505_UNAVAILABLE"}
+    assert world.ope505_rows("intake_runs") == 0 and world.ope505_rows("intake_keys") == 0
+    outcome = [p["outcome"] for _, p in ledger_rows(world, "ope505_submit_outcome")]
+    assert outcome == (
+        ["bound_nothing"]
+        if proof == "cause_free_refusal"
+        else ["refused"]
+        if proof == "refusal_with_a_cause"
+        else []
+    )
+    monkeypatch.setattr(DurableIntake, "submit_intake", original)
+    if withdrawn.exists():
+        os.unlink(withdrawn)
+    edit_n05(world, "generated-rev-05-2")
+    w.call(OWNER, "mixed_intake_run", {"session_id": sid, "incremental": True})
+    second = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert second["supersedes"] == first["draft_key"]
+    if proof == "cause_free_refusal":
+        ope505 = second["ope505"]
+        assert ope505["state"] == "admitted" and ope505["benchmark_version"] == 1
+        assert ope505["lineage_parent"] is None and ope505["ope505_parent_run"] is None
+        assert world.ope505_rows("intake_runs") == 1
+    else:  # fail closed: OPE-505 may have bound the ancestor's key to this intent
+        assert second["ope505"] == {
+            "state": "held",
+            "reason": "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
+        }
+        assert world.ope505_rows("intake_runs") == 0
+
+
+@pytest.mark.parametrize("field", ["benchmark_version", "benchmark_ref", "workflow_ref"])
+def test_f3_a_record_time_read_that_disagrees_with_the_receipt_is_held(
+    tmp_path: Path, monkeypatch, field: str
+) -> None:
+    """Review F3: the admitted row's OPE-505 fields must equal the submit-time receipt."""
+    from dataclasses import replace
+
+    from opentour_cell.pilot.workflow_benchmarks import BenchmarkIntake
+
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    original = BenchmarkIntake.get_run
+
+    def drifted(self, actor, run_ref):  # type: ignore[no-untyped-def]
+        status = original(self, actor, run_ref)
+        if field == "workflow_ref":
+            return replace(status, workflow_ref="workflow-generated-drift")
+        attr = {"benchmark_version": "version", "benchmark_ref": "benchmark_ref"}[field]
+        value = 99 if field == "benchmark_version" else "benchmark-generated-drift"
+        return replace(status, benchmark=replace(status.benchmark, **{attr: value}))
+
+    monkeypatch.setattr(BenchmarkIntake, "get_run", drifted)
+    held = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    assert held == {"state": "held", "reason": "OPE505_LINEAGE_MISMATCH"}
+    assert ledger_rows(world, "ope505_admitted") == []
+    assert [p["reason"] for _, p in ledger_rows(world, RECEIPT_REFUSED)] == [
+        "OPE505_LINEAGE_MISMATCH"
+    ]
+    monkeypatch.setattr(BenchmarkIntake, "get_run", original)
+    # never adopted later either: the refusal is permanent for that receipt's run
+    world.regrant("generated-starter-2", setup_policy_revision="generated-setup-rev-2")
+    retry = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    assert retry == {"state": "held", "reason": "OPE505_LINEAGE_MISMATCH"}
+
+
+def test_f3_the_admitted_row_records_the_receipt_values(tmp_path: Path) -> None:
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    ope505 = w.call(OWNER, FREEZE, {"session_id": sid})["ope505"]
+    lineage = ledger_rows(world, "ope505_receipt")[0][1]["lineage"]
+    for key in ("benchmark_ref", "benchmark_version", "benchmark_state", "workflow_ref"):
+        assert ope505[key] == lineage[key], key
+    assert ope505["provenance"] == "ope505_receipt_confirmed_at_record"
 
 
 def test_l3_a_lock_wait_past_the_busy_timeout_then_a_regrant_reconciles(
