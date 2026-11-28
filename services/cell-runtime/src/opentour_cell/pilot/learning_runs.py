@@ -701,6 +701,32 @@ class LearningRuns:
 
     # ---- endpoint handlers (TLS gateway and local Slack Socket Mode) ---------------------
 
+    def _schedule_state(self, scope: LearningScope, mandate: MandateState) -> str:
+        if mandate.state == "paused":
+            return "paused"
+        path = self.path.parent / SCHEDULE_SELECTION
+        if not os.path.lexists(path):
+            return "off"
+        try:
+            grant = LocalLearningRunGrant(path)
+            principal = grant.principal
+            with grant.guard(principal, write=False) as enrolled:
+                if (
+                    principal.channel == "schedule"
+                    and principal.role == "scheduler"
+                    and principal.actor == mandate.delegate
+                    and "start" in enrolled.permissions
+                    and enrolled.tenant == scope.tenant
+                    and enrolled.engagement_epoch == scope.engagement_epoch
+                    and enrolled.workflow_ref == scope.workflow_ref
+                    and enrolled.mandate_id == scope.mandate_id
+                    and self._mandate_hold(mandate) is None
+                ):
+                    return "enabled"
+        except (OSError, sqlite3.Error, LearningRunError):
+            pass
+        return "unverified"
+
     def preview(self, principal: LearningPrincipal) -> Json | None:
         """Read the sealed plan and allowed controls without admitting or dispatching work."""
         _identity(principal)
@@ -732,7 +758,7 @@ class LearningRuns:
                     "mandate_ref": mandate.mandate_id,
                     "max_fits": mandate.max_fits,
                     "spend_cap_cents": 0,
-                    "schedule": "paused" if mandate.state == "paused" else "unverified",
+                    "schedule": self._schedule_state(scope, mandate),
                     "can_benchmark": allowed
                     and self._budget_hold(db, scope, mandate, "benchmark_only") is None,
                     "can_improve": allowed

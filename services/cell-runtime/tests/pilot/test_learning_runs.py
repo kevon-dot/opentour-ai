@@ -1129,6 +1129,9 @@ def test_read_only_preview_resolves_exact_plan_and_latest_authorized_run(site):
     before = service.preview(owner)
     assert before["plan_ref"] == plan_ref and before["can_benchmark"] and not before["can_improve"]
     assert before["current_run"] is None and site.counts()["lr_runs"] == 0
+    assert before["schedule"] == "off"
+    site.authorize("learning-run-schedule", role="scheduler", channel="schedule")
+    assert service.preview(owner)["schedule"] == "enabled"
     run = service.submit(owner, lr.SubmitRequest(plan_ref, "benchmark_only", "preview-start"))
     _, restarted = site.open(path, ledger=None)
     assert restarted.preview(owner)["current_run"] == run["run_ref"]
