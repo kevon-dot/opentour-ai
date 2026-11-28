@@ -479,6 +479,21 @@ def test_freeze_admits_one_ope505_benchmark_draft_through_the_production_intake(
     assert first["created"] is False  # the crash already admitted it; no second draft
     ope505 = first["ope505"]
     assert ope505["state"] == "admitted" and ope505["run_state"] == "queued"
+    assert set(ope505) == {
+        "state",
+        "draft_key",
+        "run_ref",
+        "correlation_ref",
+        "run_state",
+        "workflow_ref",
+        "benchmark_ref",
+        "benchmark_version",
+        "benchmark_state",
+        "predecessor_draft_key",
+        "predecessor_run_ref",
+        "ope505_parent_run",
+    }
+    assert ope505["predecessor_draft_key"] is None and ope505["ope505_parent_run"] is None
     assert ope505["benchmark_state"] == "draft" and ope505["benchmark_version"] == 1
     assert ope505["benchmark_ref"].startswith("benchmark-")
     again = world.worker().call(OWNER, "mixed_intake_freeze_starter", {"session_id": sid})
@@ -683,6 +698,12 @@ def test_f2_a_draft_is_never_dispatched_under_another_tenants_setup_grant(tmp_pa
     parked = w.call(OWNER, FREEZE, {"session_id": tenant_a})
     # The owner moves this worker to tenant B: a tenant-B manifest and a tenant-B setup grant.
     other = "generated-tenant-b"
+    world.record["tenant"] = other
+    world.save()  # the connector still reports tenant A: refused before any scan
+    for op in ("mixed_intake_preview", "mixed_intake_open"):
+        assert refused(w, OWNER, op, {"connection_ref": LOCAL, "purpose": "policy"}) == (
+            "CONNECTION_MISMATCH"
+        )
     manifest = world.fixture.manifest()
     manifest["tenant"] = other
     path_b = world.base / "manifest-b.json"
@@ -788,6 +809,38 @@ def test_an_unrelated_draft_is_never_reported_on_another_drafts_run(tmp_path: Pa
     assert other["supersedes"] is None and other["draft_key"] != first["draft_key"]
     assert other["ope505"] == {"state": "held", "reason": "OPE505_RUN_BOUND_TO_OTHER_DRAFT"}
     assert world.ope505_rows("intake_keys") == 1 and world.ope505_rows("intake_runs") == 1
+
+
+def test_a_tampered_session_tenant_is_held_before_the_sink_is_reached(tmp_path: Path) -> None:
+    world = World(tmp_path / "w")
+    world.starter()
+    w, sid = scanned(world)
+    with sqlite3.connect(world.directory / entry.STORE_FILE) as db:
+        db.execute("UPDATE sessions SET tenant=? WHERE session_id=?", ("generated-tenant-b", sid))
+    held = w.call(OWNER, FREEZE, {"session_id": sid})
+    assert held["ope505"] == {"state": "held", "reason": "GRANT_CHANGED"}
+    assert world.ope505_rows("intake_runs") == 0
+
+
+def test_a_run_ope505_returns_for_another_draft_is_never_claimed(tmp_path: Path) -> None:
+    """Defense in depth: an admission entry without a run identity (as 1628445 wrote them)."""
+    world = World(tmp_path / "w")
+    world.starter()
+    w, full = scanned(world)
+    first = w.call(OWNER, FREEZE, {"session_id": full})
+    with sqlite3.connect(world.directory / entry.STORE_FILE) as db:
+        (row_id, payload) = db.execute(
+            "SELECT id, payload FROM ledger WHERE kind='ope505_admitted'"
+        ).fetchone()
+        legacy = {k: v for k, v in json.loads(payload).items() if k != "run_identity"}
+        db.execute("UPDATE ledger SET payload=? WHERE id=?", (json.dumps(legacy), row_id))
+    w, narrow = scanned(world, deselect=["generated-n07"])
+    other = w.call(OWNER, FREEZE, {"session_id": narrow})
+    assert other["ope505"] == {"state": "held", "reason": "OPE505_RUN_BOUND_TO_OTHER_DRAFT"}
+    assert [p["draft_key"] for _, p in ledger_rows(world, "ope505_admitted")] == [
+        first["draft_key"]
+    ]
+    assert world.ope505_rows("intake_runs") == 1
 
 
 def test_an_ope505_admission_hold_is_reported_as_a_typed_hold(tmp_path: Path, monkeypatch) -> None:

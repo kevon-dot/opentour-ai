@@ -508,14 +508,15 @@ def test_dispatch_pending_records_a_hold_and_continues_and_freeze_sends_only_its
     plain = MixedIntakeService(store)
     held_sid = full_run(plain, adapter, binding(deselected=("generated-n07",)))
     held = plain.freeze_starter(held_sid)
+    other_sid = full_run(plain, adapter, binding(deselected=("generated-n06",)))
+    other = plain.freeze_starter(other_sid)
     sink = Holding({held["draft_key"]})
     svc = MixedIntakeService(store, sink=sink)
     own_sid = full_run(svc, adapter)
     own = svc.freeze_starter(own_sid)
-    assert own["dispatched"] == 1  # only its own draft, never the other pending one
+    assert own["dispatched"] == 1  # only its own draft, never the other pending ones
     assert [k for k, _ in sink.drafts] == [own["draft_key"]]
-    other_sid = full_run(plain, adapter, binding(deselected=("generated-n06",)))
-    other = plain.freeze_starter(other_sid)
+    assert store.ledger(held_sid, "dispatch_held") == []
     assert svc.dispatch_pending() == 1  # the held draft is skipped, the next one still goes
     assert [k for k, _ in sink.drafts] == [own["draft_key"], other["draft_key"]]
     hold = {"kind": "dispatch_held", "draft_key": held["draft_key"], "reason": "GENERATED_HOLD"}
