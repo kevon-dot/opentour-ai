@@ -191,6 +191,8 @@ REVIEW_FLAGS = frozenset(
         "annotation_over_text",
         "annotation_unverified",
         "actual_text_present",
+        "content_lexer_ambiguous",
+        "text_operand_malformed",
         "content_operand_non_finite",
     }
 )

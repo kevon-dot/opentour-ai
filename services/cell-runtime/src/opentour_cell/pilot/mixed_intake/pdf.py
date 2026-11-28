@@ -106,7 +106,7 @@ IMAGE_REVIEW_PAGE_FRACTION = 0.25
 _OBJ = re.compile(rb"(?<![0-9])(\d{1,7})\s+(\d{1,5})\s+obj\b")
 _NUMBER = re.compile(rb"[+-]?(\d+\.?\d*|\.\d+)")
 _WS = b" \t\r\n\x0c\x00"
-_DELIM = b"()<>[]/%"
+_DELIM = b"()<>[]{}/%"
 _ESCAPES = {
     ord("n"): 10,
     ord("r"): 13,
@@ -816,8 +816,16 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
                         break
                 out.append(b)
                 i += 1
+            if depth:
+                yield ("lex", b"(")  # a string still open at the end of the stream
             yield ("str", bytes(out))
-        elif c == b"<" and data[i + 1 : i + 2] != b"<":
+        elif c == b"<" and data[i + 1 : i + 2] == b"<":
+            yield ("<<", None)
+            i += 2
+        elif c == b">" and data[i + 1 : i + 2] == b">":
+            yield (">>", None)
+            i += 2
+        elif c == b"<":
             end = data.find(b">", i)
             hexed = re.sub(rb"\s", b"", data[i + 1 : end]) if end >= 0 else b"?"
             if not re.fullmatch(rb"[0-9A-Fa-f]*", hexed):
@@ -829,9 +837,12 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
         elif c in (b"[", b"]"):
             yield (c.decode(), None)
             i += 1
-        elif c in (b"<", b">"):
-            i += 2
-            yield ("op", b"<<" if c == b"<" else b">>")
+        elif c in b">){}":
+            # A `>` that closes no `>>` or hex string, a `)` that closes no string, or a brace:
+            # viewers recover from these differently (one swallows the next byte, another
+            # skips it), so what follows may be read differently. The caller sends it to review.
+            yield ("lex", c)
+            i += 1
         elif c == b"/":
             j = i + 1
             while j < n and data[j] not in _WS and data[j] not in _DELIM:
@@ -849,6 +860,10 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
             word = data[i:j]
             if _NUMBER.fullmatch(word):
                 yield ("num", float(word))
+            elif word[:1] in (b"+", b"-", b".") or word[:1].isdigit():
+                # Not PDF number syntax (`--5000`, `1e200`, `5-`): one viewer reads a number,
+                # another an operator. The caller sends it to review.
+                yield ("lex", word)
             else:
                 yield ("op", word)
             i = j
@@ -909,6 +924,21 @@ def _inline_image_size(entries: list[object]) -> int | None:
     if min(width, height, bits) <= 0 or not all(v == int(v) for v in (width, height, bits)):
         return None
     return (int(width) * int(bits) * components + 7) // 8 * int(height)
+
+
+class _ContentArray(list[object]):
+    """An array operand in a content stream."""
+
+
+class _ContentDict(list[object]):
+    """An inline dictionary operand in a content stream, as its keys and values in order."""
+
+
+def _replaces_text(properties: object, replaced: frozenset[bytes]) -> bool:
+    """Whether BDC properties carry /ActualText or /E, inline or as a named resource."""
+    if isinstance(properties, _ContentDict):
+        return any(key in (b"ActualText", b"E") for key in properties[0::2])
+    return isinstance(properties, bytes) and properties in replaced
 
 
 def _show(raw: bytes) -> str:
@@ -1762,7 +1792,9 @@ def _fragments(
     marks: set[str] = set()
     late: set[str] = set()  # page-level flags that only matter when text was actually read
     stack: list[object] = []
-    array: list[object] | None = None
+    # Open arrays and dictionaries, innermost last: an operand may nest them (an inline
+    # dictionary inside an array, an array inside a dictionary).
+    containers: list[_ContentArray | _ContentDict] = []
     gs = _Graphics()
     saved: list[_Graphics] = []
     # PDF 9.4: the text matrix Tm and the text line matrix Tlm. Every positioning operator (Tm,
@@ -1777,7 +1809,6 @@ def _fragments(
     # accent mark (see _page_overprint).
     glyph_boxes: list[tuple[float, float, float, float, bool]] = []
     run: list[float | None] = [0, None]  # rule (iii) state, carried along the line (_extent_units)
-    dict_depth = 0
     inline_open = False  # inside an inline image dictionary (BI ... ID)
     inline_size: int | None = None  # its data size, when the dictionary determines it
     # The current path in device space (for painted boxes, see _paint_flags): its subpaths'
@@ -1973,19 +2004,27 @@ def _fragments(
             inline_size = None
             stack.clear()
             continue
-        if kind == "[":
-            array = []
+        if kind == "lex":
+            marks.add("content_lexer_ambiguous")  # see _tokens: viewers may lex this apart
             continue
-        if kind == "]":
-            if array is not None:
-                stack.append(array)
-            array = None
+        if kind in ("[", "<<"):
+            containers.append(_ContentArray() if kind == "[" else _ContentDict())
+            continue
+        if kind in ("]", ">>"):
+            closing = _ContentArray if kind == "]" else _ContentDict
+            if not containers or not isinstance(containers[-1], closing):
+                marks.add("content_lexer_ambiguous")  # closes nothing, or the wrong thing
+                continue
+            done = containers.pop()
+            (containers[-1] if containers else stack).append(done)
             continue
         if kind == "num" and not math.isfinite(value):
             marks.add("content_operand_non_finite")  # a viewer cannot place it; neither can we
             value = 0.0
-        if array is not None:
-            array.append(value)
+        if containers:
+            # Inside an array or dictionary every token is an operand, so an `R` or `true` in
+            # one never acts as an operator or clears the operands.
+            containers[-1].append(value)
             continue
         if kind != "op":
             stack.append(value)
@@ -1998,14 +2037,6 @@ def _fragments(
             inline_open = False
             inline_size = _inline_image_size(stack)
             stack.clear()
-            continue
-        if value in (b"<<", b">>"):
-            # An inline dictionary (BDC properties): everything inside it is an operand, so an
-            # `R` or any other word in it never acts as an operator or clears the operands.
-            dict_depth = max(dict_depth + (1 if value == b"<<" else -1), 0)
-            continue
-        if dict_depth:
-            stack.append(value)
             continue
         op = value
         nums = [v for v in stack if isinstance(v, float)]
@@ -2095,9 +2126,7 @@ def _fragments(
         elif op in (b"BDC", b"BMC") and stack and stack[0] == b"OC":
             # Optional content: a viewer may hide or show it by layer state, which is not read.
             marks.add("optional_content_present")
-        elif op == b"BDC" and any(
-            value in (b"ActualText", b"E") or value in replaced for value in stack[1:]
-        ):
+        elif op == b"BDC" and any(_replaces_text(value, replaced) for value in stack[1:]):
             # /ActualText (or /E) replaces the drawn text for extraction and accessibility, so
             # what a viewer's text layer says differs from the glyphs this reader reads.
             marks.add("actual_text_present")
@@ -2168,7 +2197,11 @@ def _fragments(
                 gs = replace(gs, word_spacing=nums[-2], char_spacing=nums[-1])
             move_line(0.0, -gs.leading)
             emit(_show(stack[-1]), [stack[-1]])
-        elif op == b"TJ" and stack and isinstance(stack[-1], list):
+        elif op == b"TJ" and stack and isinstance(stack[-1], _ContentArray):
+            if any(not isinstance(item, (bytes, float)) for item in stack[-1]):
+                # A nested array, a dictionary or anything but strings and numbers: viewers
+                # draw some of it, skip some, or reject the operator, each differently.
+                marks.add("text_operand_malformed")
             parts = []
             pieces: list[bytes | float] = []
             for item in stack[-1]:
@@ -2181,8 +2214,9 @@ def _fragments(
                         parts.append(" ")
             emit("".join(parts), pieces)
         stack.clear()
-    if dict_depth:
-        marks.add("content_stream_unresolved")  # a dictionary left open: the rest was not read
+    if containers:
+        # An array or dictionary left open: the rest of the stream was read as its operands.
+        marks.add("content_stream_unresolved")
     if out:
         if any(_image_may_conceal(box, page_box, text_boxes) for box in image_boxes):
             late.add("image_text_overlay_unverified")
