@@ -250,6 +250,7 @@ def kit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Kit:
                 sr.GRANT_PURPOSE,
                 sr.SPEND_MANDATE_PURPOSE,
                 sr.ROUTING_POLICY_PURPOSE,
+                sr.WORKFLOW_INDEX_PUBLICATION_PURPOSE,
                 sr.ENROLMENT_PURPOSE,
             ],
         ),
@@ -295,6 +296,7 @@ def test_policy_table_matches_the_owner_ruling() -> None:
     assert sr.REQUIRED_ROLES[sr.GRANT_PURPOSE] == both
     assert sr.REQUIRED_ROLES[sr.SPEND_MANDATE_PURPOSE] == both
     assert sr.REQUIRED_ROLES[sr.ROUTING_POLICY_PURPOSE] == both
+    assert sr.REQUIRED_ROLES[sr.WORKFLOW_INDEX_PUBLICATION_PURPOSE] == both
     assert sr.REQUIRED_ROLES[sr.VERDICT_PURPOSE] == {sr.INDEPENDENT_EVALUATOR}
     assert sr.REQUIRED_ROLES[sr.BENCHMARK_AUDIT_PURPOSE] == {sr.BENCHMARK_AUDITOR}
     assert sr.REQUIRED_ROLES[sr.REGISTRY_PURPOSE] == {sr.OPERATOR_ROOT}
@@ -304,6 +306,80 @@ def test_policy_table_matches_the_owner_ruling() -> None:
         sr.CUSTOMER_OWNER_SUCCESSOR,
     }
     assert sr.SPEND_MANDATE_PURPOSE == "opentour.pilot.spend-mandate.v1"
+
+
+# --- OPE-547: workflow-index publication (customer-owner consent) ------------------------
+
+PUBLICATION = "opentour.pilot.workflow-index-publication.v1"
+
+
+def test_workflow_index_publication_is_registered_as_customer_consent_only() -> None:
+    # The exact string the OPE-547 consumer verifies, and nothing broader.
+    assert sr.WORKFLOW_INDEX_PUBLICATION_PURPOSE == PUBLICATION
+    assert PUBLICATION in sr.CONSENT_PURPOSES
+    assert PUBLICATION in sr.RECORD_PURPOSES
+    assert sr.REQUIRED_ROLES[PUBLICATION] == {sr.CUSTOMER_OWNER, sr.OPERATOR_CUSTODIAN}
+    holders = {role for role, purposes in sr.REGISTRY_ROLES.items() if PUBLICATION in purposes}
+    assert holders == {sr.OPERATOR_CUSTODIAN}
+    assert all(PUBLICATION not in purposes for purposes in sr.ROOT_ROLES.values())
+    # Only this one purpose was added to the consent set in this registration.
+    assert sr.CONSENT_PURPOSES == {
+        sr.GRANT_PURPOSE,
+        sr.SPEND_MANDATE_PURPOSE,
+        sr.ROUTING_POLICY_PURPOSE,
+        PUBLICATION,
+    }
+    assert sr.RECORD_PURPOSES == sr.CONSENT_PURPOSES | {
+        sr.VERDICT_PURPOSE,
+        sr.BENCHMARK_AUDIT_PURPOSE,
+    }
+
+
+def test_workflow_index_publication_accepted_with_anchored_customer_and_custodian(
+    kit: Kit,
+) -> None:
+    verifier = kit.enrolled()
+    payload = consent(tenant="tenant-sentinel-0001", workflows=[])
+    record = sign(payload, PUBLICATION, kit.customer, kit.operator)
+    assert verifier.verify(record, PUBLICATION) == payload
+
+
+def test_workflow_index_publication_needs_an_anchored_customer(kit: Kit) -> None:
+    # No enrolment pinned for the engagement: the operator cannot publish on its own say.
+    verifier = kit.verifier()
+    record = sign(consent(), PUBLICATION, kit.customer, kit.operator)
+    refused("customer_anchor_missing", partial(verifier.verify, record, PUBLICATION))
+    # Once anchored, a different customer-role key is still not the customer owner.
+    verifier.pin_customer_anchor(kit.enrolment())
+    stranger = Signer(sr.CUSTOMER_OWNER, registry_revision="1")
+    forged = sign(consent(), PUBLICATION, stranger, kit.operator)
+    refused("customer_key_not_anchored", partial(verifier.verify, forged, PUBLICATION))
+    assert verifier.verify(record, PUBLICATION) == json.loads(record)["payload"]
+
+
+def test_workflow_index_publication_custodian_must_be_enrolled_for_the_purpose(
+    kit: Kit,
+) -> None:
+    # A current custodian without the publication purpose cannot co-sign it.
+    narrow = Signer(sr.OPERATOR_CUSTODIAN, [sr.GRANT_PURPOSE])
+    verifier = kit.verifier(kit.registry(keys=[*kit.issuers(), narrow.entry()]))
+    verifier.pin_customer_anchor(kit.enrolment())
+    record = sign(consent(), PUBLICATION, kit.customer, narrow)
+    refused("key_purpose_not_permitted", partial(verifier.verify, record, PUBLICATION))
+    # Signatures made for a grant are not publication consent.
+    grant = sign(consent(), sr.GRANT_PURPOSE, kit.customer, kit.operator)
+    refused("purpose_mismatch", partial(verifier.verify, grant, PUBLICATION))
+
+
+@pytest.mark.parametrize("role", [sr.INDEPENDENT_EVALUATOR, sr.BENCHMARK_AUDITOR])
+def test_workflow_index_publication_cannot_be_granted_to_other_registry_roles(
+    kit: Kit, role: str
+) -> None:
+    signer = Signer(role, [PUBLICATION])
+    refused(
+        "trust_key_purposes_invalid",
+        partial(kit.verifier, kit.registry(keys=[kit.operator.entry(), signer.entry()])),
+    )
 
 
 @pytest.mark.parametrize("purpose", sorted(sr.CONSENT_PURPOSES))
