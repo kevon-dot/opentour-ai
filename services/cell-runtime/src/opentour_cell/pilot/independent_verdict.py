@@ -627,11 +627,18 @@ class ProviderEvidence:
 
     ``parent_model_id`` and ``candidate_id`` come from the frozen experiment, not from the
     provider; the job record and the serving readback must both agree with them.
+
+    ``expected_intent_sha256`` and ``expected_client_token`` are the evaluator's own copy of the
+    fit intent digest and client token, when it holds one. Today nothing gives the evaluator
+    such a record, so they default to ``None``: the job record's intent and token are then
+    recorded as unchecked, said plainly in the statement, never as bound.
     """
 
     job: ProviderJobRecord | None
     parent_model_id: str
     candidate_id: str
+    expected_intent_sha256: str | None = None
+    expected_client_token: str | None = None
 
 
 def provider_candidate_digest(route: str, parent_model_id: str, candidate_id: str) -> str:
@@ -1839,17 +1846,45 @@ class IndependentEvaluator:
         job = provider.job
         if not job.well_formed():
             return failed("provider_job_record_malformed")
-        if not all(
-            isinstance(v, str) and _ID.fullmatch(v)
-            for v in (provider.parent_model_id, provider.candidate_id)
+        if (
+            not all(
+                isinstance(v, str) and _ID.fullmatch(v)
+                for v in (provider.parent_model_id, provider.candidate_id)
+            )
+            or (
+                provider.expected_intent_sha256 is not None
+                and not _is_sha(provider.expected_intent_sha256)
+            )
+            or (
+                provider.expected_client_token is not None
+                and not (
+                    isinstance(provider.expected_client_token, str)
+                    and _ID.fullmatch(provider.expected_client_token)
+                )
+            )
         ):
             return failed("provider_expectation_malformed")
         if job.route != route:
             return failed("job_route_mismatch")
+        if route == "custom_trainer" and job.artifact_digest is None:
+            # A trainer reports its artifact digest; without it nothing names the revision.
+            return failed("trainer_artifact_digest_missing")
         if job.state != _JOB_DONE[route]:
             return failed("job_not_completed")
         if job.digest() != claim.job_manifest_digest:
             return failed("designated_job_mismatch")
+        held = (provider.expected_intent_sha256, provider.expected_client_token)
+        if held[0] is not None and job.intent_sha256 != held[0]:
+            return failed("job_intent_mismatch")
+        if held[1] is not None and job.client_token != held[1]:
+            return failed("job_client_token_mismatch")
+        intent_binding = (
+            "checked_against_evaluator_held_intent"
+            if held[0] is not None and held[1] is not None
+            else "partially_checked_against_evaluator_held_intent"
+            if held != (None, None)
+            else "unchecked_evaluator_holds_no_intent_record"
+        )
         if _mutable_alias(provider.parent_model_id) or _mutable_alias(job.parent_revision):
             return failed("parent_mutable_alias")
         if job.parent_revision != provider.parent_model_id:
@@ -1871,6 +1906,8 @@ class IndependentEvaluator:
             "candidate_id": job.candidate_id,
             "candidate_digest": candidate,
             "artifact_digest_reported": job.artifact_digest,
+            # intent_sha256 and client_token are the record's own; bound only if checked here.
+            "job_intent_binding": intent_binding,
             "weights": "provider_attested_opaque",
             "tensor_evidence": "not_available",
             "evidence": "unauthenticated_provider_statement",
@@ -1912,14 +1949,23 @@ class IndependentEvaluator:
         else:
             drift["parent_revision"] = "unavailable"
         reported = job.get("artifact_digest_reported")
-        if "artifact_digest" in served and reported is not None:
+        if route == "custom_trainer":
+            # Fail closed: a trainer readback must name the artifact digest the job reported.
+            if reported is None or "artifact_digest" not in served:
+                return "trainer_artifact_digest_unavailable"
+            if served["artifact_digest"] != reported:
+                return "candidate_served_other_revision"
+            drift["artifact_digest"] = "checked"
+        elif "artifact_digest" in served and reported is not None:
             if served["artifact_digest"] != reported:
                 return "candidate_served_other_revision"
             drift["artifact_digest"] = "checked"
         else:
-            drift["artifact_digest"] = "unavailable"
+            drift["artifact_digest"] = "unavailable"  # managed weights are opaque
         drift["served_model_id"] = "checked"
-        drift["identity_kind"] = "checked"
+        # The provider's own claim that the id is immutable: required, never verified here,
+        # and never a reason to raise any tier.
+        drift["identity_kind"] = "provider_self_claim"
         return None
 
     def _served_statement(

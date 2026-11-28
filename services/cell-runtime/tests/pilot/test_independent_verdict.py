@@ -2640,10 +2640,12 @@ def test_p1_provider_route_win_is_provider_reported_never_verified(tmp_path, rou
     assert served["serving_evidence"] == "provider_reported_readback"
     assert served["drift_checks"] == {
         "artifact_digest": "checked" if route == "custom_trainer" else "unavailable",
-        "identity_kind": "checked",
+        "identity_kind": "provider_self_claim",
         "parent_revision": "checked",
         "served_model_id": "checked",
     }
+    # The evaluator holds no fit-intent record of its own here, and says so.
+    assert job["job_intent_binding"] == "unchecked_evaluator_holds_no_intent_record"
     statements = json.dumps([job, served])
     assert "verified" not in statements and "sha256" not in json.dumps(job["weights"])
     assert doc["candidate_kind"] == KINDS[route]
@@ -2819,6 +2821,77 @@ def test_p5_trainer_digest_mismatch_and_unavailable_provider_hold(tmp_path):
         v, _ = provider_run(tmp_path / ("d" + route), s, route, double=swapped)
         doc = held(v, "integrity_failure", "candidate_replay_failed")
         assert doc["comparisons"] == {}
+
+
+def test_p8_review_l3_a_trainer_route_without_an_artifact_digest_fails_closed(tmp_path):
+    """Re-review L3: a trainer readback that omitted artifact_digest passed as 'unavailable'."""
+    s = Scenario(CLEAN_WIN)
+    v, double = provider_run(
+        tmp_path / "a",
+        s,
+        "custom_trainer",
+        readback=readback_for("custom_trainer", artifact_digest=None),
+    )
+    held(v, "integrity_failure", "served_trainer_artifact_digest_unavailable")
+    assert double.calls == []
+    job = provider_job("custom_trainer", artifact_digest=None)
+    v, double = provider_run(tmp_path / "b", s, "custom_trainer", job=job)
+    doc = held(v, "integrity_failure", "job_trainer_artifact_digest_missing")
+    assert "served_trainer_artifact_digest_unavailable" in doc["reasons"]
+    assert double.calls == []
+    # A managed provider's weights stay opaque: no digest is required or invented there.
+    managed, _ = provider_run(tmp_path / "c", s, "managed_provider")
+    drift = managed.document["statements"]["candidate_served_evaluation"]["drift_checks"]
+    assert managed.outcome == "verified_gain" and drift["artifact_digest"] == "unavailable"
+
+
+@pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
+def test_p9_review_l3_intent_and_client_token_bind_only_when_the_evaluator_holds_them(
+    tmp_path, route
+):
+    s = Scenario(CLEAN_WIN)
+    job = provider_job(route)
+
+    def evidence(**over):
+        return iv.ProviderEvidence(job, PARENT, CANDIDATE_IDS[route], **over)
+
+    both = evidence(
+        expected_intent_sha256=job.intent_sha256, expected_client_token=job.client_token
+    )
+    v, _ = provider_run(tmp_path / "both", s, route, evidence=both)
+    assert v.outcome == "verified_gain"
+    assert v.document["statements"]["job_produced_candidate"]["job_intent_binding"] == (
+        "checked_against_evaluator_held_intent"
+    )
+    one = evidence(expected_intent_sha256=job.intent_sha256)
+    v, _ = provider_run(tmp_path / "one", s, route, evidence=one)
+    assert v.document["statements"]["job_produced_candidate"]["job_intent_binding"] == (
+        "partially_checked_against_evaluator_held_intent"
+    )
+    for name, over, reason in (
+        ("intent", {"expected_intent_sha256": sha("other-intent")}, "job_intent_mismatch"),
+        ("token", {"expected_client_token": "generated-other-token"}, "job_client_token_mismatch"),
+        ("bad", {"expected_intent_sha256": "not-a-digest"}, "provider_expectation_malformed"),
+        ("bad-token", {"expected_client_token": "has spaces"}, "provider_expectation_malformed"),
+    ):
+        v, double = provider_run(tmp_path / name, s, route, evidence=evidence(**over))
+        held(v, "integrity_failure", "job_" + reason)
+        assert double.calls == []
+
+
+def test_p10_review_l3_the_immutability_self_claim_never_raises_a_tier(tmp_path):
+    s = Scenario(CLEAN_WIN)
+    open_weight = run(tmp_path / "open", s)
+    for route in ("managed_provider", "custom_trainer"):
+        v, _ = provider_run(tmp_path / route, s, route)
+        doc = v.document
+        served = doc["statements"]["candidate_served_evaluation"]
+        assert served["drift_checks"]["identity_kind"] == "provider_self_claim"
+        assert served["serving_evidence"] == "provider_reported_readback"
+        assert doc["evidence"] == open_weight.document["evidence"]
+        assert doc["evidence"]["evidence_tier"] == "digest_self_consistent_only"
+        assert v.custody_tier == open_weight.custody_tier == "digest_self_consistent_only"
+        assert "verified" not in json.dumps(served) and "immutable_verified" not in json.dumps(doc)
 
 
 def test_p6_retry_after_a_lost_result_returns_the_stored_verdict_without_a_provider_call(
