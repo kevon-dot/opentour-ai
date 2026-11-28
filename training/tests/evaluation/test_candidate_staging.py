@@ -1060,8 +1060,8 @@ def test_l2_unknown_protected_view_holds_every_packet(view: object) -> None:
     assert out.outcome == "hold"
     assert out.reasons == ("fresh_confirmation_required", "protected_view_unrecorded")
     # the earliest valid readout still works
-    zero = replace(p, protected_view_seq=0, candidate=replace(p.candidate, selection_seq=-1))
-    assert "protected_view_unrecorded" not in reasons(zero)
+    zero = replace(p, protected_view_seq=0, candidate=replace(p.candidate, selection_seq=0))
+    assert reasons(zero) == {"selection_after_protected_view"}  # a known view, not unrecorded
 
 
 def test_l3_sequence_numbers_are_caller_supplied_and_only_self_consistent() -> None:
@@ -1085,8 +1085,9 @@ def test_l4_negative_issued_seq_never_confirms(seq: int) -> None:
     assert AUTH.verify_confirmation(conf)  # attested; refused on the value alone
     out = evaluate(replace(p, candidate=changed, fresh_confirmation=conf))
     assert out.outcome == "hold" and out.reasons == ("fresh_confirmation_required",)
-    zero = _confirmation(changed, p, issued_seq=0)  # the lowest valid sequence confirms
-    assert evaluate(replace(p, candidate=changed, fresh_confirmation=zero)).outcome == "eligible"
+    # the lowest sequence that still confirms is just after the selection (see m1)
+    lowest = _confirmation(changed, p, issued_seq=changed.selection_seq + 1)
+    assert evaluate(replace(p, candidate=changed, fresh_confirmation=lowest)).outcome == "eligible"
 
 
 @pytest.mark.parametrize("role", ["producer_id", "selector_id"])
@@ -1219,3 +1220,65 @@ def test_l8_a_shadowed_mac_on_the_instance_cannot_forge_an_attestation() -> None
     v = replace(p.verdicts[0], attestation="generated-forged-mac")
     assert not auth.verify_verdict(v)
     assert AUTH.verify_confirmation(_confirmation(changed, p))  # an unpatched sentinel verifies
+
+
+# ------------------------------------------------------------ M: confirmation after selection
+# Coordinator decision (2026-11-28) on PR #231: a fresh confirmation must come strictly after the
+# selection it confirms, selection_seq < issued_seq < protected_view_seq, and an unusable
+# selection_seq holds every packet, as an unusable protected_view_seq does.
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [
+        (-5, "before"),  # issued well before the selection
+        (-1, "before"),  # issued just before
+        (0, "equal"),  # issued at the selection's own seq
+        (1, "after"),  # issued just after: confirms
+    ],
+)
+def test_m1_confirmation_must_come_strictly_after_the_selection(offset: int, expected: str) -> None:
+    p = packet()
+    changed = _changed(p)
+    assert changed.selection_seq == 5 and p.protected_view_seq == 25
+    conf = _confirmation(changed, p, issued_seq=changed.selection_seq + offset)
+    assert AUTH.verify_confirmation(conf)  # attested; refused, if at all, on the order alone
+    out = evaluate(replace(p, candidate=changed, fresh_confirmation=conf))
+    if expected == "after":
+        assert out.outcome == "eligible" and out.reasons == ()
+    else:
+        assert out.outcome == "hold"
+        assert out.reasons == ("confirmation_precedes_selection", "fresh_confirmation_required")
+
+
+def test_m2_both_bounds_are_strict_in_one_window() -> None:
+    p = packet()
+    tight = replace(p.candidate, selection_digest="sha256:" + "6" * 64, selection_seq=23)
+    window = {
+        seq: evaluate(
+            replace(p, candidate=tight, fresh_confirmation=_confirmation(tight, p, issued_seq=seq))
+        )
+        for seq in (22, 23, 24, 25, 26)
+    }
+    assert [s for s, out in window.items() if out.outcome == "eligible"] == [24]
+    assert "confirmation_precedes_selection" in window[23].reasons
+    assert "confirmation_after_protected_view" in window[25].reasons
+    # no room between the selection and the readout: nothing can confirm
+    shut = replace(tight, selection_seq=24)
+    for seq in (23, 24, 25):
+        conf = _confirmation(shut, p, issued_seq=seq)
+        out = evaluate(replace(p, candidate=shut, fresh_confirmation=conf))
+        assert out.outcome == "hold" and "fresh_confirmation_required" in out.reasons
+
+
+@pytest.mark.parametrize("selection", [None, -1, -(10**30), True, False, "5", 5.0])
+def test_m3_unknown_selection_seq_holds_every_packet(selection: object) -> None:
+    p = packet()
+    unknown = replace(p, candidate=replace(p.candidate, selection_seq=selection))  # type: ignore[arg-type]
+    out = evaluate(unknown)
+    assert out.outcome == "hold" and out.reasons == ("selection_seq_unrecorded",)
+    changed = replace(_changed(p), selection_seq=selection)  # type: ignore[arg-type]
+    confirmed = replace(p, candidate=changed, fresh_confirmation=_confirmation(changed, p))
+    out = evaluate(confirmed)
+    assert out.outcome == "hold"
+    assert out.reasons == ("fresh_confirmation_required", "selection_seq_unrecorded")

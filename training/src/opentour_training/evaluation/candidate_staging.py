@@ -42,9 +42,12 @@ tags) remain caller-supplied.
 Fresh confirmation of a changed choice is accepted only when the authority attests it, its issuer
 is registered with the confirmation-issuer kind (``CONFIRMATION_ISSUER_KIND``) and is neither the
 candidate's producer nor its selector, and the view sequence it was issued at
-(``FreshConfirmation.issued_seq``, a non-negative int inside the attested body) predates the
-cohort's first protected readout (``StagingPacket.protected_view_seq``). A confirmation made at or
-after that readout holds as ``confirmation_after_protected_view``.
+(``FreshConfirmation.issued_seq``, a non-negative int inside the attested body) falls strictly
+between the selection it confirms and the cohort's first protected readout:
+``CandidateRecord.selection_seq < issued_seq < StagingPacket.protected_view_seq``. A confirmation
+issued at or before the selection cannot be confirming it and holds as
+``confirmation_precedes_selection``; one made at or after the readout holds as
+``confirmation_after_protected_view``. Both also hold as ``fresh_confirmation_required``.
 
 Sequence numbers are caller-supplied and only self-consistent. No worker-held protected-view log
 exists in this repository, so ``protected_view_seq`` comes from the caller, and ``issued_seq`` is
@@ -53,8 +56,10 @@ view log. A caller who reports a later first readout (for example ``10**9``) mak
 attested ``issued_seq`` eligible; nothing here can detect that. To keep the gap from widening,
 ``protected_view_seq`` never means "no view happened": ``None``, a non-int (bool included) or a
 negative value holds every packet as ``protected_view_unrecorded``, and no confirmation can be
-checked against it. Only a worker-held view log that positively records "no protected view" could
-safely lift that hold, and none is wired.
+checked against it. That hold applies to every packet, whether or not its choice changed. Only a
+worker-held view log that positively records "no protected view" could safely lift it, and none
+is wired. ``CandidateRecord.selection_seq`` gets the same treatment: an unusable value holds
+every packet as ``selection_seq_unrecorded``, and no confirmation can be ordered after it.
 
 The authority is pinned by type, not by registry. ``evaluate`` accepts only an exact
 ``HmacVerdictAuthority`` whose instance shadows none of the class's methods, and calls it through
@@ -120,6 +125,8 @@ HOLD_CODES: frozenset[str] = frozenset(
         "fresh_confirmation_required",
         "confirmation_after_protected_view",
         "protected_view_unrecorded",
+        "selection_seq_unrecorded",
+        "confirmation_precedes_selection",
         "cost_cap_exceeded",
     }
 )
@@ -720,23 +727,31 @@ def evaluate(packet: StagingPacket, authority: VerdictAuthority | None = None) -
 
     # Caller-supplied (no worker-held view log exists). Unknown never means "never viewed".
     view_seq = _seq(packet.protected_view_seq)
+    selection_seq = _seq(cand.selection_seq)
     if view_seq is None:
         reasons.add("protected_view_unrecorded")
-    elif cand.selection_seq >= view_seq:
+    if selection_seq is None:
+        reasons.add("selection_seq_unrecorded")
+    if view_seq is not None and selection_seq is not None and selection_seq >= view_seq:
         reasons.add("selection_after_protected_view")
     if cand.selection_digest != bench.preregistered_selection_digest:
         fresh = packet.fresh_confirmation
         issued_seq = None if fresh is None else _seq(fresh.issued_seq)
-        # It must predate the cohort's first protected readout. An unusable sequence on either
-        # side never confirms.
+        # selection_seq < issued_seq < view_seq, strict on both sides. An unusable sequence
+        # anywhere never confirms.
         late = issued_seq is not None and view_seq is not None and issued_seq >= view_seq
         if late:
             reasons.add("confirmation_after_protected_view")
+        early = issued_seq is not None and selection_seq is not None and issued_seq <= selection_seq
+        if early:
+            reasons.add("confirmation_precedes_selection")
         if (
             fresh is None
             or issued_seq is None
             or view_seq is None
+            or selection_seq is None
             or late
+            or early
             or not fresh.authenticated
             or fresh.selection_digest != cand.selection_digest
             or fresh.manifest_digest != bench.digest
