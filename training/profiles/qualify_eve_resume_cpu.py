@@ -78,6 +78,7 @@ def fixture_process(root: Path, args: list[str]) -> None:
     changes = {
         "BASE_REVISION": "generated-tiny-mistral-cpu",
         "BASE_SHA256": eve_sft.file_hashes(base, ("model.safetensors",))["model.safetensors"],
+        "COMPANION_SHA256": eve_sft.file_hashes(base, tuple(eve_sft.COMPANION_SHA256)),
         "load_model": load_cpu,
         "runtime": lambda: torch,
         "training_recipe": lambda: recipe,

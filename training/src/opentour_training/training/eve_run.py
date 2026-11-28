@@ -107,7 +107,7 @@ class Run:
             # The runner has not yet been admitted to its next optimizer step.
             state["status"] = "paused"
             return
-        if state["status"] not in {"running", "pausing", "stopping"}:
+        if state["status"] not in {"running", "pausing", "stopping", "held"}:
             return
         output = Path(state["settings"]["output"])
         if (
@@ -138,6 +138,8 @@ class Run:
                     self.reconcile_idle(state)
             self.expire(state)
             if action == "stop" and state["status"] not in {"completed", "stopped", "expired"}:
+                if state["status"] == "held" and Path(state["settings"]["output"]).exists():
+                    return self.summary(state)
                 state["status"] = "stopped" if idle or state["status"] == "paused" else "stopping"
             elif action == "pause" and state["status"] in {"running", "pausing", "resuming"}:
                 target = state["completed_steps"] if after_step is None else after_step

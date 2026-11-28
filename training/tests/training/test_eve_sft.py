@@ -90,4 +90,13 @@ class EveRehearsalTests(unittest.TestCase):
                     eve_sft.verify_base(base)
                 config = {"architectures": ["MistralForCausalLM"]}
                 (base / "config.json").write_text(json.dumps(config))
-                self.assertEqual(eve_sft.verify_base(base)["model.safetensors"], fixture_sha)
+                companions = eve_sft.file_hashes(base, tuple(eve_sft.COMPANION_SHA256))
+                with patch.object(eve_sft, "COMPANION_SHA256", companions):
+                    self.assertEqual(eve_sft.verify_base(base)["model.safetensors"], fixture_sha)
+                    for name in companions:
+                        with self.subTest(companion=name):
+                            original = (base / name).read_bytes()
+                            (base / name).write_bytes(original + b" ")
+                            with self.assertRaisesRegex(ValueError, "companion_digest_mismatch"):
+                                eve_sft.verify_base(base)
+                            (base / name).write_bytes(original)

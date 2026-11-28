@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import tempfile
@@ -9,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from opentour_training.training.eve_run import Run
+from opentour_training.training import eve_sft
+from opentour_training.training.eve_run import ADAPTER_FILES, Run
 
 
 class RunTests(unittest.TestCase):
@@ -124,3 +126,43 @@ class RunTests(unittest.TestCase):
             state["status"] = "running"
         (self.output / "manifest.json").write_text("{")
         self.assertEqual(self.run.control("status")["status"], "held")
+        self.assertEqual(self.run.control("stop")["status"], "held")
+
+    def test_fsync_failure_after_publication_cannot_report_a_stopped_candidate(self):
+        def finish(args, run, saved, elapsed):
+            with run.edit() as state:
+                run.boundary(state, args.steps, elapsed, 0, self.fail)
+            stage = self.directory / "generated-stage"
+            stage.mkdir()
+            for name in ADAPTER_FILES:
+                (stage / name).write_bytes(b"generated adapter fixture")
+            receipt = {
+                "steps": args.steps,
+                "run_id": saved["run_id"],
+                "adapter_files": eve_sft.file_hashes(stage, ADAPTER_FILES),
+            }
+            (stage / "manifest.json").write_text(json.dumps(receipt))
+            with run.edit() as state:
+                eve_sft.publish_candidate(stage, args.output)
+                state["status"] = "completed"
+
+        args = argparse.Namespace(
+            action="fit",
+            output=self.output,
+            run_dir=self.directory,
+            model_dir=self.directory,
+            development=self.directory / "dev",
+            protected_membership=self.directory / "held",
+            steps=8,
+            deadline=None,
+        )
+        with (
+            patch.object(eve_sft, "train", finish),
+            patch.object(
+                eve_sft, "sync_directory", side_effect=OSError("interrupted directory fsync")
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "directory fsync"):
+                eve_sft.fit(args)
+        self.assertTrue((self.output / "manifest.json").is_file())
+        self.assertEqual(self.run.control("stop")["status"], "completed")

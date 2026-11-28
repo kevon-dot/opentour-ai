@@ -18,6 +18,14 @@ from opentour_training.training.eve_run import ADAPTER_FILES, Run, file_hashes, 
 
 BASE_REVISION = "b4965c4acbb27299078e4f97171530644fcc839f"
 BASE_SHA256 = "150815d5b113536a83f24099528794686055675953cfcc14cdc6dbdadd86edfc"
+# SHA-256 of the exact companion bytes at the same public Hugging Face revision.
+COMPANION_SHA256 = {
+    "config.json": "e9574c34dcf37fae40421e1ec28290c130edca69e71fb5445477a6bbe413450a",
+    "tokenizer_config.json": "07a2f401f0bf58141834abe743dd370b833f675e507540097d88c262cb65576c",
+    "tokenizer.json": "286acad9b0e27fce778ac429763536accf618ccb6ed72963b6f94685e531c5c7",
+    "chat_template.jinja": "c7b796d8290d47053174a4de00a5c3091cb5584fdb9d681b10bdc30c2ea3110d",
+    "generation_config.json": "08c2c8aeb78969016addd4f8e3205a1f0713cce2e29f23634e725c311b8c6348",
+}
 MODEL_FILES = (
     "model.safetensors",
     "config.json",
@@ -50,6 +58,8 @@ def verify_base(directory: Path) -> dict[str, str]:
     config = read_file(directory / "config.json")
     if config.get("architectures") != ["MistralForCausalLM"]:
         raise ValueError("unexpected_eve_architecture")
+    if any(hashes[name] != expected for name, expected in COMPANION_SHA256.items()):
+        raise ValueError("eve_companion_digest_mismatch")
     return hashes
 
 
@@ -231,10 +241,8 @@ def fit(args: argparse.Namespace) -> None:
             with run.edit() as state:
                 if state["status"] == "resuming":
                     state["status"] = "paused"
-                if state["status"] in {"running", "pausing"}:
-                    state["status"] = "held"
-                elif state["status"] == "stopping":
-                    state["status"] = "stopped"
+                else:
+                    run.reconcile_idle(state)
             raise
         finally:
             with run.edit() as state:
@@ -398,18 +406,25 @@ def train(
             "runtime": versions,
         }
         (candidate / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        # Reserve the destination exclusively before moving the complete stage.
+        for name in (*ADAPTER_FILES, "manifest.json"):
+            with (candidate / name).open("rb") as handle:
+                os.fsync(handle.fileno())
+        sync_directory(candidate)
         with run.edit() as state:
             if at_boundary(state):
                 return
-            args.output.mkdir(mode=0o700)
-            try:
-                os.replace(candidate, args.output)
-            except OSError:
-                args.output.rmdir()
-                raise
-            sync_directory(args.output.parent)
+            publish_candidate(candidate, args.output)
             state["status"] = "completed"
+
+
+def publish_candidate(candidate: Path, output: Path) -> None:
+    output.mkdir(mode=0o700)
+    try:
+        os.replace(candidate, output)
+    except OSError:
+        output.rmdir()
+        raise
+    sync_directory(output.parent)
 
 
 def replay(args: argparse.Namespace) -> None:
