@@ -2,13 +2,19 @@
 
 Every model file, wheel and interpreter here is a generated sentinel. No real weights, numeric
 runtime or systemd manager is used, so these tests prove the package only, not an installed host.
+
+Nothing here is skipped for any runner identity. The real separately mounted volume is checked
+on the customer host (OPE-577 item 3); here a separate device is simulated through st_dev and a
+cross-device rename failure (EXDEV).
 """
 
+import errno
 import hashlib
 import json
 import os
 import pwd
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -168,6 +174,20 @@ def test_pinned_constants_match_the_repository_profile_and_runtime():
     assert profile["files"]["model.safetensors"] == open_weight.BASE_SHA256
 
 
+def test_pinned_digests_match_the_product_constants_and_repository_files():
+    from opentour_cell.pilot import open_weight
+
+    worker = ROOT / "training/src/opentour_training/training/open_weight_worker.py"
+    pinned = stage_module["PROFILE_SHA256"]
+    assert pinned == open_weight.PROFILE_SHA256 == hashlib.sha256(PROFILE.read_bytes()).hexdigest()
+    assert f'PROFILE_SHA256 = "{pinned}"' in worker.read_text()
+    assert stage_module["LOCK_SHA256"] == hashlib.sha256(LOCK.read_bytes()).hexdigest()
+    assert stage_module["PINS"] == {
+        "training/profiles/smollm2_135m_lora_v1.json": pinned,
+        "training/profiles/smollm2_135m_lora_v1.requirements.txt": stage_module["LOCK_SHA256"],
+    }
+
+
 @pytest.fixture
 def site(tmp_path):
     """A generated release, offline checkpoint, wheels, interpreter, volume and work dir."""
@@ -191,6 +211,7 @@ def site(tmp_path):
         lock_lines.append(f"{name}=={version} --hash=sha256:{runtime[f'{name}_wheel_sha256']}")
     profile = dict(real, files=files, runtime=runtime)
     release = tmp_path / "release"
+    pins = {}
 
     def write_release(document):
         (release / "training/profiles").mkdir(parents=True, exist_ok=True)
@@ -205,6 +226,8 @@ def site(tmp_path):
         (release / "SHA256SUMS").write_text(
             "".join(f"{hashlib.sha256(p).hexdigest()}  {n}\n" for n, p in payloads.items())
         )
+        # The fixture's own pins stand in for the product pins; only tests pass them.
+        pins.update({n: hashlib.sha256(p).hexdigest() for n, p in payloads.items()})
 
     write_release(profile)
     python = tmp_path / "model-python/bin/python"
@@ -239,6 +262,7 @@ def site(tmp_path):
         "profile": profile,
         "write_release": write_release,
         "write_python": write_python,
+        "pins": pins,
     }
 
 
@@ -251,13 +275,38 @@ def staged(site, revision=REVISION, owner=OWNER):
         site["wheels"],
         str(site["python"]),
         owner,
+        pins=site["pins"],
     )
 
 
 def verified(site, owner=OWNER):
     return stage_module["verify"](
-        site["release"], site["model"], site["wheels"], str(site["python"]), owner
+        site["release"],
+        site["model"],
+        site["wheels"],
+        str(site["python"]),
+        owner,
+        pins=site["pins"],
     )
+
+
+PINNED_HARNESS = (
+    "import json, runpy, sys; "
+    "ns = runpy.run_path(sys.argv[1], run_name='ope577_pinned_cli'); "
+    "raise SystemExit(ns['main'](sys.argv[4:], pins=json.loads(sys.argv[2]), "
+    "installer_uid=int(sys.argv[3])))"
+)
+
+
+def pinned_cli(site, *argv, pins=True):
+    """The isolated stdlib-only CLI with the fixture's pins and this runner's uid (tests only).
+
+    The command line cannot set either value; tests pass them in-process so the CLI paths run
+    on non-root runners too. ``pins=False`` keeps the product pins.
+    """
+    script = str(HOST / "stage_open_weight.py")
+    chosen = json.dumps(site["pins"]) if pins else "null"
+    return [*ISOLATED, "-c", PINNED_HARNESS, script, chosen, str(OWNER), *argv]
 
 
 def cli_arguments(site):
@@ -322,10 +371,9 @@ def test_stage_accepts_a_correct_sentinel_set_and_promotes_read_only(site):
     rules_only_state_unchanged(site)
 
 
-def test_stage_cli_runs_isolated_as_root(site):
-    script = str(HOST / "stage_open_weight.py")
+def test_stage_cli_runs_isolated(site):
     arguments = cli_arguments(site)
-    command = [*ISOLATED, script, "stage", *arguments, "--source", str(site["source"])]
+    command = pinned_cli(site, "stage", *arguments, "--source", str(site["source"]))
     ready = subprocess.run(
         [*command, "--revision", REVISION],
         capture_output=True,
@@ -334,16 +382,11 @@ def test_stage_cli_runs_isolated_as_root(site):
         check=False,
         env={},
     )
-    if OWNER != 0:
-        assert ready.returncode == 2
-        assert json.loads(ready.stdout)["reason"] == "installer_root_required"
-        assert not site["model"].exists()
-        return
     assert ready.returncode == 0, ready.stderr
     assert json.loads(ready.stdout)["route"] == "ready"
     tamper(site["model"] / "config.json")
     held = subprocess.run(
-        [*ISOLATED, script, "verify", *arguments],
+        pinned_cli(site, "verify", *arguments),
         capture_output=True,
         text=True,
         timeout=60,
@@ -353,6 +396,86 @@ def test_stage_cli_runs_isolated_as_root(site):
     assert held.returncode == 2
     assert json.loads(held.stdout)["reason"] == "staged_model_hash_mismatch"
     assert not site["model"].exists() and one_held(site).is_dir()
+
+
+def test_real_pins_refuse_a_self_consistent_release_with_other_digests(site, capsys):
+    """F1: a release whose own SHA256SUMS agree is still refused unless it is the pinned one."""
+    for result in (
+        stage_module["stage"](
+            site["release"],
+            site["source"],
+            REVISION,
+            site["model"],
+            site["wheels"],
+            str(site["python"]),
+            OWNER,
+        ),
+        stage_module["verify"](
+            site["release"], site["model"], site["wheels"], str(site["python"]), OWNER
+        ),
+    ):
+        assert (result["route"], result["reason"]) == ("held", "release_profile_unpinned")
+    assert not site["model"].exists()
+    completed = subprocess.run(
+        [
+            *ISOLATED,
+            str(HOST / "stage_open_weight.py"),
+            "stage",
+            *cli_arguments(site),
+            "--source",
+            str(site["source"]),
+            "--revision",
+            REVISION,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={},
+    )
+    assert completed.returncode == 2 and completed.stderr == ""
+    expected = "release_profile_unpinned" if OWNER == 0 else "installer_root_required"
+    assert json.loads(completed.stdout)["reason"] == expected
+    # The same CLI code with the product pins, on any runner identity.
+    pinned = subprocess.run(
+        pinned_cli(
+            site,
+            "stage",
+            *cli_arguments(site),
+            "--source",
+            str(site["source"]),
+            "--revision",
+            REVISION,
+            pins=False,
+        ),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={},
+    )
+    assert pinned.returncode == 2 and pinned.stderr == ""
+    assert json.loads(pinned.stdout)["reason"] == "release_profile_unpinned"
+    assert not site["model"].exists()
+
+
+@pytest.mark.parametrize(
+    "pins",
+    [
+        {},
+        {"training/profiles/smollm2_135m_lora_v1.json": "0" * 64},
+        {
+            "training/profiles/smollm2_135m_lora_v1.json": "0" * 64,
+            "training/profiles/smollm2_135m_lora_v1.requirements.txt": "not-a-digest",
+        },
+        ["not", "a", "mapping"],
+    ],
+)
+def test_partial_or_malformed_pins_refuse_cleanly(site, pins):
+    result = stage_module["verify"](
+        site["release"], site["model"], site["wheels"], str(site["python"]), OWNER, pins=pins
+    )
+    assert (result["route"], result["reason"]) == ("held", "invalid_pins")
 
 
 @pytest.mark.parametrize("command", ["stage", "verify"])
@@ -518,44 +641,65 @@ def test_staging_works_when_the_volume_reports_its_own_device(site, monkeypatch)
     assert real["stat"](site["volume"]).st_dev == real["stat"](site["volume"].parent).st_dev
 
 
-def test_staging_works_with_the_volume_on_a_separate_mount(site, tmp_path):
-    """Root only: mount a private tmpfs at the volume path, as the documented layout does."""
-    if OWNER != 0 or shutil.which("unshare") is None:
-        pytest.skip("needs root and unshare to mount a private tmpfs volume")
-    probe = subprocess.run(
-        ["unshare", "-m", "--propagation", "private", "true"], capture_output=True, check=False
-    )
-    if probe.returncode != 0:
-        pytest.skip("this host refuses a private mount namespace")
-    volume = site["volume"]
-    script = str(HOST / "stage_open_weight.py")
-    arguments = " ".join(f"'{a}'" for a in cli_arguments(site))
-    isolated = " ".join(ISOLATED)
-    shell = (
-        f"mount -t tmpfs -o mode=0700 tmpfs '{volume}' && "
-        f"stat -c %d '{volume}' '{volume.parent}' && "
-        f"{isolated} '{script}' stage {arguments} --source '{site['source']}' "
-        f"--revision {REVISION} && "
-        f"{isolated} '{script}' verify {arguments} && "
-        f"stat -c %d '{volume}/.opentour-staging' && "
-        f"stat -c '%a %u' '{volume}/.opentour-staging'"
-    )
-    completed = subprocess.run(
-        ["unshare", "-m", "--propagation", "private", "sh", "-c", shell],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    lines = completed.stdout.splitlines()
-    volume_dev, parent_dev = lines[0], lines[1]
-    assert volume_dev != parent_dev
-    assert json.loads(lines[2])["route"] == "ready"
-    assert json.loads(lines[3])["route"] == "ready"
-    assert lines[4] == volume_dev and lines[5] == "700 0"
-    # The private mount is gone: nothing was staged on the underlying directory.
+@pytest.mark.parametrize("step", ["promotion", "previous"])
+def test_a_cross_device_rename_fails_closed(site, monkeypatch, step):
+    """Simulated EXDEV: the work area is inside the volume, so a real rename never crosses
+    devices. If one were refused anyway, staging holds and nothing is left half-promoted."""
+    assert staged(site)["route"] == "ready"
+    work = site["work"].stat()
+    assert work.st_dev == site["volume"].stat().st_dev  # staging lands inside the volume
+    real_rename = os.rename
+
+    def cross_device(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        moving_in = src.startswith("staging-") and dst == "model-base"
+        moving_out = src == "model-base" and dst.startswith("previous-")
+        if (step == "promotion" and moving_in) or (step == "previous" and moving_out):
+            raise OSError(errno.EXDEV, "generated cross-device rename", src)
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "rename", cross_device)
+    result = staged(site)
+    assert (result["route"], result["reason"]) == ("held", "staging_failed")
+    monkeypatch.undo()
     assert not site["model"].exists()
+    assert copies(site["work"], "staging") == []
+    rules_only_state_unchanged(site)
+
+
+@pytest.mark.parametrize("change", ["swap", "tamper"])
+def test_a_change_between_the_identity_check_and_the_read_only_chmod_holds(
+    site, monkeypatch, change
+):
+    """The window after the promoted inode is confirmed and before it is made 0555.
+
+    The hook runs inside the descriptor-based fchmod, so a path-based chmod (A1) never
+    triggers it and the result differs, and dropping the re-verification (A2) lets a tampered
+    file through.
+    """
+    real_fchmod = os.fchmod
+    fired = []
+    planted = site["volume"] / "planted"
+
+    def racing_fchmod(fd, mode):
+        target = os.readlink(f"/proc/self/fd/{fd}")
+        if mode == 0o555 and target == str(site["model"]) and not fired:
+            fired.append(change)
+            if change == "swap":
+                shutil.copytree(site["model"], planted, copy_function=shutil.copy2)
+                os.rename(site["model"], site["volume"] / "moved-away")
+                os.rename(planted, site["model"])
+            else:
+                tamper(site["model"] / "tokenizer.json", b"changed inside the window")
+        return real_fchmod(fd, mode)
+
+    monkeypatch.setattr(os, "fchmod", racing_fchmod)
+    result = staged(site)
+    monkeypatch.undo()
+    assert fired == [change]
+    expected = "model_base_replaced" if change == "swap" else "staged_model_hash_mismatch"
+    assert (result["route"], result["reason"]) == ("held", expected)
+    assert not site["model"].exists()
+    assert stat.S_IMODE(one_held(site).stat().st_mode) == 0o700
 
 
 def plant_unremovable_held_tree(site, depth=40):
@@ -579,9 +723,9 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
     tamper(site["model"] / "config.json")
     if via == "module":
         result = verified(site)
-    elif OWNER == 0:
+    else:
         completed = subprocess.run(
-            [*ISOLATED, str(HOST / "stage_open_weight.py"), "verify", *cli_arguments(site)],
+            pinned_cli(site, "verify", *cli_arguments(site)),
             capture_output=True,
             text=True,
             timeout=60,
@@ -590,19 +734,18 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
         )
         assert completed.returncode == 2 and completed.stderr == ""
         result = json.loads(completed.stdout)
-    else:
-        pytest.skip("the CLI acts only as root; the module case covers non-root runners")
     assert (result["route"], result["reason"]) == ("held", "staged_model_hash_mismatch")
     assert (result["model_base"], result["cleanup"]) == ("moved_to_held", "incomplete")
     assert not site["model"].exists()
     assert grown.is_dir()
     (new_held,) = [p for p in copies(site["work"], "held") if p != grown]
+    assert stat.S_IMODE(new_held.stat().st_mode) == 0o700  # made private before it moved
     assert sorted(p.name for p in new_held.iterdir()) == sorted(site["profile"]["files"])
     rules_only_state_unchanged(site)
 
 
-def run_main(capsys, *argv):
-    code = stage_module["main"](list(argv))
+def run_main(capsys, site, *argv):
+    code = stage_module["main"](list(argv), pins=site["pins"], installer_uid=OWNER)
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -622,11 +765,9 @@ def test_a_failed_held_rename_reports_move_failed_and_leaves_the_base(
     monkeypatch.setattr(os, "rename", refusing_rename)
     if via == "module":
         result = verified(site)
-    elif OWNER == 0:
-        code, result = run_main(capsys, "verify", *cli_arguments(site))
-        assert code == 2
     else:
-        pytest.skip("the CLI acts only as root; the module case covers non-root runners")
+        code, result = run_main(capsys, site, "verify", *cli_arguments(site))
+        assert code == 2
     assert (result["route"], result["reason"]) == ("held", "staged_model_hash_mismatch")
     assert (result["model_base"], result["cleanup"]) == ("move_failed", "not_run")
     assert site["model"].is_dir() and copies(site["work"], "held") == []
@@ -647,22 +788,21 @@ def test_an_io_error_while_hashing_the_base_holds_instead_of_raising(site, monke
     result = verified(site)
     assert (result["route"], result["reason"]) == ("held", "verification_io_error")
     assert result["model_base"] == "moved_to_held" and not site["model"].exists()
-    if OWNER == 0:  # the CLI reports the same held result, without a traceback
-        monkeypatch.setattr(hashlib, "file_digest", real_digest)
-        assert staged(site)["route"] == "ready"
-        monkeypatch.setattr(hashlib, "file_digest", failing_digest)
-        code, cli_result = run_main(capsys, "verify", *cli_arguments(site))
-        assert code == 2
-        assert (cli_result["route"], cli_result["reason"]) == ("held", "verification_io_error")
+    # The CLI reports the same held result, without a traceback.
+    monkeypatch.setattr(hashlib, "file_digest", real_digest)
+    assert staged(site)["route"] == "ready"
+    monkeypatch.setattr(hashlib, "file_digest", failing_digest)
+    code, cli_result = run_main(capsys, site, "verify", *cli_arguments(site))
+    assert code == 2
+    assert (cli_result["route"], cli_result["reason"]) == ("held", "verification_io_error")
 
 
 def test_an_io_error_escaping_a_command_is_reported_as_unverified(site, monkeypatch, capsys):
     def escaping(*args, **kwargs):
         raise OSError(5, "generated failure outside the verify handlers")
 
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setitem(stage_module, "verify", escaping)
-    code, result = run_main(capsys, "verify", *cli_arguments(site))
+    code, result = run_main(capsys, site, "verify", *cli_arguments(site))
     assert code == 2
     assert (result["route"], result["reason"]) == ("unverified", "installer_io_error")
     assert result["model_base"] == "unchanged"
@@ -733,7 +873,9 @@ def test_verify_refuses_a_base_not_owned_by_the_installer_or_with_wrong_modes(si
 def test_verify_holds_a_linked_base_without_following_it(site):
     assert staged(site)["route"] == "ready"
     outside = site["volume"].parent / "outside-base"
+    site["model"].chmod(0o700)  # a non-root mover needs write access to rewrite ".."
     os.rename(site["model"], outside)
+    outside.chmod(0o555)
     site["model"].symlink_to(outside)
     assert verified(site)["reason"] == "staged_model_file_required"
     assert not site["model"].is_symlink() and one_held(site).is_symlink()
@@ -792,7 +934,7 @@ def make_snapshot(tmp_path):
     return snapshot
 
 
-def screen(snapshot, restore_to=None, owner=OWNER):
+def screen(snapshot, restore_to=VOLUME, owner=OWNER):
     return boundary_module["check"](snapshot, restore_to, owner_uid=owner)
 
 
@@ -964,8 +1106,24 @@ def test_snapshot_cli_screens_with_the_named_worker_identity(tmp_path):
     )
     (snapshot / "Health-Token").write_text("generated")
     (snapshot / "Health-Token").chmod(0o600)
-    assert cli("--owner", owner) == (2, ["out_of_boundary_material"])
-    assert cli("--owner", "opentour-generated-missing-user") == (2, ["worker_identity_unknown"])
+    assert cli("--owner", owner, "--restore-to", VOLUME) == (2, ["out_of_boundary_material"])
+    assert cli("--owner", "opentour-generated-missing-user", "--restore-to", VOLUME) == (
+        2,
+        ["worker_identity_unknown"],
+    )
+    missing_target = subprocess.run(
+        [*ISOLATED, script, "check", "--snapshot", str(snapshot), "--owner", owner],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={},
+    )
+    assert missing_target.returncode == 2 and "--restore-to" in missing_target.stderr
+    assert boundary_module["check"](snapshot, None, owner_uid=OWNER) == [
+        "out_of_boundary_material",
+        "restore_target_not_worker_volume",
+    ]
     printed = subprocess.run(
         [*ISOLATED, script, "boundary"],
         capture_output=True,
@@ -975,3 +1133,130 @@ def test_snapshot_cli_screens_with_the_named_worker_identity(tmp_path):
         env={},
     )
     assert json.loads(printed.stdout) == boundary_module["boundary"]()
+
+
+def plant_secrets_in_unreadable_subdirectory(snapshot):
+    sub = snapshot / "sub"
+    sub.mkdir(mode=0o700)
+    for name in ("credentials", "health-token", "tls.key"):
+        (sub / name).write_text("generated")
+        (sub / name).chmod(0o600)
+    return sub
+
+
+def test_an_unreadable_snapshot_directory_refuses_instead_of_hiding_its_entries(
+    tmp_path, monkeypatch
+):
+    snapshot = make_snapshot(tmp_path)
+    sub = plant_secrets_in_unreadable_subdirectory(snapshot)
+    assert "out_of_boundary_material" in screen(snapshot)
+    if OWNER != 0:  # a real permission failure; root bypasses directory modes
+        sub.chmod(0o000)
+        try:
+            findings = screen(snapshot)
+        finally:
+            sub.chmod(0o700)
+    else:
+        real_scandir = os.scandir
+
+        def refusing_scandir(path="."):
+            if os.fspath(path) == str(sub):
+                raise PermissionError(13, "generated permission denied", str(sub))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", refusing_scandir)
+        findings = screen(snapshot)
+    assert "unreadable_entry" in findings and findings != []
+
+
+@pytest.mark.parametrize("where", ["listing", "entry"])
+def test_an_io_error_while_screening_refuses(tmp_path, monkeypatch, where):
+    snapshot = make_snapshot(tmp_path)
+    sub = plant_secrets_in_unreadable_subdirectory(snapshot)
+    if where == "listing":
+        real_scandir = os.scandir
+
+        def failing_scandir(path="."):
+            if os.fspath(path) == str(sub):
+                raise OSError(5, "generated I/O error", str(sub))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", failing_scandir)
+    else:
+        real_lstat = os.lstat
+
+        def failing_lstat(path, *, dir_fd=None):
+            if os.fspath(path) == str(snapshot / "authorization.json"):
+                raise OSError(5, "generated I/O error", os.fspath(path))
+            return real_lstat(path, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "lstat", failing_lstat)
+    assert "unreadable_entry" in screen(snapshot)
+
+
+def test_verify_holds_a_model_file_with_an_extra_hard_link(site):
+    """M4: a second name for a staged file would let the worker change it from elsewhere."""
+    assert staged(site)["route"] == "ready"
+    os.link(site["model"] / "tokenizer.json", site["volume"] / "tokenizer-alias")
+    result = verified(site)
+    assert (result["route"], result["reason"]) == ("held", "staged_model_file_required")
+    assert not site["model"].exists()
+
+
+def test_hold_moves_the_base_before_any_cleanup_runs(site, monkeypatch):
+    """M5: cleanup of earlier copies must never run before the failing base is moved out."""
+    assert staged(site)["route"] == "ready"
+    (site["work"] / "held-earlier").mkdir()
+    tamper(site["model"] / "config.json")
+    events = []
+    real_rename, real_remove = os.rename, stage_module["_remove_at"]
+
+    def recording_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        if src == "model-base":
+            events.append("move")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def recording_remove(directory_fd, name, depth=0):
+        if depth == 0:
+            events.append("cleanup")
+        return real_remove(directory_fd, name, depth)
+
+    monkeypatch.setattr(os, "rename", recording_rename)
+    monkeypatch.setitem(stage_module, "_remove_at", recording_remove)
+    result = verified(site)
+    assert (result["model_base"], result["cleanup"]) == ("moved_to_held", "complete")
+    assert events[0] == "move" and "cleanup" in events
+    assert not (site["work"] / "held-earlier").exists()
+
+
+def test_a_runtime_probe_that_exits_non_zero_is_refused(site):
+    """M9: correct-looking output is not enough; the probe must exit 0."""
+    site["write_python"]()
+    script = site["python"].read_text().rstrip("\n") + "\nexit 3\n"
+    site["python"].write_text(script)
+    result = staged(site)
+    assert (result["route"], result["reason"]) == ("held", "unqualified_numeric_runtime")
+    assert not site["model"].exists()
+
+
+def test_a_fifo_in_place_of_a_checkpoint_file_cannot_block_staging(site):
+    """F6: opening the source with O_NONBLOCK refuses a FIFO instead of waiting on it."""
+    target = site["source"] / "config.json"
+    target.unlink()
+    os.mkfifo(target, 0o600)
+
+    class Blocked(Exception):
+        """Not an OSError, so no handler in the script can turn a blocked open into a hold."""
+
+    def timed_out(signum, frame):
+        raise Blocked("staging blocked on a FIFO")
+
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.alarm(5)
+    try:
+        result = staged(site)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert (result["route"], result["reason"]) == ("held", "staged_model_file_required")
+    assert not site["model"].exists()

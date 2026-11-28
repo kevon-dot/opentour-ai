@@ -98,13 +98,17 @@ def _entry_findings(entry, owner_uid):
     return findings
 
 
-def check(snapshot, restore_to=None, *, owner_uid):
-    """Return the screen's findings; empty means nothing the screen looks for was found."""
+def check(snapshot, restore_to, *, owner_uid):
+    """Return the screen's findings; empty means nothing the screen looks for was found.
+
+    The restore target is always checked: it must be exactly the worker volume. Any entry
+    that cannot be listed or examined is a finding, so an unreadable directory refuses.
+    """
     root = Path(os.path.abspath(snapshot))
     findings = set()
     if any(_within(root, Path(live)) for live in LIVE_STATE):
         findings.add("snapshot_overlaps_live_state")
-    if restore_to is not None and Path(os.path.abspath(restore_to)) != Path(VOLUME):
+    if restore_to is None or Path(os.path.abspath(restore_to)) != Path(VOLUME):
         findings.add("restore_target_not_worker_volume")
     try:
         info = os.lstat(root)
@@ -113,11 +117,18 @@ def check(snapshot, restore_to=None, *, owner_uid):
     if not stat.S_ISDIR(info.st_mode):
         return sorted(findings | {"snapshot_required"})
     findings |= _entry_findings(info, owner_uid)
-    for directory, dirs, files in os.walk(root):
+
+    def unreadable(error):
+        findings.add("unreadable_entry")
+
+    for directory, dirs, files in os.walk(root, onerror=unreadable):
         here = Path(directory)
         for name in dirs + files:
             findings |= _name_findings(name)
-            findings |= _entry_findings(os.lstat(here / name), owner_uid)
+            try:
+                findings |= _entry_findings(os.lstat(here / name), owner_uid)
+            except OSError:
+                findings.add("unreadable_entry")
         dirs[:] = [d for d in dirs if not os.path.islink(here / d)]
     return sorted(findings)
 
@@ -128,7 +139,7 @@ def main(argv=None):
     commands.add_parser("boundary")
     checker = commands.add_parser("check")
     checker.add_argument("--snapshot", type=Path, required=True)
-    checker.add_argument("--restore-to", type=Path)
+    checker.add_argument("--restore-to", type=Path, required=True)
     checker.add_argument("--owner", default=WORKER, help="worker identity that owns the volume")
     args = parser.parse_args(argv)
     if args.command == "boundary":
