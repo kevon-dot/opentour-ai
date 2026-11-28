@@ -853,3 +853,75 @@ def test_ledger_round_trip_accepts_honest_state_at_grant_and_cap() -> None:
     with pytest.raises(TuningBenefitError) as cap:
         restored.reserve("d", "c", "generation", 1)
     assert cap.value.code == "spend_cap_exceeded"
+
+
+# ---- post-merge audit follow-up (2026-11-28): ledger key structure ----
+
+
+@pytest.mark.parametrize(
+    ("key", "kind"),
+    [("||generation", "generation"), ("d||generation", "generation"), ("|a|fit", "fit")],
+)
+def test_ledger_refuses_keys_with_empty_digest_or_arm(key: str, kind: str) -> None:
+    # The third part matches the stored kind, so only the empty-part check can refuse these.
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"][key] = [kind, 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    ("key", "kind"),
+    [
+        ("d|a|fit|x", "fit"),
+        ("d|a|generation|generation", "generation"),
+        ("d|a|generation|", "generation"),
+        ("d|a|generation|b|z", "generation"),
+    ],
+)
+def test_ledger_refuses_keys_with_extra_parts_even_when_the_third_is_the_kind(
+    key: str, kind: str
+) -> None:
+    # Pins the ``len(parts) == 3`` check: every key here has a well-formed third part.
+    assert key.split("|")[2] == kind
+    ledger = SpendLedger(spend_cap=100, fits_authorized=1)
+    raw = ledger.to_json()
+    raw["reserved"][key] = [kind, 1]
+    assert _forged_refusal(raw) == "ledger_forged_reservation"
+
+
+@pytest.mark.parametrize(
+    ("digest", "arm"),
+    [
+        ("d", "a|b"),
+        ("d|a", "b"),
+        ("d", "a|"),
+        ("|d", "a"),
+        ("", "a"),
+        ("d", ""),
+        (None, "a"),
+        ("d", 7),
+    ],
+)
+def test_reserve_and_settle_refuse_separator_empty_or_non_str_parts(
+    digest: object, arm: object
+) -> None:
+    ledger = SpendLedger(spend_cap=100, fits_authorized=2)
+    for call in (ledger.reserve, ledger.settle):
+        with pytest.raises(TuningBenefitError) as err:
+            call(digest, arm, "generation", 1)  # type: ignore[arg-type]
+        assert err.value.code == "reservation_key_invalid"
+    assert ledger.to_json()["reserved"] == {} and ledger.charged == 0
+
+
+def test_separator_in_an_identifier_cannot_collide_two_pairs() -> None:
+    # ("d|a", "b") and ("d", "a|b") would both key as "d|a|b|..." and read as "replayed".
+    ledger = SpendLedger(spend_cap=100, fits_authorized=2)
+    assert ledger.reserve("d", "a", "generation", 5) == "reserved"
+    with pytest.raises(TuningBenefitError) as first:
+        ledger.reserve("d|a", "b", "generation", 5)
+    with pytest.raises(TuningBenefitError) as second:
+        ledger.reserve("d", "a|b", "generation", 5)
+    assert first.value.code == second.value.code == "reservation_key_invalid"
+    restored = SpendLedger.from_json(ledger.to_json())  # what reserve admits always round-trips
+    assert restored.to_json() == ledger.to_json()

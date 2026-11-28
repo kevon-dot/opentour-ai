@@ -780,6 +780,23 @@ def plan_arms(
     return {"fits": [], "comparison": "unrun", "reason": "no_fit_authorized"}
 
 
+_KEY_SEPARATOR = "|"
+
+
+def _ledger_key(protocol_digest: object, arm_id: object, kind: str) -> str:
+    """``digest|arm|kind``. Each part must be a non-empty str without the separator.
+
+    Otherwise ``("d|a", "b")`` and ``("d", "a|b")`` would share a key and read as "replayed",
+    and ``from_json`` could not tell a forged key from an honest one.
+    """
+    for part in (protocol_digest, arm_id):
+        _need(
+            type(part) is str and bool(part) and _KEY_SEPARATOR not in part,
+            "reservation_key_invalid",
+        )
+    return f"{protocol_digest}{_KEY_SEPARATOR}{arm_id}{_KEY_SEPARATOR}{kind}"
+
+
 class SpendLedger:
     """Reserve each distinct cost once; replay of the same key never double charges."""
 
@@ -792,7 +809,7 @@ class SpendLedger:
     def reserve(self, protocol_digest: str, arm_id: str, kind: str, amount: int) -> str:
         _need(kind in {"fit", "generation"}, "reservation_kind_unknown")
         _count(amount, "reservation_amount_invalid")
-        key = f"{protocol_digest}|{arm_id}|{kind}"
+        key = _ledger_key(protocol_digest, arm_id, kind)
         if key in self._reserved:
             _need(self._reserved[key][1] == amount, "reservation_conflict", key)
             return "replayed"
@@ -806,7 +823,7 @@ class SpendLedger:
         return "reserved"
 
     def settle(self, protocol_digest: str, arm_id: str, kind: str, actual: int) -> str:
-        key = f"{protocol_digest}|{arm_id}|{kind}"
+        key = _ledger_key(protocol_digest, arm_id, kind)
         _count(actual, "settlement_amount_invalid")
         _need(key in self._reserved, "settle_without_reservation")
         _need(actual <= self._reserved[key][1], "actual_exceeds_reservation")
@@ -835,8 +852,12 @@ class SpendLedger:
         for k, v in raw["reserved"].items():
             _need(isinstance(v, (list, tuple)) and len(v) == 2, "ledger_forged_reservation", k)
             _need(v[0] in {"fit", "generation"}, "ledger_forged_reservation", k)
-            parts = k.split("|") if isinstance(k, str) else []
-            _need(len(parts) == 3 and parts[2] == v[0], "ledger_forged_reservation", k)
+            parts = k.split(_KEY_SEPARATOR) if type(k) is str else []
+            _need(
+                len(parts) == 3 and all(parts) and parts[2] == v[0],
+                "ledger_forged_reservation",
+                k,
+            )
             _count(v[1], "ledger_forged_reservation")
             reserved[k] = (v[0], v[1])
         settled: dict[str, int] = {}
