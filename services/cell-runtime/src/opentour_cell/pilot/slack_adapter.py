@@ -40,6 +40,7 @@ from opentour_cell.pilot.status_questions import (
 if TYPE_CHECKING:
     from opentour_cell.pilot.handoff_readback import HandoffReadback
     from opentour_cell.pilot.map_review import MapReviewService
+    from opentour_cell.pilot.recipient_lifecycle import LifecycleAuthority
     from opentour_cell.pilot.starter_evaluation_session import StarterEvaluationSession
     from opentour_cell.pilot.starter_map_confirmation import StarterCaseEntry, StarterCaseSession
     from opentour_cell.pilot.verifier_form import VerifierForm
@@ -1105,8 +1106,11 @@ class Workbench:
         training: Any,
         views: Any,
         submit: Callable[[Callable[[], None]], Any] | None = None,
+        *,
+        lifecycle_authority: LifecycleAuthority | None = None,
     ):
         self.config = config
+        self.lifecycle_authority = lifecycle_authority
         first = config()
         self.binding = (
             first.organization,
@@ -1762,6 +1766,8 @@ class Workbench:
             proposal_ref=target.audit["job_id"],
             proposal_revision=target.audit["run_revision"],
             artifact_sha256=target.audit["model_revision"],
+            cohort_revision=target.audit["cohort_revision"],
+            lifecycle_authority=self.lifecycle_authority,
         )
 
     def _receipt_pin(self, actor: str, revision: str, receipt: HandoffReadback) -> str:
@@ -1977,7 +1983,12 @@ class Workbench:
         self._show(
             view,
             self.views.status_question_modal(
-                token, revision, target.dataset, answer, receipt_pin=pin
+                token,
+                revision,
+                target.dataset,
+                answer,
+                receipt_pin=pin,
+                workflow_ref=current.live_workflow_ref if delivery_scoped else None,
             )
             if answer
             else self.views.question_modal(token, revision, target.report, target.audit, topic),
@@ -5109,6 +5120,7 @@ def main(argv: list[str] | None = None) -> int:
         socket_sdk = importlib.import_module("slack_sdk.socket_mode")
         response = importlib.import_module("slack_sdk.socket_mode.response").SocketModeResponse
         from opentour_cell.pilot import slack_views
+        from opentour_cell.pilot.recipient_lifecycle_authority import open_lifecycle_authority
 
         bot = os.environ.get("SLACK_BOT_TOKEN", "")
         _check(bot.startswith("xoxb-"))
@@ -5121,6 +5133,11 @@ def main(argv: list[str] | None = None) -> int:
             web,
             LocalTrainingStore(cfg.directory / "training.sqlite3", cfg.organization),
             slack_views,
+            lifecycle_authority=(
+                None
+                if args.flush_approvals or args.post_launcher
+                else open_lifecycle_authority(cfg.directory)
+            ),
         )
         if args.flush_approvals:
             from opentour_cell.pilot.approval_inbox import delivery_cycle

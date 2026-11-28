@@ -785,17 +785,24 @@ def current_training_question(
 
 
 def status_question_modal(
-    context: str, revision: str, dataset: str, answer: StatusAnswer, *, receipt_pin: str = ""
+    context: str,
+    revision: str,
+    dataset: str,
+    answer: StatusAnswer,
+    *,
+    receipt_pin: str = "",
+    workflow_ref: str | None = None,
 ) -> Block:
     controls = [_button("View evidence", "ot_evidence", revision), _home()]
     if receipt_pin:
         controls.insert(0, _button("View receipt", "ot_release_receipt", receipt_pin))
+    scope = f"Workflow {_ref(workflow_ref)} · " if workflow_ref else ""
     return _modal(
         "Result status",
         "ot_status_question",
         context,
         [
-            _section(f"Dataset {_ref(dataset)} · readout {_ref(revision)}"),
+            _section(f"{scope}Dataset {_ref(dataset)} · readout {_ref(revision)}"),
             _section(answer.finding),
             _section(answer.basis),
             _section(answer.next_action),
@@ -1487,6 +1494,7 @@ def _handoff_projection(
     scope = (
         f"Workflow {_ref(receipt.selection.workflow_ref)} · Proposal {_ref(audit['job_id'])} "
         f"revision {_ref(audit['run_revision'])} · Artifact {_ref(audit['model_revision'])}\n"
+        f"Benchmark cohort revision {_ref(audit['cohort_revision'])}\n"
         f"Destination {_ref(receipt.destination_ref)}"
     )
     approval = f"Approved {when(receipt.approved_at)}."
@@ -1496,29 +1504,68 @@ def _handoff_projection(
         checked = "No independent check time is recorded."
     basis = f"{scope} · {approval} {checked}"
 
-    receiver = None
-    if delivery and delivery.stage == "delivered":
-        assert delivery.received_at is not None and delivery.receiver_receipt_ref
-        state = "Delivered to the selected destination."
-        receiver = (
-            f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at "
-            f"{when(delivery.received_at)}."
-        )
-        next_action = "The recipient can independently replay the artifact."
-        answer = StatusAnswer(state, f"{basis} {receiver}", next_action)
-    else:
+    if not delivery or delivery.stage != "delivered":
         state = (
             "Awaiting delivery."
             if delivery and delivery.stage == "queued"
             else "Delivery is unconfirmed."
         )
         next_action = "The authorized handoff operator can reconcile delivery."
-        answer = StatusAnswer(f"Approval recorded. {state}", basis, next_action)
-    rows = [scope, approval, f"{state}\n{checked}"]
-    if receiver:
-        rows.append(receiver)
-    rows.append(next_action)
-    return answer, rows
+        return StatusAnswer(f"Approval recorded. {state}", basis, next_action), [
+            scope,
+            approval,
+            f"{state}\n{checked}",
+            next_action,
+        ]
+
+    assert delivery.received_at is not None and delivery.receiver_receipt_ref
+    delivered = "Delivered to the selected destination."
+    state = delivered
+    observed_times = []
+    evidence = [
+        f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at {when(delivery.received_at)}."
+    ]
+    next_action = "The recipient can independently replay the artifact."
+    replay = receipt.replay
+    rollback = receipt.rollback
+    if replay:
+        observed_times.append(replay.observed_at)
+        evidence.append(
+            f"Replayed by recipient at {when(replay.observed_at)}. "
+            f"Replay receipt {_ref(replay.receipt_ref)}."
+        )
+    if replay and replay.evaluation_only:
+        state = "Evaluation handoff complete."
+        evidence.append(state)
+        next_action = "The reviewer can inspect the completed evaluation receipt."
+    elif rollback:
+        observed_times.append(rollback.observed_at)
+        state = "Rollback verified."
+        evidence.append(
+            f"Rollback verified at {when(rollback.observed_at)}. "
+            f"Environment {_ref(rollback.environment_ref)} · "
+            f"Restored serving version {_ref(rollback.restored_version)}. "
+            f"Rollback receipt {_ref(rollback.receipt_ref)}."
+        )
+        next_action = "The reviewer can inspect the restored serving version."
+    elif replay:
+        state = "Activation unconfirmed."
+        evidence.append(state)
+        next_action = "The environment operator can check the serving version."
+    latest = max(observed_times, default=None)
+    if latest is not None and (
+        delivery.last_checked_at is None or latest > delivery.last_checked_at
+    ):
+        summary_check = f"Last checked {when(latest)}."
+        basis = f"{scope} · {approval} {summary_check}"
+        scope = f"{scope}\n{summary_check}"
+        checked = (
+            f"Delivery last checked {when(delivery.last_checked_at)}."
+            if delivery.last_checked_at is not None
+            else "No independent delivery check time is recorded."
+        )
+    rows = [scope, approval, f"{delivered}\n{checked}", *evidence, next_action]
+    return StatusAnswer(state, " ".join([basis, *evidence]), next_action), rows
 
 
 def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:
@@ -1532,7 +1579,17 @@ def handoff_modal(
     _, rows = _handoff_projection(receipt, audit)
     controls = [_home()]
     if not receipt.delivery or receipt.delivery.stage != "delivered":
-        controls.insert(0, _button("Check delivery status", "ot_delivery_status", revision))
+        refresh = "Check delivery status"
+    elif receipt.rollback:
+        refresh = None
+    elif not receipt.replay:
+        refresh = "Check replay status"
+    elif not receipt.replay.evaluation_only:
+        refresh = "Check serving status"
+    else:
+        refresh = None
+    if refresh:
+        controls.insert(0, _button(refresh, "ot_delivery_status", revision))
     return _modal(
         "Handoff receipt",
         "ot_handoff_receipt",
