@@ -2103,3 +2103,49 @@ def test_pdf_dashed_stroked_text_goes_to_review() -> None:
     _eligible(b"[0 100] 0 d" + _SHOUT)  # fill-only text is not dashed
     _eligible(b"[0 100] 0 d [] 0 d BT 1 Tr" + _SHOUT[3:])  # back to solid
     _eligible(b"q [0 100] 0 d Q BT 1 Tr" + _SHOUT[3:])
+
+
+_FAKE = b"BT /F1 11 Tf 72 650 Td (FAKE TEXT) Tj ET"
+
+
+def _inline(entries: bytes, data: bytes, placement: bytes = b"") -> bytes:
+    image = b"BI " + entries + b" ID " + data + b" EI"
+    return _VISIBLE + b" " + (b"q " + placement + b" cm " + image + b" Q" if placement else image)
+
+
+def test_pdf_inline_image_data_is_skipped_not_read_as_operators() -> None:
+    # The data reads like a text object but is image bytes: poppler paints a 1x1 pt image and
+    # draws no "FAKE TEXT". The dictionary confirms where the data ends.
+    result = read(_pdf(_inline(b"/W %d /H 1 /CS /G /BPC 8" % len(_FAKE), _FAKE)), "x.pdf")[1]
+    assert result.state is ExtractionState.ELIGIBLE, result.reason
+    assert [s.text for s in result.spans] == ["Visible"]
+    for entries, data in (
+        (b"/W 2 /H 2 /CS /RGB /BPC 8", b"\x80" * 12),
+        (b"/Width 8 /Height 2 /ImageMask true", b"\xff\x00"),
+        (b"/W 3 /H 1 /CS /DeviceCMYK /BPC 8 /F []", b"\x80" * 12),
+    ):
+        _eligible(_inline(entries, data, b"20 0 0 20 500 100"))  # a small image clear of text
+
+
+def test_pdf_inline_image_whose_extent_is_in_doubt_goes_to_review() -> None:
+    flag = "inline_image_unverified"
+    # An early " EI " inside data the dictionary sizes longer: a viewer measuring the data paints
+    # it all, while a search for EI stops there and reads the rest as operators.
+    early = b"\xff\xff EI " + _FAKE + b" \xff\xff"
+    _flagged(_inline(b"/W %d /H 1 /CS /G /BPC 8" % len(early), early), flag)
+    for entries, data in (
+        (b"/W 1 /H 1 /CS /G /BPC 8 /F /AHx", b"80>"),  # filtered: size unknown
+        (b"/W 1 /H 1 /CS /CS0 /BPC 8", b"\x80"),  # a named colour space
+        (b"/W 1 /H 1 /CS /G", b"\x80"),  # no /BPC
+        (b"/W 1 /H 1 /W 2 /CS /G /BPC 8", b"\x80"),  # a repeated key
+        (b"/W 2 /H 1 /CS /G /BPC 8", b"\x80"),  # one byte short
+    ):
+        _flagged(_inline(entries, data, b"20 0 0 20 500 100"), flag)
+    _flagged(_VISIBLE + b" BI /W 1 /H 1 /CS /G /BPC 8 ID \x80", flag)  # no EI at all
+    _flagged(_VISIBLE + b" ID \x80 EI", flag)  # data with no dictionary
+
+
+def test_pdf_inline_image_over_text_goes_to_review() -> None:
+    # The reviewer's probe: a page-sized inline image after the text; poppler draws no text ink.
+    _flagged(_inline(b"/W 1 /H 1 /CS /G /BPC 8", b"\xff", b"612 0 0 792 0 0"), _OVERLAP)
+    _flagged(_inline(b"/W 1 /H 1 /CS /G /BPC 8", b"\xff", b"60 0 0 20 70 695"), _OVERLAP)

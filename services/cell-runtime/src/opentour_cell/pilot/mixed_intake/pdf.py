@@ -848,6 +848,63 @@ def _tokens(data: bytes):  # type: ignore[no-untyped-def]
             else:
                 yield ("op", word)
             i = j
+            if word == b"ID":
+                # Inline image data is binary, not operators: it runs from after the one
+                # whitespace byte that ends ID to the whitespace before the first EI that stands
+                # as its own word. A viewer may instead measure it from the image dictionary;
+                # the caller compares the two (see inline_image_unverified in _fragments).
+                start = i + 1
+                closing = _INLINE_END.search(data, start)
+                if closing is None:
+                    yield ("inline", None)  # no EI: the rest of the stream is image data
+                    return
+                yield ("inline", data[start : closing.start()])
+                i = closing.end()
+
+
+# The whitespace and EI that end inline image data: EI followed by whitespace, a delimiter or
+# the end of the stream.
+_INLINE_END = re.compile(rb"[\x00\t\n\x0c\r ]EI(?=[\x00\t\n\x0c\r ()<>\[\]/%]|$)")
+_INLINE_COMPONENTS = {
+    b"G": 1, b"DeviceGray": 1, b"RGB": 3, b"DeviceRGB": 3, b"CMYK": 4, b"DeviceCMYK": 4,
+}  # fmt: skip
+_INLINE_KEYS = {
+    b"Width": b"W", b"Height": b"H", b"BitsPerComponent": b"BPC", b"ImageMask": b"IM",
+    b"ColorSpace": b"CS", b"Filter": b"F", b"Decode": b"D", b"DecodeParms": b"DP",
+    b"Interpolate": b"I",
+}  # fmt: skip
+
+
+def _inline_image_size(entries: list[object]) -> int | None:
+    """Bytes of an unfiltered inline image from its dictionary (key value pairs), or None.
+
+    None when the size cannot be known: a filter, a colour space other than a device one (an
+    Indexed or named space), a missing or malformed /W, /H or /BPC, or a malformed dictionary.
+    """
+    if len(entries) % 2:
+        return None
+    short: dict[bytes, object] = {}
+    for key, value in zip(entries[0::2], entries[1::2], strict=True):
+        if not isinstance(key, bytes):
+            return None
+        key = _INLINE_KEYS.get(key, key)
+        if key in short:
+            return None
+        short[key] = value
+    if short.get(b"F") not in (None, []):
+        return None
+    width, height = short.get(b"W"), short.get(b"H")
+    mask = short.get(b"IM") == b"true"
+    bits = 1.0 if mask else short.get(b"BPC")
+    space = short.get(b"CS", b"")
+    components = 1 if mask else _INLINE_COMPONENTS.get(space) if isinstance(space, bytes) else None
+    if components is None or not (
+        isinstance(width, float) and isinstance(height, float) and isinstance(bits, float)
+    ):
+        return None
+    if min(width, height, bits) <= 0 or not all(v == int(v) for v in (width, height, bits)):
+        return None
+    return (int(width) * int(bits) * components + 7) // 8 * int(height)
 
 
 def _show(raw: bytes) -> str:
@@ -1510,6 +1567,14 @@ _PAINT = frozenset({b"n", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*
 _PATH_BUILD = frozenset({b"m", b"l", b"c", b"v", b"y"})
 
 
+def _unit_square(ctm: tuple[float, ...]) -> tuple[float, float, float, float]:
+    """Device-space bounding box of the unit square under the CTM, where images are painted."""
+    a, b, c, d, e, f = ctm
+    xs = (e, e + a, e + c, e + a + c)
+    ys = (f, f + b, f + d, f + b + d)
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def _image_may_conceal(
     image: tuple[float, float, float, float],
     page_box: tuple[float, float, float, float] | None,
@@ -1568,6 +1633,8 @@ def _fragments(
     glyph_boxes: list[tuple[float, float, float, float, bool]] = []
     run: list[float | None] = [0, None]  # rule (iii) state, carried along the line (_extent_units)
     dict_depth = 0
+    inline_open = False  # inside an inline image dictionary (BI ... ID)
+    inline_size: int | None = None  # its data size, when the dictionary determines it
 
     def move_line(tx: float, ty: float) -> None:
         """Td: Tlm = [1 0 0 1 tx ty] x Tlm, and Tm restarts at the new line start."""
@@ -1700,6 +1767,16 @@ def _fragments(
 
     for kind, value in _tokens(content):
         deadline.check()
+        if kind == "inline":
+            # Inline image data, after BI ... ID: an image painted in the unit square of the
+            # CTM, like an image XObject. Data whose extent the dictionary does not confirm may
+            # hold operators a viewer skips, or hide ones it runs: the page goes to review.
+            if not isinstance(value, bytes) or inline_size is None or len(value) != inline_size:
+                marks.add("inline_image_unverified")
+            image_boxes.append(_unit_square(gs.ctm))
+            inline_size = None
+            stack.clear()
+            continue
         if kind == "[":
             array = []
             continue
@@ -1717,6 +1794,15 @@ def _fragments(
         if kind != "op":
             stack.append(value)
             continue
+        if inline_open:
+            # The inline image dictionary, BI to ID: keys, values and words such as `true`.
+            if value != b"ID":
+                stack.append(value)
+                continue
+            inline_open = False
+            inline_size = _inline_image_size(stack)
+            stack.clear()
+            continue
         if value in (b"<<", b">>"):
             # An inline dictionary (BDC properties): everything inside it is an operand, so an
             # `R` or any other word in it never acts as an operator or clears the operands.
@@ -1727,7 +1813,11 @@ def _fragments(
             continue
         op = value
         nums = [v for v in stack if isinstance(v, float)]
-        if op == b"BT":
+        if op == b"BI":
+            inline_open = True
+        elif op == b"ID":
+            marks.add("inline_image_unverified")  # image data with no BI dictionary before it
+        elif op == b"BT":
             text_matrix = line_matrix = _IDENTITY
             run[:] = [0, None]
         elif op == b"Tf" and stack:
@@ -1819,10 +1909,7 @@ def _fragments(
             if stack[-1] in forms:
                 marks.add("form_xobject_text_unread")
             elif stack[-1] in images:
-                a, b, c, d, e, f = gs.ctm
-                xs = (e, e + a, e + c, e + a + c)  # corners of the unit square under the CTM
-                ys = (f, f + b, f + d, f + b + d)
-                image_boxes.append((min(xs), min(ys), max(xs), max(ys)))
+                image_boxes.append(_unit_square(gs.ctm))
             else:
                 marks.add("xobject_unclassified")  # not known to be a form or an image
         elif op == b"TL" and nums:
