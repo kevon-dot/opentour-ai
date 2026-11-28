@@ -1504,29 +1504,54 @@ def _handoff_projection(
         checked = "No independent check time is recorded."
     basis = f"{scope} · {approval} {checked}"
 
-    receiver = None
-    if delivery and delivery.stage == "delivered":
-        assert delivery.received_at is not None and delivery.receiver_receipt_ref
-        state = "Delivered to the selected destination."
-        receiver = (
-            f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at "
-            f"{when(delivery.received_at)}."
-        )
-        next_action = "The recipient can independently replay the artifact."
-        answer = StatusAnswer(state, f"{basis} {receiver}", next_action)
-    else:
+    if not delivery or delivery.stage != "delivered":
         state = (
             "Awaiting delivery."
             if delivery and delivery.stage == "queued"
             else "Delivery is unconfirmed."
         )
         next_action = "The authorized handoff operator can reconcile delivery."
-        answer = StatusAnswer(f"Approval recorded. {state}", basis, next_action)
+        return StatusAnswer(f"Approval recorded. {state}", basis, next_action), [
+            scope,
+            approval,
+            f"{state}\n{checked}",
+            next_action,
+        ]
+
+    assert delivery.received_at is not None and delivery.receiver_receipt_ref
+    state = "Delivered to the selected destination."
     rows = [scope, approval, f"{state}\n{checked}"]
-    if receiver:
-        rows.append(receiver)
+    evidence = [
+        f"Receiver receipt {_ref(delivery.receiver_receipt_ref)} at {when(delivery.received_at)}."
+    ]
+    next_action = "The recipient can independently replay the artifact."
+    if receipt.replay:
+        replay = receipt.replay
+        evidence.append(
+            f"Replayed by recipient at {when(replay.observed_at)}. "
+            f"Replay receipt {_ref(replay.receipt_ref)}."
+        )
+        if replay.evaluation_only:
+            state = "Evaluation handoff complete."
+            evidence.append(state)
+            next_action = "The reviewer can inspect the completed evaluation receipt."
+        elif receipt.rollback:
+            rollback = receipt.rollback
+            state = "Rollback verified."
+            evidence.append(
+                f"Rollback verified at {when(rollback.observed_at)}. "
+                f"Environment {_ref(rollback.environment_ref)} · "
+                f"Restored serving version {_ref(rollback.restored_version)}. "
+                f"Rollback receipt {_ref(rollback.receipt_ref)}."
+            )
+            next_action = "The reviewer can inspect the restored serving version."
+        else:
+            state = "Activation unconfirmed."
+            evidence.append(state)
+            next_action = "The environment operator can check the serving version."
+    rows.extend(evidence)
     rows.append(next_action)
-    return answer, rows
+    return StatusAnswer(state, " ".join([basis, *evidence]), next_action), rows
 
 
 def handoff_status(receipt: HandoffReadback, audit: Mapping[str, Any]) -> StatusAnswer:

@@ -231,3 +231,61 @@ def test_approval_opens_scoped_receipt_and_old_button_denies_changed_destination
     h.action(view, "ot_delivery_status", refresh, actor)
     assert permit.destination_ref not in text(h, view) and "other-recipient" not in text(h, view)
     assert screen(h, view).get("callback_id") != "ot_handoff_receipt"
+
+
+def test_timeline_renders_only_applicable_post_delivery_observations():
+    """Render normalized observations for generated presentation coverage."""
+    from dataclasses import replace
+
+    from opentour_cell.pilot.handoff_readback import (
+        HandoffReadback,
+        ReplayReadback,
+        RollbackReadback,
+    )
+    from opentour_cell.pilot.release_outbox import ReleaseSelection, ReleaseStatus
+    from opentour_cell.pilot.slack_views import handoff_modal, handoff_status
+
+    audit = dict(
+        job_id="proposal",
+        run_revision="revision",
+        model_revision="winner",
+        cohort_revision="cohort",
+    )
+    selection = ReleaseSelection("workflow", "proposal", "approval")
+    delivered = ReleaseStatus("release", "destination", "delivered", 1, 3, "received", 2)
+    replay = ReplayReadback("replay-proof", 4, True)
+    rollback = RollbackReadback("rollback-proof", 5, "test-environment", "restored")
+    receipt = HandoffReadback(selection, "destination", 1, delivered, replay, rollback)
+
+    def rows(current):
+        view = handoff_modal("context", "revision", current, audit)
+        actions = {
+            button["action_id"]
+            for block in view["blocks"]
+            if block["type"] == "actions"
+            for button in block["elements"]
+        }
+        assert actions <= {"ot_home", "ot_delivery_status"}
+        return "\n".join(
+            block["text"]["text"] for block in view["blocks"] if block["type"] == "section"
+        )
+
+    evaluation = rows(receipt)
+    assert (
+        "Replayed by recipient at 1970-01-01T00:00:04+00:00. Replay receipt replay-proof."
+        in evaluation
+    )
+    assert "Evaluation handoff complete." in evaluation
+    assert "rollback-proof" not in evaluation and "test-environment" not in evaluation
+
+    pending = replace(receipt, replay=replace(replay, evaluation_only=False), rollback=None)
+    assert handoff_status(pending, audit).finding == "Activation unconfirmed."
+    assert "Active since" not in rows(pending)
+    restored = replace(pending, rollback=rollback)
+    assert handoff_status(restored, audit).finding == "Rollback verified."
+    assert "Rollback verified at 1970-01-01T00:00:05+00:00." in rows(restored)
+    assert "Environment test-environment · Restored serving version restored." in rows(restored)
+
+    unknown = replace(receipt, delivery=replace(delivered, stage="delivery_unconfirmed"))
+    assert "Delivery is unconfirmed." in rows(unknown)
+    assert "replay-proof" not in rows(unknown) and "rollback-proof" not in rows(unknown)

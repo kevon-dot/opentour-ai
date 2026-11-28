@@ -12,11 +12,28 @@ from opentour_cell.pilot.training import LocalTrainingStore
 
 
 @dataclass(frozen=True)
+class ReplayReadback:
+    receipt_ref: str
+    observed_at: int
+    evaluation_only: bool
+
+
+@dataclass(frozen=True)
+class RollbackReadback:
+    receipt_ref: str
+    observed_at: int
+    environment_ref: str
+    restored_version: str
+
+
+@dataclass(frozen=True)
 class HandoffReadback:
     selection: ReleaseSelection
     destination_ref: str
     approved_at: int
     delivery: ReleaseStatus | None
+    replay: ReplayReadback | None = None
+    rollback: RollbackReadback | None = None
 
 
 def read_handoff(
