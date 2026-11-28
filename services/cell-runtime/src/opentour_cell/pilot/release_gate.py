@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -225,6 +226,7 @@ def record_release(
     inspection_ref: str,
     provider: str,
     provider_request_expires_at: int | None = None,
+    before_native_publish: Callable[[], None] | None = None,
 ) -> Json:
     """Record a named decision. The bridge supplies the authenticated request deadline."""
     _require(
@@ -300,7 +302,7 @@ def record_release(
                 check_request_deadline()
                 _record(path, saved, before_publish=check_request_deadline)
             else:
-                _record(path, saved)
+                _record(path, saved, before_publish=before_native_publish)
         else:
             # A retry must preserve the time of the first durable decision. Old
             # receipts remain usable for their existing approval-only pathways.

@@ -17,10 +17,7 @@ from test_status_questions import counts, inspect
 from test_workflow_benchmarks import HISTORY
 
 
-def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
-    tmp_path, monkeypatch
-):
-    h, plan, run, _ = setup_workflow(tmp_path, "rule", release=True)
+def admit_workflow_label(h, plan):
     cfg = h.app.settings()
     epoch = h.store.engagement_id
     current = check_current_intake(cfg.directory, cfg.organization, epoch, plan["intake_revision"])
@@ -35,6 +32,17 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
     label = WorkflowLabel(
         BenchmarkScope(cfg.organization, epoch, workflow), "owner", "v1", "Purchasing", ("Orders",)
     )
+    return label
+
+
+def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
+    tmp_path, monkeypatch
+):
+    h, plan, run, _ = setup_workflow(tmp_path, "rule", release=True)
+    cfg = h.app.settings()
+    epoch = h.store.engagement_id
+    label = admit_workflow_label(h, plan)
+    workflow = label.scope.workflow_ref
     labels = [label]
     member = True
 
@@ -51,7 +59,9 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
         )
 
     h.app.workflow_index_scope = scope
-    assert "Your workflow queue is empty." in json.dumps(publish(h, monkeypatch, ACTOR))
+    # The current named reviewer sees an assigned, completed proposal before inspecting it.
+    assert "Needs you" in json.dumps(publish(h, monkeypatch, ACTOR))
+    assert "Your workflow queue is empty." in json.dumps(publish(h, monkeypatch, OTHER))
     _, revision = inspect(h)
     before = counts(h)
     old = publish(h, monkeypatch, ACTOR)
@@ -100,8 +110,30 @@ def test_private_queue_reopens_exact_managed_proposal_and_fences_prior_labels(
     evidence = next(
         v for v, data in reversed(h.slack.screens.items()) if "ot_release_changes" in buttons(data)
     )
-    h.action(evidence, "ot_release_changes", revision, ACTOR)
+    from opentour_cell.pilot import release_gate
+
     decision = h.path.parent / "managed-outputs" / run / "release-decision.json"
+    record = release_gate._record
+
+    def lose_membership_before_publish(path, payload, *, before_publish=None):
+        nonlocal member
+        assert before_publish is not None
+
+        def revoke_then_check():
+            nonlocal member
+            member = False
+            before_publish()
+
+        return record(path, payload, before_publish=revoke_then_check)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(release_gate, "_record", lose_membership_before_publish)
+        h.action(evidence, "ot_release_changes", revision, ACTOR)
+    assert not decision.exists() and counts(h) == before
+    member = True
+    reopen(publish(h, monkeypatch, ACTOR))
+    evidence = list(h.slack.screens)[-1]
+    h.action(evidence, "ot_release_changes", revision, ACTOR)
     saved = decision.read_bytes()
     assert json.loads(saved)["decision"] == "changes_requested"
     before = counts(h)
@@ -204,3 +236,242 @@ def test_authorized_workflow_without_a_visible_proposal_has_no_open_handle(tmp_p
     with pytest.raises(Refused):
         h.app._open_workflow_proposal(h.app.settings(), ACTOR, "VGENERATED", "d" * 64)
     assert not h.slack.screens
+
+
+def test_provider_request_opens_only_existing_private_status_and_rechecks_membership(
+    tmp_path, monkeypatch
+):
+    from test_zapier_approval import make_case
+
+    case = make_case(tmp_path)
+    h = case.h
+    label = admit_workflow_label(h, case.plan)
+    granted = True
+
+    def scope(cfg, principal, proposals):
+        if not granted:
+            return None
+        return IndexScope(
+            principal,
+            h.store.engagement_id,
+            "member",
+            cfg.permission(principal.actor, "inspect")["expires_at"],
+            (label,),
+            proposals,
+        )
+
+    h.app.workflow_index_scope = scope
+    assert "Your workflow queue is empty" in json.dumps(publish(h, monkeypatch, ACTOR))
+    request = case.inspect()
+    before = {p.name: p.read_bytes() for p in case.directory.glob("zapier-approval-za-*.json")}
+    ready = publish(h, monkeypatch, ACTOR)
+    assert "Waiting" in json.dumps(ready)
+    choice = next(b["accessory"] for b in ready["blocks"] if "accessory" in b)
+    h.send(
+        "interactive",
+        {
+            "api_app_id": h.config["app"],
+            "team": {"id": h.config["team"]},
+            "user": {"id": ACTOR},
+            "container": {"type": "view", "view_id": "VHOME"},
+            "view": {**ready, "id": "VHOME"},
+            "type": "block_actions",
+            "trigger_id": "test-trigger",
+            "actions": [{"action_id": choice["action_id"], "value": choice["value"]}],
+        },
+    )
+    view = list(h.slack.screens)[-1]
+    assert "request is staged" in json.dumps(screen(h, view))
+    assert buttons(screen(h, view)) == {"ot_plugin_status": request["request_id"]}
+    h.action(view, "ot_plugin_status", request["request_id"])
+    assert "request is staged" in json.dumps(screen(h, view))
+    granted = False
+    h.action(view, "ot_plugin_status", request["request_id"])
+    assert "request is staged" not in json.dumps(screen(h, view))
+    assert before == {
+        p.name: p.read_bytes() for p in case.directory.glob("zapier-approval-za-*.json")
+    }
+    assert not h.slack.post
+
+
+def test_two_native_proposals_share_a_workflow_and_page_independently(tmp_path, monkeypatch):
+    import time
+
+    from opentour_cell.pilot import repair_workflow, slack_adapter
+    from opentour_cell.pilot.managed_run import ManagedSelection, plan_revision
+    from test_app_home import click
+    from test_managed_slack import prepared_workflow
+
+    h, plan, selection = prepared_workflow(tmp_path, "rule", release=True)
+    label = admit_workflow_label(h, plan)
+    cfg = h.app.settings()
+    run_ids = []
+    for idx in range(2):
+        if idx:
+            plan["slack_review"]["expires_at"] -= 90
+            selection = ManagedSelection(
+                cfg.directory,
+                cfg.organization,
+                cfg.directory / "second-review-plan.json",
+                cfg.directory / "second-review-grant.json",
+            )
+            selection.manifest.write_text(json.dumps(plan))
+            selection.manifest.chmod(0o600)
+            repair_workflow.grant_slack_review(cfg.directory, cfg.organization, plan)
+            selection.authorize(
+                plan_revision(plan),
+                "att-abcddcbaabcddcba",
+                int(time.time()) + 500,
+                None,
+                repair_workflow.inspect_managed,
+            )
+        run_ids.append(selection.start(plan_revision(plan), f"open-{idx}")["run_id"])
+        assert selection.once(repair_workflow.execute_managed)["state"] == "ready"
+
+    def authority(cfg, actor, proposals):
+        return IndexScope(
+            actor,
+            h.store.engagement_id,
+            "v1",
+            cfg.permission(actor.actor, "inspect")["expires_at"],
+            (label,),
+            proposals,
+        )
+
+    h.app.workflow_index_scope = authority
+    monkeypatch.setattr(slack_adapter, "WORKFLOW_PAGE_SIZE", 1)
+    first = publish(h, monkeypatch, ACTOR)
+    assert run_ids[1] in json.dumps(first) and run_ids[0] not in json.dumps(first)
+    click(h, first, "ot_app_queue_next", ACTOR)
+    second = h.slack.views_publish.call_args.kwargs["view"]
+    assert run_ids[0] in json.dumps(second) and run_ids[1] not in json.dumps(second)
+    assert "ot_app_queue_next" not in json.dumps(second)
+    handles = [
+        next(b["accessory"]["value"] for b in home["blocks"] if "accessory" in b)
+        for home in (first, second)
+    ]
+    assert handles[0] != handles[1]
+    restart(h)
+    h.app.workflow_index_scope = authority
+    idx = h.app._workflow_index(cfg, ACTOR)
+    for token, run in zip(handles, reversed(run_ids), strict=True):
+        assert (
+            idx.select(IntakePrincipal(cfg.organization, ACTOR, "slack"), token).proposal_ref == run
+        )
+
+
+def test_socket_mode_two_installations_reusing_source_ids_do_not_share_handles(
+    tmp_path, monkeypatch
+):
+    import sys
+    from types import SimpleNamespace
+
+    from opentour_cell.pilot import slack_adapter, workflow_index_authority
+
+    handles = []
+    projections = []
+
+    def exercise_install(name):
+        h, plan, run, _ = setup_workflow(tmp_path / name, "rule", release=True, slot=name)
+        cfg = h.app.settings()
+        label = admit_workflow_label(h, plan)
+        labels = [replace(label, label="Orders", aliases=())]
+        h.config["workflow_index_publication_file"] = "approved-workflows.json"
+        h.save()
+
+        def read_scope(installed, actor, proposals):
+            if installed.workflow_index_publication_file != "approved-workflows.json":
+                return None
+            return IndexScope(
+                actor,
+                h.store.engagement_id,
+                "membership",
+                installed.permission(actor.actor, "inspect")["expires_at"],
+                tuple(labels),
+                proposals,
+            )
+
+        monkeypatch.setattr(workflow_index_authority, "open_workflow_index_scope", read_scope)
+        monkeypatch.setattr(
+            h.slack,
+            "auth_test",
+            lambda: {"team_id": cfg.team, "bot_id": "generated-bot"},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            h.slack,
+            "views_publish",
+            lambda **kwargs: projections.append(kwargs["view"]) or {"ok": True},
+            raising=False,
+        )
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-offline")
+        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-offline")
+
+        class Socket:
+            def __init__(self, **kwargs):
+                self.socket_mode_request_listeners = []
+                self.acks = []
+
+            def send_socket_mode_response(self, response):
+                self.acks.append(response)
+
+            def connect(self):
+                def send(kind, payload):
+                    count = len(self.acks)
+                    self.socket_mode_request_listeners[0](
+                        self, SimpleNamespace(type=kind, payload=payload, envelope_id="generated")
+                    )
+                    assert len(self.acks) == count + 1
+
+                send(
+                    "events_api",
+                    {
+                        "api_app_id": cfg.app,
+                        "team_id": cfg.team,
+                        "type": "event_callback",
+                        "event": {"type": "app_home_opened", "user": cfg.reviewer, "tab": "home"},
+                    },
+                )
+                home = projections[-1]
+                assert run in json.dumps(home)
+                choice = next(b["accessory"] for b in home["blocks"] if "accessory" in b)
+                handles.append(choice["value"])
+                if len(handles) == 2:
+                    assert handles[0] != handles[1]
+                    send(
+                        "interactive",
+                        {
+                            "api_app_id": cfg.app,
+                            "team": {"id": cfg.team},
+                            "user": {"id": cfg.reviewer},
+                            "container": {"type": "view", "view_id": "VHOME"},
+                            "view": {**home, "id": "VHOME"},
+                            "type": "block_actions",
+                            "trigger_id": "test",
+                            "actions": [{"action_id": choice["action_id"], "value": handles[0]}],
+                        },
+                    )
+                    assert "ot_evidence_view" not in json.dumps(
+                        screen(h, list(h.slack.screens)[-1])
+                    )
+                raise KeyboardInterrupt
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(
+            sys.modules, "slack_sdk", SimpleNamespace(WebClient=lambda **kwargs: h.slack)
+        )
+        monkeypatch.setitem(
+            sys.modules, "slack_sdk.socket_mode", SimpleNamespace(SocketModeClient=Socket)
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "slack_sdk.socket_mode.response",
+            SimpleNamespace(SocketModeResponse=SimpleNamespace),
+        )
+        assert slack_adapter.main([str(h.path)]) == 0
+        assert not h.slack.post
+
+    exercise_install("alpha")
+    exercise_install("beta")
