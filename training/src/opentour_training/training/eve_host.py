@@ -182,6 +182,20 @@ class TrainerHost:
                 # While waiting for the resume child, retain its pending control and revision.
                 return
         observed = state["status"]
+        if observed in {"expired", "completed", "stopped"}:
+            # An in-flight kernel or model load may outlive the wall deadline. Only the
+            # process lease proves that the old trainer can no longer consume this GPU.
+            with run.worker() as idle:
+                if not idle:
+                    self.exchange.observe(
+                        job,
+                        "stopping" if fenced or requested == "stop" else job["state"],
+                        requested="stop" if fenced or requested == "stop" else requested,
+                        step=state["completed_steps"],
+                        seconds=int(state["active_seconds"]),
+                        trainer_id=state["run_id"],
+                    )
+                    return
         if observed == "stopped" and expired:
             observed = "expired"
         pending = {"pausing": "pause", "stopping": "stop", "resuming": "resume"}.get(observed)

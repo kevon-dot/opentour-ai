@@ -61,7 +61,7 @@ class Grant:
     can_control: bool = False
 
 
-def parse_grant(payload: dict[str, object], now: float) -> Grant:
+def parse_grant(payload: dict[str, object], now: float, *, read_only: bool = False) -> Grant:
     spec = payload.get("reservation")
     if (
         set(payload)
@@ -96,7 +96,9 @@ def parse_grant(payload: dict[str, object], now: float) -> Grant:
         valid_time = (
             start.utcoffset() is not None
             and end.utcoffset() is not None
-            and start.timestamp() <= spec["starts_at"] <= now < spec["deadline"] <= end.timestamp()
+            and start.timestamp() <= spec["starts_at"] <= now
+            and spec["starts_at"] < spec["deadline"] <= end.timestamp()
+            and (read_only or now < spec["deadline"])
         )
     except (ValueError, OverflowError, OSError) as error:
         raise ValueError("invalid_eve_window") from error
@@ -129,7 +131,7 @@ class EveAuthority:
     def configured(self) -> bool:
         return os.path.lexists(self.directory / SELECTION_FILE)
 
-    def _grant(self) -> Grant:
+    def _grant(self, *, read_only: bool = False) -> Grant:
         from opentour_cell.pilot.signed_records import (
             MAX_CONFIG_BYTES,
             SPEND_MANDATE_PURPOSE,
@@ -138,9 +140,15 @@ class EveAuthority:
 
         raw = _read(self.directory / CAP_FILE, 32768)
         registry = _read(self.directory / REGISTRY_FILE, MAX_CONFIG_BYTES)
-        return parse_grant(PilotVerifier(registry).verify(raw, SPEND_MANDATE_PURPOSE), time.time())
+        return parse_grant(
+            PilotVerifier(registry).verify(raw, SPEND_MANDATE_PURPOSE),
+            time.time(),
+            read_only=read_only,
+        )
 
-    def _reservation(self, grant: Grant) -> tuple[MandateFitLedger, fd.LedgerEntry]:
+    def _reservation(
+        self, grant: Grant, *, read_only: bool = False
+    ) -> tuple[MandateFitLedger, fd.LedgerEntry]:
         """Bind the Slack request to the dispatcher's existing priced reservation."""
         spec = grant.spec
         mandates = LearningMandates(self.directory, spec["tenant"], spec["engagement_id"])
@@ -153,6 +161,7 @@ class EveAuthority:
         if (
             entry.execution_id != grant.reservation_ref
             or record["intent_digest"] != spec["fit_intent_digest"]
+            or record["development_digest"] != spec["development_sha256"]
             or record["tenant"] != spec["tenant"]
             or record["engagement"] != spec["engagement_id"]
             or record["mandate_id"] != spec["mandate_id"]
@@ -169,9 +178,13 @@ class EveAuthority:
             or bound["maximum_steps"] != spec["steps"]
             or bound["maximum_rows"] != spec["max_rows"]
             or bound["maximum_seconds"] != spec["deadline"] - spec["starts_at"]
-            or execution.charged_minor_units != grant.max_cents
-            or execution.cancel_requested
-            or execution.stage not in {fd.Stage.RESERVED, fd.Stage.SUBMITTING, fd.Stage.RUNNING}
+            or (not read_only and execution.charged_minor_units != grant.max_cents)
+            or (not read_only and execution.cancel_requested)
+            or (
+                not read_only
+                and execution.stage
+                not in {fd.Stage.RESERVED, fd.Stage.SUBMITTING, fd.Stage.RUNNING}
+            )
             or (
                 execution.stage != fd.Stage.RESERVED
                 and execution.job_ref != run_ref(grant.reservation_ref, spec)
@@ -200,9 +213,35 @@ class EveAuthority:
                 event="eve_slack_approval",
             )
 
+    def acknowledge(self, grant: Grant, job: dict[str, Any], *, finished: bool) -> None:
+        ledger, entry = self._reservation(grant, read_only=True)
+        ex = entry.execution
+        if ex.job_ref != job["run_ref"]:
+            raise ValueError("eve_fit_reservation_changed")
+        if finished:
+            if ex.stage in {fd.Stage.HELD, fd.Stage.SETTLED}:
+                return
+            # A terminal optimizer receipt does not measure provider charges. Preserve the
+            # full charge until the authorized reconciler supplies the provider's bill.
+            next_state = replace(
+                ex,
+                stage=fd.Stage.HELD,
+                hold_reason="usage_unverifiable",
+                lease_until=0,
+                lease_owner="",
+                evidence_ref=job["run_ref"],
+            )
+            event = "eve_trainer_finished_awaiting_usage"
+        else:
+            if ex.stage != fd.Stage.SUBMITTING or not job["trainer_id"]:
+                return
+            next_state = replace(ex, stage=fd.Stage.RUNNING, evidence_ref=job["run_ref"])
+            event = "eve_trainer_acknowledged"
+        ledger.transition(entry.execution_id, version=ex.version, execution=next_state, event=event)
+
     @contextmanager
     def current(self, scope: LearningScope, *, write: bool) -> Iterator[Grant]:
-        grant = self._grant()
+        grant = self._grant(read_only=not write)
         spec = grant.spec
         if (
             scope != scope_from(spec)
@@ -249,8 +288,15 @@ class EveAuthority:
                 or plan.model_route_ref != "eve-24b-qlora"
             ):
                 raise ValueError("eve_proposal_changed")
-            self._reservation(grant)
-            yield replace(grant, can_control={"start", "cancel"} <= enrolled.permissions)
+            _, entry = self._reservation(grant, read_only=not write)
+            yield replace(
+                grant,
+                can_control={"start", "cancel"} <= enrolled.permissions
+                and time.time() < spec["deadline"]
+                and not entry.execution.cancel_requested
+                and entry.execution.stage
+                in {fd.Stage.RESERVED, fd.Stage.SUBMITTING, fd.Stage.RUNNING},
+            )
 
 
 def scope_from(spec: dict[str, Any]) -> LearningScope:
@@ -266,26 +312,55 @@ def scope_from(spec: dict[str, Any]) -> LearningScope:
 
 
 def renew_host_permit(directory: Path, organization: str) -> None:
-    """Only the installed worker can renew an admitted fit after rereading its live authorities."""
-    if not os.path.lexists(directory / SELECTION_FILE):
+    """Reconcile admitted terminal receipts and renew only a currently authorized live fit."""
+    selected = os.path.lexists(directory / SELECTION_FILE)
+    if not selected and not os.path.lexists(directory / "eve-exchange" / "controls.sqlite3"):
         return
     from opentour_cell.pilot.eve_learning_service import EveLearningService
     from opentour_cell.pilot.signed_records import PilotRecordRefused
 
     try:
-        # The untrusted candidate only selects a binding to verify; it cannot start a job.
-        ex = Exchange(directory / "eve-exchange")
-        job = ex.active()
+        exchange = Exchange(directory / "eve-exchange")
+        finished = exchange.unreported()
+    except (OSError, ValueError, sqlite3.Error):
+        return
+    for row in finished:
+        # Closure can only retain an existing charge and hold its exact previously claimed job.
+        # It must remain possible after withdrawal, expiry or deletion of the grant selection.
+        try:
+            spec = row["spec"]
+            if spec["tenant"] != organization or row["spec_digest"] != digest(spec):
+                continue
+            grant = Grant(
+                spec["plan_ref"],
+                spec["reservation_ref"],
+                spec["benchmark_ref"],
+                spec["reviewer"],
+                spec["max_cents"],
+                spec,
+            )
+            authority = EveAuthority(directory, organization, spec["workspace"], spec["channel"])
+            authority.acknowledge(grant, row, finished=True)
+            exchange.mark_reported(row)
+        except (KeyError, TypeError, OSError, ValueError, sqlite3.Error):
+            continue
+    if not selected:
+        return
+    try:
+        job = exchange.active()
         if job is None:
             return
         spec = job["spec"]
         authority = EveAuthority(directory, organization, spec["workspace"], spec["channel"])
         scope = scope_from(spec)
         with authority.current(scope, write=True) as grant:
-            EveLearningService(authority, ex, directory, spec["channel"]).verify_start(
+            if digest(grant.spec) != job["spec_digest"]:
+                return
+            EveLearningService(authority, exchange, directory, spec["channel"]).verify_start(
                 scope, grant.plan_ref, job["approval_key"], digest(grant.spec)
             )
-            ex.renew(grant.reservation_ref, digest(grant.spec))
-    except (OSError, ValueError, sqlite3.Error, PilotRecordRefused):
-        # The offline supervisor stops when the last independently refreshed permit expires.
+            authority.acknowledge(grant, job, finished=False)
+            exchange.renew(grant.reservation_ref, digest(grant.spec))
+    except (KeyError, TypeError, OSError, ValueError, sqlite3.Error, PilotRecordRefused):
+        # The last permit expires without reauthorizing an uncertain fit.
         return

@@ -142,7 +142,10 @@ class EveLearningService:
         try:
             with self.authority.current(scope, write=False) as grant:
                 row = self.exchange.get(grant.reservation_ref)
-                reviewer = scope.actor == grant.reviewer and grant.can_control
+                in_window = grant.spec["starts_at"] <= time.time() < grant.spec["deadline"]
+                if row is None and not in_window:
+                    return None
+                reviewer = scope.actor == grant.reviewer and grant.can_control and in_window
                 receipt = (
                     _status(row, grant.reservation_ref, grant.spec, reviewer=reviewer)
                     if row is not None

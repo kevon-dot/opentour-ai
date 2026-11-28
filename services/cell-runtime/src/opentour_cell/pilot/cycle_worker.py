@@ -53,10 +53,19 @@ def run(
     ):
         raise ValueError("invalid_worker_configuration")
 
+    def eve_installed() -> bool:
+        return os.path.lexists(directory / SELECTION_FILE) or os.path.lexists(
+            directory / "eve-exchange" / "controls.sqlite3"
+        )
+
     def scan_once() -> int:
         try:
             outcome: dict[str, Any]
-            if os.path.lexists(directory / SCHEDULE_SELECTION):
+            if eve_installed():
+                # On the EVE route every fit consumes its own Slack decision. The separate
+                # standing classifier schedule may admit work automatically and cannot run here.
+                outcome = {"state": "waiting_for_scan"}
+            elif os.path.lexists(directory / SCHEDULE_SELECTION):
                 # Scheduled learning goes only through the shared learning-run admission, so a
                 # Slack or Zapier trigger for the same intent converges on the same run.
                 outcome = learning_tick(directory, organization)
@@ -100,7 +109,7 @@ def run(
     next_scan = 0.0
     try:
         while not stopped.is_set():
-            if keeper is None and os.path.lexists(directory / SELECTION_FILE):
+            if keeper is None and eve_installed():
                 renew_host_permit(directory, organization)
                 if not once:
                     keeper = threading.Thread(target=permits, name="eve-permit", daemon=True)

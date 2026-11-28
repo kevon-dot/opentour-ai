@@ -63,7 +63,10 @@ class Exchange:
                 requested TEXT, completed_steps INTEGER, total_steps INTEGER NOT NULL,
                 checkpoint_step INTEGER, active_seconds INTEGER, heartbeat REAL NOT NULL DEFAULT 0,
                 permit_until REAL NOT NULL, deadline INTEGER NOT NULL, trainer_id TEXT,
-                launched_at REAL)""")
+                launched_at REAL, reported INTEGER NOT NULL DEFAULT 0)""")
+            columns = {r[1] for r in db.execute("PRAGMA table_info(eve_jobs)")}
+            if "reported" not in columns:
+                db.execute("ALTER TABLE eve_jobs ADD COLUMN reported INTEGER NOT NULL DEFAULT 0")
             db.execute("""CREATE TABLE IF NOT EXISTS eve_controls(
                 reservation_ref TEXT NOT NULL, key TEXT NOT NULL, action TEXT NOT NULL,
                 revision TEXT NOT NULL, PRIMARY KEY(reservation_ref,key))""")
@@ -184,6 +187,21 @@ class Exchange:
                 "('completed','stopped','expired','failed') LIMIT 1"
             ).fetchone()
             return self._row(db, row[0]) if row else None
+
+    def unreported(self) -> list[dict[str, Any]]:
+        with self.transaction() as db:
+            refs = db.execute(
+                "SELECT reservation_ref FROM eve_jobs WHERE reported=0 AND state IN "
+                "('completed','stopped','expired','failed') ORDER BY rowid"
+            ).fetchall()
+            return [row for ref in refs if (row := self._row(db, ref[0])) is not None]
+
+    def mark_reported(self, row: dict[str, Any]) -> None:
+        with self.transaction() as db:
+            db.execute(
+                "UPDATE eve_jobs SET reported=1 WHERE reservation_ref=? AND version=?",
+                (row["reservation_ref"], row["version"]),
+            )
 
     def begin_launch(self, row: dict[str, Any]) -> bool:
         now = time.time()
