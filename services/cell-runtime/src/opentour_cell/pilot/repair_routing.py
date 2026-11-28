@@ -13,12 +13,15 @@ Nothing here reads a provider, a live workplace or a protected store.
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,6 +32,22 @@ from opentour_cell.pilot.training import _check_file
 
 Json = dict[str, Any]
 SCHEMA = "opentour.pilot.repair-routing.v1"
+# The stored input revision covers the request, not decide()'s logic, so a receipt decided by a
+# different router must never be replayed. BUMP THIS whenever a change to decide(), _body() or
+# anything they call can alter the outcome, reason code or recorded body for some input. A stored
+# evaluation carrying an older value is refused, not re-decided: the record is durable and
+# immutable, and silently replacing it would destroy the evidence trail it exists to provide.
+#
+# v3 (OPE-568): the contradiction check keys on the independence group plus the full feature
+# map instead of the entity plus features, so cases grouped only by family or by a transitive
+# chain now hold as contradictory_labels where v2 could route them onward.
+#
+# v4 (OPE-568 follow-up): feature maps are validated and keyed by value, so Python-equal
+# values are the same evidence: True and 1, 1 and 1.0, 0.0 and -0.0 now conflict where v3 kept
+# them apart. A value that is not None, bool, int, finite float, str, list or str-keyed dict (a
+# tuple, a set, NaN, a non-str key) is refused as invalid_feature_value or invalid_feature_key
+# where v3 routed it, or failed with an untyped ValueError or TypeError.
+ROUTER_REVISION = "repair-routing.decide.v4"
 OUTCOMES = ("keep_incumbent", "simple_repair", "request_evidence", "fit_eligible")
 _ORIGINS_COUNTED = ("live",)
 _DEV = "development"
@@ -290,6 +309,44 @@ def _components(cases: Sequence[DevelopmentCase]) -> dict[str, str]:
     return {c.case_id: "grp-" + digest(find("e:" + _identity(c.entity_id)))[:24] for c in cases}
 
 
+_FEATURE_DEPTH = 16
+
+
+def _feature_value(value: Any, depth: int) -> Any:
+    """One feature value in a canonical form where Python-equal values share one key.
+
+    ``True == 1 == 1.0`` and ``0.0 == -0.0`` in Python, and a case that differs from another
+    only by such a value is the same evidence, so conflicting references over it must hold
+    (fail closed) rather than pass as independent. Every bool, int and finite float becomes the
+    exact rational it denotes, so equal numbers share a key and an int no float can represent
+    keeps its own. Strings stay exact. Anything outside the JSON value types is refused
+    rather than coerced, and so is a non-finite float, which has no equal to share a key with.
+    """
+    _need(depth <= _FEATURE_DEPTH, "invalid_feature_value")
+    kind = type(value)
+    if value is None:
+        return ["none"]
+    if kind in (bool, int, float):
+        if kind is float:
+            _need(math.isfinite(value), "invalid_feature_value")
+        exact = Fraction(value)
+        return ["number", exact.numerator, exact.denominator]
+    if kind is str:
+        return ["str", value]
+    if kind is list:
+        return ["list", [_feature_value(item, depth + 1) for item in value]]
+    if kind is dict:
+        return ["dict", _feature_map(value, depth + 1)]
+    raise RoutingError("invalid_feature_value")
+
+
+def _feature_map(features: Mapping[Any, Any], depth: int = 0) -> list[list[Any]]:
+    """A feature map as sorted ``[key, value]`` pairs; every key must be a str."""
+    _need(isinstance(features, Mapping), "invalid_feature_value")
+    _need(all(type(key) is str for key in features), "invalid_feature_key")
+    return sorted([key, _feature_value(item, depth)] for key, item in features.items())
+
+
 def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
     _need(len(cases) <= simple_repair.MAX_ROWS, "too_many_cases")
     seen: set[str] = set()
@@ -303,6 +360,56 @@ def _validate_cases(cases: Sequence[DevelopmentCase]) -> None:
         _need(c.context_state in ("observed", "missing"), "invalid_context_state")
         _need(c.origin in ("live", "starter", "generated_child"), "invalid_origin")
         _need(type(c.decided_at) is int and c.decided_at >= 0, "invalid_decision_time")
+        # In the preflight, so a replay is refused for the same features a decision would be.
+        _feature_map(c.features)
+
+
+def _recipe_inputs(recipes: Sequence[Recipe]) -> list[list[Any]]:
+    """Every catalog field the recorded selection can depend on, in a stable order."""
+    return sorted(
+        [
+            r.recipe_id,
+            r.version,
+            sorted(r.models),
+            sorted(r.tasks),
+            r.split,
+            r.metric,
+            r.direction,
+            list(r.allowed_params),
+            r.trial_limit,
+            r.step_limit,
+            r.stopping_rule,
+            r.est_seconds_per_trial,
+            r.paid_probe,
+        ]
+        for r in recipes
+    )
+
+
+def _authority_inputs(request: RoutingRequest) -> list[Any]:
+    """The caller-supplied inputs the receipt publishes a digest or a selection of.
+
+    Leaving these out makes the stored-evaluation conflict check fail open: a second
+    trigger on the same evaluation key carrying a different protected population, model
+    target or recipe catalog is answered with the first receipt, whose comparison plan
+    digest and frozen recipe cover the earlier inputs instead. Mandate counters stay out
+    on purpose; the mandate revision is already part of the evaluation key.
+    """
+    policy, model, scheduling = request.policy, request.model, request.scheduling
+    return [
+        [policy.policy_ref, policy.snapshot_ref, policy.terms_revision, policy.signature],
+        None if model is None else [model.model_ref, model.task, model.capability_receipt_ref],
+        _recipe_inputs(request.recipes),
+        None
+        if scheduling is None
+        else [
+            scheduling.intake_revision,
+            sorted(scheduling.protected_ids),
+            scheduling.incumbent_revision,
+            scheduling.audience,
+        ],
+        request.augmentation,
+    ]
 
 
 def _input_revision(request: RoutingRequest) -> str:
@@ -329,6 +436,8 @@ def _input_revision(request: RoutingRequest) -> str:
                 ]
                 for c in request.cases
             ),
+            _authority_inputs(request),
+            ROUTER_REVISION,
         ]
     )
 
@@ -416,8 +525,23 @@ def select_recipe(
     }
 
 
-def decide(request: RoutingRequest) -> Json:
-    """Pure, deterministic routing decision. No clock, store or protected input."""
+def _unscheduled(scheduling: ComparisonScheduling | None) -> bool:
+    """No protected population to compare against is the same gap as no scheduling at all.
+
+    ``freeze_plan`` accepts an empty population, so without this an empty tuple would freeze
+    a plan over zero members and report the comparison as scheduled.
+    """
+    return scheduling is None or not scheduling.protected_ids
+
+
+def _preflight(request: RoutingRequest) -> tuple[RoutingTerms, Json]:
+    """Every refusal that does not depend on the development evidence itself.
+
+    ``RepairRoutingStore.evaluate`` runs this before its replay lookup, so a stored receipt
+    can never answer a request that a fresh decision would refuse. Mandate withdrawal and
+    expiry, the ``evaluate`` right and a case's split are in neither the evaluation key nor
+    the input revision, so this preamble is the only thing that covers them on that path.
+    """
     terms, snapshot, mandate = request.terms.validate(), request.snapshot, request.mandate
     for item in (snapshot.organization, snapshot.workflow_ref, snapshot.run_id):
         _ident(item)
@@ -428,7 +552,13 @@ def decide(request: RoutingRequest) -> Json:
     _need("evaluate" in mandate.uses, "evaluation_not_authorized")
     _need(request.augmentation == "not_enabled", "augmentation_not_supported_on_this_branch")
     _validate_cases(request.cases)
-    rule = simple_repair.validate_rule(request.rule)
+    return terms, simple_repair.validate_rule(request.rule)
+
+
+def decide(request: RoutingRequest) -> Json:
+    """Pure, deterministic routing decision. No clock, store or protected input."""
+    terms, rule = _preflight(request)
+    snapshot, mandate = request.snapshot, request.mandate
 
     live = [c for c in request.cases if c.origin in _ORIGINS_COUNTED]
     excluded_origin = len(request.cases) - len(live)
@@ -446,10 +576,17 @@ def decide(request: RoutingRequest) -> Json:
     feature = rule["feature"]
     if any(c.context_state != "observed" or c.features.get(feature) is None for c in window):
         return hold("missing_decision_time_context", ["provide_decision_time_input"])
-    by_entity: defaultdict[str, set[str | None]] = defaultdict(set)
+    # Grouped cases with identical features must agree (OPE-568): keyed on the independence
+    # group, so a shared family or a transitive chain conflicts just as a shared entity does.
+    # A missing reference (None) counts as a disagreeing label here, so an unlabeled case that
+    # shares only a family with a labeled sibling of identical features now holds as
+    # contradictory_labels rather than unusable_labels. Both are holds; nothing is routed.
+    # Features compare by value (v4): 1 and 1.0, True and 1, or 0.0 and -0.0 are the same
+    # evidence, so conflicting references over them hold here too.
+    by_group: defaultdict[str, set[str | None]] = defaultdict(set)
     for c in window:
-        by_entity[digest([_identity(c.entity_id), dict(c.features)])].add(c.reference)
-    if any(len(v) > 1 for v in by_entity.values()):
+        by_group[digest([groups[c.case_id], _feature_map(c.features)])].add(c.reference)
+    if any(len(v) > 1 for v in by_group.values()):
         return hold("contradictory_labels", ["resolve_contradictory_labels"])
     if any(c.reference is None for c in window):
         return hold("unusable_labels", ["supply_verified_labels"])
@@ -496,17 +633,28 @@ def decide(request: RoutingRequest) -> Json:
             [],
         )
     if route == "simple":
+        # A disqualified critical slice is a statement about the repair itself, so it keeps
+        # precedence over an incomplete request.
         failed = _slice_failure(rule, terms, window)
         if failed:
+            # Name both gaps in one round-trip when the caller is also missing a population.
+            missing = ["supply_independent_evidence"]
+            if _unscheduled(request.scheduling):
+                missing.append("provide_comparison_scheduling")
+            return _body(request, "request_evidence", failed, rule, window, groups, ctx, missing)
+        if _unscheduled(request.scheduling):
+            # A sufficient repair freezes the simple arm and schedules the comparison. With no
+            # protected population to schedule against there is nothing to freeze, so this is a
+            # held evidence request; the requirement cannot depend on the caller passing a field.
             return _body(
                 request,
                 "request_evidence",
-                failed,
+                "comparison_scheduling_required",
                 rule,
                 window,
                 groups,
                 ctx,
-                ["supply_independent_evidence"],
+                ["provide_comparison_scheduling"],
             )
         return _body(
             request,
@@ -599,8 +747,13 @@ def _body(
     s, m, terms = request.snapshot, request.mandate, request.terms
     residual = ctx["residual"] if ctx else []
     plan: str | None = None
-    if outcome == "simple_repair" and ctx is not None and request.scheduling is not None:
+    if outcome == "simple_repair":
+        # decide() refuses this outcome without a protected population, so a plan frozen over a
+        # non-empty population is an invariant of the outcome rather than something a caller can
+        # opt out of by omitting the field or passing an empty tuple.
         sch = request.scheduling
+        _need(not _unscheduled(sch) and ctx is not None, "comparison_scheduling_required")
+        assert sch is not None and ctx is not None
         plan = comparison_plan.freeze_plan(
             organization=s.organization,
             engagement=s.workflow_ref,
@@ -615,6 +768,7 @@ def _body(
     selection = ctx.get("selection") if ctx else None
     body: Json = {
         "schema_version": SCHEMA,
+        "router_revision": ROUTER_REVISION,
         "outcome": outcome,
         "reason_code": reason,
         "next_evidence": list(dict.fromkeys(missing)),
@@ -697,7 +851,12 @@ class RepairRoutingStore:
         return db
 
     def evaluate(self, request: RoutingRequest) -> Json:
+        # Refuse before the replay lookup: a stored receipt must never answer a request that a
+        # fresh decision would refuse, including on grounds the stored digest cannot carry.
+        _preflight(request)
         key, inputs = evaluation_key(request), _input_revision(request)
+        stored: Json | None = None
+        fresh: Json | None = None
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -705,27 +864,36 @@ class RepairRoutingStore:
                     "SELECT input_revision, body FROM evaluations WHERE key=?", (key,)
                 ).fetchone()
                 if row is not None:
+                    stored = dict(json.loads(row[1]))
+                    # Checked before the input revision so the operator sees the specific cause:
+                    # a router upgrade also moves the input revision, which would otherwise
+                    # surface as a generic conflict.
+                    _need(
+                        stored.get("router_revision") == ROUTER_REVISION,
+                        "evaluation_router_revision_changed",
+                    )
                     _need(row[0] == inputs, "evaluation_conflict")
-                    db.execute("COMMIT")
-                    import json
-
-                    return dict(json.loads(row[1]), replayed=True)
-                receipt = decide(request)
-                receipt = dict(receipt, evaluation_id="eval-" + key[:40])
-                receipt["readiness_handoff"] = _readiness_handoff(receipt)
-                db.execute(
-                    "INSERT INTO evaluations VALUES(?,?,?,?)",
-                    (key, receipt["evaluation_id"], inputs, canonical(receipt)),
-                )
+                else:
+                    fresh = dict(decide(request), evaluation_id="eval-" + key[:40])
+                    fresh["readiness_handoff"] = _readiness_handoff(fresh)
+                    db.execute(
+                        "INSERT INTO evaluations VALUES(?,?,?,?)",
+                        (key, fresh["evaluation_id"], inputs, canonical(fresh)),
+                    )
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
-        return dict(receipt, replayed=False)
+        if stored is not None:
+            # A signature is a runtime verdict, not part of the stored digest, so it is
+            # re-checked on every replay instead of being replayed with the receipt.
+            if stored["outcome"] == "fit_eligible":
+                _need(request.verifier.verify(request.policy), "signed_policy_required")
+            return dict(stored, replayed=True)
+        assert fresh is not None
+        return dict(fresh, replayed=False)
 
     def read(self, evaluation_id: str) -> Json | None:
-        import json
-
         with closing(self._connect()) as db:
             row = db.execute(
                 "SELECT body FROM evaluations WHERE evaluation_id=?", (evaluation_id,)
@@ -744,7 +912,11 @@ class RepairRoutingStore:
         _need(receipt is not None, "evaluation_unavailable")
         assert receipt is not None
         reason = None
-        if receipt["outcome"] != "fit_eligible":
+        if receipt.get("router_revision") != ROUTER_REVISION:
+            # A receipt another router decided is not this router's verdict, so an old
+            # fit_eligible outcome is held rather than read as today's eligibility.
+            reason = "evaluation_router_revision_changed"
+        elif receipt["outcome"] != "fit_eligible":
             reason = "not_fit_eligible"
         elif not mandate.active:
             reason = "mandate_withdrawn_or_expired"
