@@ -1,0 +1,45 @@
+# OPE-579 GPU training lock for the EVE QLoRA trainer image.
+#
+# This is a separate, virtual uv project. It is NOT a member of the root uv workspace and is
+# not resolved, synced or installed by `just setup`, the control workspace or training/uv.lock.
+# It is installed only inside training/gpu/trainer.Dockerfile, from this lock, with hashes.
+# Never run `uv sync` / `pip install` for this project in the control workspace (AGENTS.md:
+# CUDA must not be installed there). Pin changes go through the single writer in README.md.
+[project]
+name = "opentour-training-gpu"
+version = "0.0.0"
+requires-python = "==3.12.16"
+dependencies = [
+  # PyPI's Linux x86_64 torch 2.14.1 wheel is the CUDA 13.0 build; its CUDA runtime comes from
+  # the cuda-toolkit / nvidia-*-cu13 wheels pinned below and in uv.lock.
+  "torch==2.14.1",
+  "transformers==5.23.0",
+  "peft==0.21.3",
+  "bitsandbytes==0.50.2",
+  "accelerate==1.15.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.3",
+  "huggingface-hub==2.4.0",
+  "numpy==2.5.5",
+  # CUDA runtime wheels, pinned to exactly what torch 2.14.1 declares for Linux.
+  "cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.3",
+  "nvidia-cudnn-cu13==9.24.0.43",
+  "nvidia-cusparselt-cu13==0.8.1",
+  "nvidia-nccl-cu13==2.30.7",
+  "nvidia-nvshmem-cu13==3.4.5",
+  # Keep the transitive CUDA user-mode pieces on the 13.0 line torch 2.14.1 was built with, so
+  # the driver floor stays the CUDA 13.0 floor (README "Supported driver range").
+  "nvidia-nvjitlink==13.0.88",
+  "cuda-bindings==13.0.3",
+]
+
+[tool.uv]
+# Virtual project: nothing here is built, so no build backend or build constraints exist.
+package = false
+# Wheels only; an sdist would run an unpinned build at image-build time.
+no-build = true
+# Resolve for the trainer image platform only.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# Reproducible resolution cut-off for transitive dependencies.
+exclude-newer = "2026-11-16T00:00:00Z"

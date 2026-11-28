@@ -9,15 +9,18 @@ ExecStart=/opt/opentour/python/bin/python3 -I -B /opt/opentour/current/opentour-
 Restart=always
 RestartSec=10
 UMask=0077
-StateDirectory=opentour-worker
+StateDirectory=opentour-worker opentour-antirollback
 StateDirectoryMode=0700
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
+ProtectProc=invisible
+ProcSubset=pid
 CapabilityBoundingSet=
 StandardOutput=null
 InaccessiblePaths=-/etc/opentour-health
+ReadOnlyPaths=-/var/lib/opentour-worker/model-base
 
 [Install]
 WantedBy=multi-user.target
