@@ -278,6 +278,9 @@ def test_running_and_terminal_observations_keep_actual_provider_cost_open(approv
 
 
 def test_expiry_does_not_free_the_gpu_while_the_real_worker_lease_is_held(tmp_path, monkeypatch):
+    # This cross-package fixture loads the same CPU-safe supervisor source baked into the image.
+    # The installed control environment intentionally has no trainer distribution or CUDA.
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4] / "training" / "src"))
     from opentour_training.training.eve_host import TrainerHost
     from opentour_training.training.eve_run import Run
 
