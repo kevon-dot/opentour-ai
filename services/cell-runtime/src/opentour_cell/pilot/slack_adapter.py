@@ -4741,6 +4741,8 @@ class Workbench:
             _check(index is not None)
             assert index is not None
             row = index.select(principal, handle)
+            _check(row.proposal_ref is not None and row.proposal_revision is not None)
+            assert row.proposal_ref is not None
             source = "managed:" + row.proposal_ref
             target = self._managed(current, actor, source)
             intake = check_current_intake(

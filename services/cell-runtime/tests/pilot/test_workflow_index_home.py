@@ -137,3 +137,45 @@ def test_queue_groups_and_opaque_pagination_render_only_available_actions():
     )
     assert [a["action_id"] for a in nav] == ["ot_app_queue_first", "ot_app_queue_next"]
     assert nav[1]["value"] == page.next_cursor
+
+
+def test_authorized_workflow_without_a_visible_proposal_has_no_open_handle(tmp_path, monkeypatch):
+    import pytest
+    from opentour_cell.pilot.slack_adapter import Refused
+    from opentour_cell.pilot.slack_views import app_home_view
+    from opentour_cell.pilot.workflow_index import IndexPage, IndexRow
+    from test_slack_adapter import Harness
+
+    directory_row = IndexRow(
+        "workflow-c",
+        "Orders",
+        (),
+        None,
+        None,
+        "no_visible_proposal",
+        None,
+        100,
+        "waiting",
+        None,
+        None,
+    )
+    page = IndexPage((directory_row,), None)
+    home = app_home_view("home-token", "Workspace", queue=page)
+    assert [b["text"]["text"] for b in home["blocks"] if b["type"] == "header"] == [
+        "Workspace",
+        "Waiting",
+    ]
+    row = next(
+        b
+        for b in home["blocks"]
+        if "No proposals available to you." in b.get("text", {}).get("text", "")
+    )
+    assert "workflow-c" in row["text"]["text"] and "accessory" not in row and "fields" not in row
+    assert "ot_app_queue_open" not in json.dumps(home)
+    h = Harness(tmp_path)
+    index = Mock()
+    index.select.return_value = directory_row
+    monkeypatch.setattr(h.app, "_workflow_index", lambda cfg, actor: index)
+    with pytest.raises(Refused):
+        h.app._open_workflow_proposal(h.app.settings(), ACTOR, "VGENERATED", "d" * 64)
+    assert not h.slack.screens

@@ -1690,8 +1690,21 @@ def _workflow_queue(page: IndexPage, *, continuation: bool) -> list[Block]:
             continue
         blocks.append({"type": "header", "text": _text(title)})
         for row in rows:
-            state = row.state.replace("_", " ")
             label = _display(row.label)
+            if row.proposal_ref is None and row.proposal_revision is None:
+                if (
+                    row.state != "no_visible_proposal"
+                    or row.group != "waiting"
+                    or row.action
+                    or row.selection
+                    or row.deadline is not None
+                ):
+                    raise ValueError("Invalid workflow visibility record.")
+                blocks.append(
+                    _section(f"{label} · {_ref(row.workflow_ref)}\nNo proposals available to you.")
+                )
+                continue
+            state = row.state.replace("_", " ")
             block = _section(
                 f"{label} · {_ref(row.workflow_ref)}\n"
                 f"Proposal {_ref(row.proposal_ref)} · version {_ref(row.proposal_revision)}"
