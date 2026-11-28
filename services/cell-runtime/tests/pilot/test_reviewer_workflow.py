@@ -68,7 +68,7 @@ def text(h: Harness, view: str) -> str:
     return json.dumps(screen(h, view), ensure_ascii=False)
 
 
-def restart(h: Harness) -> None:
+def restart(h: Harness, *, lifecycle_authority=None) -> None:
     h.app.pool.shutdown()
     h.app = slack_adapter.Workbench(
         lambda: slack_adapter.Settings.load(h.path),
@@ -76,6 +76,7 @@ def restart(h: Harness) -> None:
         h.store,
         slack_views,
         submit=lambda call: call(),
+        lifecycle_authority=lifecycle_authority,
     )
 
 

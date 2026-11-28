@@ -376,3 +376,150 @@ def plan_fit(
         bound=bound,
     )
     return FitPlan(intent, rows, partition.membership_digest)
+
+
+FIT_RECORD = "opentour.pilot.eve-fit-record.v1"
+
+
+def _binding_document(binding: mc.ModelBinding) -> list[str]:
+    return [
+        binding.tenant,
+        binding.model_ref,
+        binding.immutable_revision,
+        binding.task,
+        binding.input_schema,
+        binding.output_schema,
+        binding.preprocessing_revision,
+        binding.route.value,
+        binding.account_or_host,
+        binding.region,
+        binding.credential_ref,
+    ]
+
+
+def _bound_document(bound: mc.FitBound) -> list[object]:
+    return [
+        bound.currency,
+        bound.maximum_minor_units,
+        bound.maximum_seconds,
+        bound.maximum_rows,
+        bound.maximum_steps,
+    ]
+
+
+def intent_document(intent: mc.FitIntent) -> dict[str, Any]:
+    """Every field of a fit intent. It names the development payload by digest only."""
+    return {
+        "binding": _binding_document(intent.binding),
+        "grant_revision": intent.grant_revision,
+        "benchmark_revision": intent.benchmark_revision,
+        "development_digest": intent.development_digest,
+        "idempotency_key": intent.idempotency_key,
+        "fields": sorted(intent.fields),
+        "bound": _bound_document(intent.bound),
+    }
+
+
+def intent_document_keys() -> tuple[str, ...]:
+    return (
+        "binding",
+        "grant_revision",
+        "benchmark_revision",
+        "development_digest",
+        "idempotency_key",
+        "fields",
+        "bound",
+    )
+
+
+def intent_digest(intent: mc.FitIntent) -> str:
+    return digest(intent_document(intent))
+
+
+def _parse_intent(raw: Any) -> mc.FitIntent:
+    binding = raw["binding"]
+    bound = raw["bound"]
+    if (
+        not isinstance(binding, list)
+        or len(binding) != 11
+        or not isinstance(bound, list)
+        or len(bound) != 5
+        or type(bound[0]) is not str
+        or not all(type(v) is int for v in bound[1:])
+        or not isinstance(raw["fields"], list)
+        or not all(type(f) is str for f in raw["fields"])
+        or not all(
+            type(raw[k]) is str and raw[k]
+            for k in (
+                "grant_revision",
+                "benchmark_revision",
+                "development_digest",
+                "idempotency_key",
+            )
+        )
+        or set(raw) != set(intent_document_keys())
+    ):
+        raise ValueError("invalid fit intent")
+    route = mc.Route(binding[7])
+    return mc.FitIntent(
+        binding=mc.ModelBinding(
+            tenant=binding[0],
+            model_ref=binding[1],
+            immutable_revision=binding[2],
+            task=binding[3],
+            input_schema=binding[4],
+            output_schema=binding[5],
+            preprocessing_revision=binding[6],
+            route=route,
+            account_or_host=binding[8],
+            region=binding[9],
+            credential_ref=binding[10],
+        ),
+        grant_revision=raw["grant_revision"],
+        benchmark_revision=raw["benchmark_revision"],
+        development_digest=raw["development_digest"],
+        idempotency_key=raw["idempotency_key"],
+        fields=frozenset(raw["fields"]),
+        bound=mc.FitBound(*bound),
+    )
+
+
+def fit_record(job: mc.JobReceipt, candidate: mc.Candidate) -> dict[str, Any]:
+    """The job and collected candidate a fit produced, without any development row."""
+    if candidate.intent != job.intent:
+        raise EveRefusal("candidate_lineage_unverified")
+    return {
+        "schema_version": FIT_RECORD,
+        "intent": intent_document(job.intent),
+        "job": [job.state.value, job.job_ref, job.evidence_ref],
+        "candidate": [
+            candidate.job_ref,
+            candidate.parent_revision,
+            candidate.artifact_or_serving_revision,
+            candidate.replay_evidence_ref,
+        ],
+    }
+
+
+def parse_fit_record(raw: Any) -> tuple[mc.JobReceipt, mc.Candidate]:
+    """Read a fit record strictly. Its lineage is the reader's to re-verify with the connector."""
+    try:
+        if not isinstance(raw, dict) or set(raw) != {
+            "schema_version",
+            "intent",
+            "job",
+            "candidate",
+        }:
+            raise ValueError("invalid fit record")
+        if raw["schema_version"] != FIT_RECORD:
+            raise ValueError("invalid fit record")
+        intent = _parse_intent(raw["intent"])
+        state, job_ref, evidence_ref = raw["job"]
+        job_ref_c, parent, artifact, replay_ref = raw["candidate"]
+        text = (job_ref, evidence_ref, job_ref_c, parent, artifact, replay_ref)
+        if not all(type(v) is str and v for v in text):
+            raise ValueError("invalid fit record")
+        job = mc.JobReceipt(intent, mc.JobState(state), job_ref, evidence_ref)
+        return job, mc.Candidate(intent, job_ref_c, parent, artifact, replay_ref)
+    except (KeyError, TypeError, ValueError):
+        raise EveRefusal("fit_record_malformed") from None

@@ -5,12 +5,17 @@ or customer-evidence gate.
 """
 
 import copy
+import dataclasses
 import hashlib
+import inspect
 import json
+from collections.abc import Callable, Iterator, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentour_cell.pilot import consumption_lineage as lineage
 from opentour_cell.pilot.consumption_lineage import (
     OWNER,
     REVIEWER,
@@ -25,6 +30,7 @@ from opentour_cell.pilot.consumption_lineage import (
     Request,
     Resolution,
 )
+from opentour_cell.pilot.operating_point import digest
 
 TENANT, OTHER = "generated-tenant-a", "generated-tenant-b"
 WF = "generated-wf-refund"
@@ -96,6 +102,26 @@ class Grants:
 
 def request(actor: Actor = OWNER_ACTOR, epoch: int = 3) -> Request:
     return Request(actor, WF, epoch, NOW)
+
+
+def at(value: str) -> datetime:
+    return datetime.fromisoformat(value[:-1] + "+00:00")
+
+
+# The production worker clock, captured before any test pins it.
+REAL_WORKER_NOW: Callable[[], datetime] | None = getattr(lineage, "_worker_now", None)
+
+
+@pytest.fixture(autouse=True)
+def worker_clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
+    """Test-only seam: pin the worker's own clock (module attribute, never a parameter)."""
+
+    def pin(when: str) -> None:
+        moment = at(when)
+        monkeypatch.setattr(lineage, "_worker_now", lambda: moment, raising=False)
+
+    pin(NOW)
+    return pin
 
 
 def build(
@@ -352,6 +378,427 @@ def test_stale_epoch_and_expired_grant_are_denied(tmp_path: Path) -> None:
     assert isinstance(expired, Denial) and expired.reason == "grant_expired"
 
 
+def test_past_request_time_cannot_skip_expiry_judged_on_worker_clock(
+    tmp_path: Path, worker_clock: Callable[[str], None]
+) -> None:
+    """MEDIUM: a caller back-dating ``request.now`` must not revive an expired grant."""
+    _, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
+    worker_clock("2026-01-01T11:30:00Z")  # worker says: expired half an hour ago
+    for stale in ("2026-01-01T10:59:59Z", "2026-01-01T09:00:00Z", "2000-01-01T00:00:00Z"):
+        back_dated = Request(OWNER_ACTOR, WF, 3, stale)
+        for out in (
+            reader.resolve_claim(back_dated, "claim-a"),
+            reader.impact(back_dated, Change("refund-request", "amount", 9)),
+        ):
+            assert isinstance(out, Denial) and out.reason == "grant_expired", (stale, out)
+            assert "claim-a" not in json.dumps(out.receipt)
+
+
+def test_future_request_time_does_not_extend_a_grant(
+    tmp_path: Path, worker_clock: Callable[[str], None]
+) -> None:
+    _, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
+    worker_clock("2026-01-01T11:30:00Z")
+    for ahead in ("2026-01-01T11:30:01Z", "2026-06-01T00:00:00Z", "2999-01-01T00:00:00Z"):
+        out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, ahead), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "grant_expired", (ahead, out)
+
+
+def test_caller_time_can_only_narrow_the_window(
+    tmp_path: Path, worker_clock: Callable[[str], None]
+) -> None:
+    _, grants, reader = build(tmp_path, manifest("a"))
+    grants.set(TENANT, expires_at="2026-01-01T11:00:00Z")
+    worker_clock("2026-01-01T10:00:00Z")  # worker: still valid for an hour
+    inside = Request(OWNER_ACTOR, WF, 3, "2026-01-01T10:00:00Z")
+    assert resolved(reader.resolve_claim(inside, "claim-a")).status == "resolved"
+    # A caller time at or past expiry shortens the window: refused although the worker is early.
+    for late in ("2026-01-01T11:00:00Z", "2026-01-01T12:00:00Z"):
+        out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, late), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "grant_expired", late
+    # Boundary on the worker clock itself: expiry is inclusive.
+    worker_clock("2026-01-01T11:00:00Z")
+    out = reader.resolve_claim(Request(OWNER_ACTOR, WF, 3, "2026-01-01T10:00:00Z"), "claim-a")
+    assert isinstance(out, Denial) and out.reason == "grant_expired"
+
+
+def test_production_entry_point_uses_the_real_worker_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No pin: the module's own clock decides, whatever time the caller sends."""
+    assert REAL_WORKER_NOW is not None, "worker clock seam missing"
+    monkeypatch.setattr(lineage, "_worker_now", REAL_WORKER_NOW)
+    before = datetime.now(UTC)
+    observed = REAL_WORKER_NOW()
+    assert observed.tzinfo is not None and before <= observed <= datetime.now(UTC)
+    _, grants, reader = build(tmp_path, manifest("a"))
+    # 2026-02-01 is in the past on any real clock running this suite; the caller claims January.
+    out = reader.resolve_claim(request(), "claim-a")
+    assert isinstance(out, Denial) and out.reason == "grant_expired"
+    later = (datetime.now(UTC) + timedelta(days=3650)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    grants.set(TENANT, expires_at=later)
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+
+
+def test_worker_clock_is_not_reachable_from_the_production_entry_point() -> None:
+    # The seam is a private module attribute (checked as imported, before any pin) taking no
+    # arguments: nothing a caller passes through the reader or a request can reach it.
+    assert REAL_WORKER_NOW is not None and callable(REAL_WORKER_NOW)
+    assert list(inspect.signature(REAL_WORKER_NOW).parameters) == []
+    assert list(inspect.signature(ConsumptionReader).parameters) == ["store", "grants"]
+    assert [f.name for f in dataclasses.fields(Request)] == [
+        "actor",
+        "workflow_ref",
+        "grant_epoch",
+        "now",
+    ]
+    assert not any("clock" in name for name in dir(ConsumptionReader))
+    with pytest.raises(TypeError):
+        ConsumptionReader(None, None, clock=lambda: datetime.now(UTC))  # type: ignore[arg-type,call-arg]
+
+
+def test_receipts_state_the_pin_is_digest_self_consistent_only(tmp_path: Path) -> None:
+    """LOW: a plain sha256 pin is tamper evidence only; every reader receipt says so."""
+    _, _, reader = build(tmp_path, manifest("a"), manifest("p", partition="protected"))
+    for claim in ("claim-a", "claim-p", "claim-none"):
+        body = resolved(reader.resolve_claim(request(), claim)).to_json()
+        assert body["integrity"] == "digest_self_consistent_only", claim
+    got = impact(reader.impact(request(), Change("refund-request", "amount", 9))).to_json()
+    assert got["integrity"] == "digest_self_consistent_only"
+    for doc in (lineage.__doc__, ManifestStore.__doc__):
+        assert doc and "digest_self_consistent_only" in doc
+
+
+class _StrSubclassBadStr(str):
+    """A real str whose ``__str__`` lies (returns a non-str)."""
+
+    def __str__(self) -> str:
+        return 5  # type: ignore[return-value]
+
+
+class _StrImpostor:
+    """Not a str at all, but ``isinstance(x, str)`` is True through ``__class__``."""
+
+    __class__ = str  # type: ignore[assignment]
+
+
+def test_non_str_times_are_invalid_time_not_type_errors(tmp_path: Path) -> None:
+    """LOW-2: only an exact ``str`` is a time; anything else is ``invalid_time``, never raised."""
+    _, grants, reader = build(tmp_path, manifest("a"))
+    for bad in (_StrSubclassBadStr(NOW), _StrImpostor()):
+        sent = Request(OWNER_ACTOR, WF, 3, bad)  # type: ignore[arg-type]
+        for out in (
+            reader.resolve_claim(sent, "claim-a"),
+            reader.impact(sent, Change("refund-request", "amount", 9)),
+        ):
+            assert isinstance(out, Denial) and out.reason == "invalid_time", (type(bad), out)
+    for bad in (_StrSubclassBadStr("2026-02-01T00:00:00Z"), _StrImpostor()):
+        grants.set(TENANT, expires_at=bad)
+        out = reader.resolve_claim(request(), "claim-a")
+        assert isinstance(out, Denial) and out.reason == "invalid_time", type(bad)
+
+
+class _LyingRef(str):
+    """Its buffer passes the ref pattern; its ``__str__`` tells a different story."""
+
+    told: str
+
+    def __new__(cls, shown: str, told: str) -> "_LyingRef":
+        obj = super().__new__(cls, shown)
+        obj.told = told
+        return obj
+
+    def __str__(self) -> str:
+        return self.told
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+@pytest.mark.parametrize("told", ["bad ref!", "../../pwn", OTHER])
+@pytest.mark.parametrize("key", ["manifest_ref", "claim_refs", "tenant"])
+def test_lying_str_subclass_ref_is_refused_writes_nothing_and_wedges_nothing(
+    tmp_path: Path, key: str, told: str
+) -> None:
+    """LOW-3: a ref is exactly ``str`` and persisted as itself, never as ``str(value)``."""
+    # Two levels deep, so a "../../" escape would still land inside tmp_path and be seen.
+    store, grants = ManifestStore(tmp_path / "root" / "m"), Grants()
+    grants.set(OTHER)
+    reader = ConsumptionReader(store, grants)
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    shown = {"manifest_ref": "b", "claim_refs": "claim-b", "tenant": TENANT}[key]
+    lying = _LyingRef(shown, told)
+    raw = manifest("b", **{key: [lying] if key == "claim_refs" else lying})
+    with pytest.raises(LineageError, match=f"^manifest_{key}$"):
+        store.put(raw)
+    assert _tree(tmp_path) == before  # no manifest, pin, temp file or folder anywhere
+    if key == "tenant":
+        with pytest.raises(LineageError, match="^manifest_tenant$"):
+            store.all(lying)  # the read side cannot be steered into another folder either
+    # The tenant is not wedged: it still reads, resolves and accepts the honest record.
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    assert store.all(OTHER) == []
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+    store.put(manifest("b"))
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
+@pytest.mark.parametrize("value", ["a/../x", "a/b", "..", "../x", "a\\b", "/x"])
+@pytest.mark.parametrize("key", ["tenant", "manifest_ref"])
+def test_exact_str_traversal_ref_is_refused_and_writes_nothing(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    """NIT-3: a plain ``str`` that names another folder or file is never a tenant or ref."""
+    store = ManifestStore(tmp_path / "root" / "m")
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    with pytest.raises(LineageError, match=f"^manifest_{key}$"):
+        store.put(manifest("b", **{key: value}))
+    assert _tree(tmp_path) == before
+    if key == "tenant":
+        with pytest.raises(LineageError, match="^manifest_tenant$"):
+            store.all(value)
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+
+
+class _ClaimsStr(str):
+    """Its buffer is one string; ``__eq__``/``__hash__`` claim it is another."""
+
+    claimed: str
+
+    def __new__(cls, buffer: str, claimed: str) -> "_ClaimsStr":
+        obj = super().__new__(cls, buffer)
+        obj.claimed = claimed
+        return obj
+
+    def __eq__(self, other: object) -> bool:
+        return self.claimed == other
+
+    def __ne__(self, other: object) -> bool:
+        return self.claimed != other
+
+    def __hash__(self) -> int:
+        return hash(self.claimed)
+
+
+class _AlwaysAtLeast(int):
+    """A negative int whose ``>=`` always answers True."""
+
+    def __ge__(self, other: object) -> bool:
+        return True
+
+
+def _lying_key(entry: dict[str, Any], key: str) -> dict[str, Any]:
+    return {(_ClaimsStr("zzz", key) if k == key else k): v for k, v in entry.items()}
+
+
+def _poisoned(where: str, tenant: str = TENANT) -> dict[str, Any]:
+    m = manifest("b", claim_refs=["claim-b"], tenant=tenant)
+    lying_int = _AlwaysAtLeast(-5)
+    if where == "partition":
+        m["partition"] = _ClaimsStr("zzz", "development")
+    elif where == "rule_kind":
+        m["rule_kind"] = _ClaimsStr("zzz", "simple_rule")
+    elif where == "descendant_kind":
+        m["descendants"][0]["kind"] = _ClaimsStr("zzz", "dataset")
+    elif where in ("grant_epoch", "engagement_epoch", "correction_version"):
+        m[where] = lying_int
+    elif where == "source_revision":
+        m["consumed"][0]["source_revision"] = lying_int
+    elif where in ("path", "span"):
+        m["consumed"][0][where] = _StrImpostor()
+    elif where == "later_kind":
+        m["later_relationships"][0]["kind"] = _StrImpostor()
+    elif where == "unknown_dependency":
+        m["unknown_dependencies"] = [_ClaimsStr("zzz", "*")]  # never silently becomes "*"
+    elif where == "top_key":
+        m = _lying_key(m, "case_ref")
+    elif where == "consumed_key":
+        m["consumed"][0] = _lying_key(m["consumed"][0], "path")
+    elif where == "descendant_key":
+        m["descendants"][0] = _lying_key(m["descendants"][0], "kind")
+    elif where == "later_key":
+        m["later_relationships"][0] = _lying_key(m["later_relationships"][0], "kind")
+    else:  # pragma: no cover - parametrize typo guard
+        raise AssertionError(where)
+    return m
+
+
+@pytest.mark.parametrize(
+    "where,reason",
+    [
+        ("partition", "manifest_partition"),
+        ("rule_kind", "manifest_rule_kind"),
+        ("descendant_kind", "manifest_descendant"),
+        ("grant_epoch", "manifest_grant_epoch"),
+        ("engagement_epoch", "manifest_engagement_epoch"),
+        ("correction_version", "manifest_correction_version"),
+        ("source_revision", "manifest_consumed_revision"),
+        ("path", "manifest_consumed_path"),
+        ("span", "manifest_consumed_span"),
+        ("later_kind", "manifest_later_relationship"),
+        ("unknown_dependency", "manifest_unknown_dependencies"),
+        ("top_key", "manifest_unknown_key"),
+        ("consumed_key", "manifest_consumed_entry"),
+        ("descendant_key", "manifest_descendant"),
+        ("later_key", "manifest_later_relationship"),
+    ],
+)
+def test_value_put_accepts_but_reads_refuse_is_refused_at_put_and_wedges_nothing(
+    tmp_path: Path, where: str, reason: str
+) -> None:
+    """LOW-4: put only stores what every later read accepts as the same record."""
+    store, grants = ManifestStore(tmp_path / "root" / "m"), Grants()
+    reader = ConsumptionReader(store, grants)
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    # The validator itself refuses (reads use it too), not only put's round trip.
+    with pytest.raises(LineageError, match=f"^{reason}$"):
+        lineage.validate_manifest(_poisoned(where))
+    for tenant in (TENANT, OTHER):  # an existing tenant folder, and one not yet created
+        with pytest.raises(LineageError, match=f"^{reason}$"):
+            store.put(_poisoned(where, tenant))
+    assert _tree(tmp_path) == before  # no manifest, pin, temp file or folder
+    # The tenant is not wedged: reads, resolution and impact still work, and the honest
+    # record is still accepted afterwards.
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    assert resolved(reader.resolve_claim(request(), "claim-a")).status == "resolved"
+    assert impact(reader.impact(request(), Change("refund-request", "amount", 9))).dirty
+    store.put(manifest("b", claim_refs=["claim-b"]))
+    assert resolved(reader.resolve_claim(request(), "claim-b")).status == "resolved"
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
+@pytest.mark.parametrize("version", [True, _AlwaysAtLeast(1)])
+def test_relationship_version_is_exactly_int(tmp_path: Path, version: int) -> None:
+    """LOW-4: a bool or int subclass is not a relationship version, so it is never stored."""
+    store = ManifestStore(tmp_path / "m")
+    m = manifest("b")
+    m["later_relationships"][0]["relationship_version"] = version
+    with pytest.raises(LineageError, match="^manifest_later_relationship$"):
+        store.put(m)
+    assert _tree(tmp_path) == ["m"]
+
+
+class _Exploding(Mapping[str, Any]):
+    """A manifest-shaped mapping whose lookup of one key raises ``error``."""
+
+    def __init__(self, data: dict[str, Any], key: str, error: BaseException) -> None:
+        self.data, self.key, self.error = data, key, error
+
+    def __getitem__(self, key: str) -> Any:
+        if key == self.key:
+            raise self.error
+        return self.data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+@pytest.mark.parametrize("error", [TypeError("t"), ValueError("v"), RecursionError("r")])
+def test_errors_raised_while_validating_are_typed_lineage_errors(
+    tmp_path: Path, error: BaseException
+) -> None:
+    """LOW-4: TypeError, ValueError and RecursionError in validation never escape raw."""
+    store = ManifestStore(tmp_path / "m")
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    for key in ("schema", "consumed", "later_relationships"):
+        with pytest.raises(LineageError, match="^manifest_malformed$"):
+            store.put(_Exploding(manifest("b"), key, error))
+    assert _tree(tmp_path) == before
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+
+
+def test_deeply_nested_pinned_file_is_unreadable_not_a_recursion_error(tmp_path: Path) -> None:
+    store = ManifestStore(tmp_path)
+    store.put(manifest("a"))
+    folder = tmp_path / TENANT
+    body = "[" * 200_000 + "]" * 200_000
+    (folder / "manifest-a.json").write_text(body)
+    (folder / "manifest-a.sha256").write_text(hashlib.sha256(body.encode()).hexdigest())
+    with pytest.raises(LineageError, match="^manifest_unreadable$"):
+        store.all(TENANT)
+
+
+@pytest.mark.parametrize(
+    "taint,reason",
+    [
+        # Same JSON bytes, wrong Python type: only an exact-type comparison notices.
+        (lambda out: {**out, "partition": _ClaimsStr("development", "development")},
+         "manifest_not_canonical"),
+        (lambda out: {**out, "claim_refs": [_ClaimsStr("claim-b", "claim-b")]},
+         "manifest_not_canonical"),
+        (lambda out: {**out, "consumed": [{**out["consumed"][0], "source_revision": True}]},
+         "manifest_consumed_revision"),
+        (lambda out: {**out, "grant_epoch": 3.0}, "manifest_grant_epoch"),
+        (lambda out: {**out, "result_ref": _StrImpostor()}, "manifest_not_canonical"),
+        # Same types, different order: the re-read record is sorted, so the bytes differ.
+        (lambda out: {**out, "claim_refs": ["claim-z", "claim-b"]}, "manifest_not_canonical"),
+        (lambda out: {_ClaimsStr("tenant", "tenant") if k == "tenant" else k: v
+                      for k, v in out.items()}, "manifest_not_canonical"),
+    ],
+)  # fmt: skip
+def test_put_refuses_a_record_that_does_not_round_trip_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    taint: Callable[[dict[str, Any]], dict[str, Any]],
+    reason: str,
+) -> None:
+    """LOW-4 backstop: even if validation let a value through, put re-reads its own bytes and
+    stores only a record that validates back to exactly itself (exact types, recursively)."""
+    store = ManifestStore(tmp_path / "m")
+    store.put(manifest("a"))
+    before = _tree(tmp_path)
+    real = lineage.validate_manifest
+    calls: list[int] = []
+
+    def leaky(raw: Any) -> dict[str, Any]:
+        calls.append(1)
+        out = real(raw)
+        return taint(out) if len(calls) == 1 else out  # only the first, pre-write call leaks
+
+    monkeypatch.setattr(lineage, "validate_manifest", leaky)
+    for tenant in (TENANT, OTHER):  # an existing tenant folder, and one not yet created
+        calls.clear()
+        with pytest.raises(LineageError, match=f"^{reason}$"):
+            store.put(manifest("b", claim_refs=["claim-b"], tenant=tenant))
+    assert _tree(tmp_path) == before
+    monkeypatch.setattr(lineage, "validate_manifest", real)
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a"]
+    store.put(manifest("b", claim_refs=["claim-b"]))
+    assert [m["manifest_ref"] for m in store.all(TENANT)] == ["a", "b"]
+
+
+def test_integrity_marker_is_inside_the_digested_receipt_body(tmp_path: Path) -> None:
+    """NIT-2: editing the marker breaks the receipt's reader_digest."""
+    _, _, reader = build(tmp_path, manifest("a"))
+    for receipt in (
+        resolved(reader.resolve_claim(request(), "claim-a")).to_json(),
+        impact(reader.impact(request(), Change("refund-request", "amount", 9))).to_json(),
+    ):
+        body = {k: v for k, v in receipt.items() if k != "reader_digest"}
+        assert body["integrity"] == "digest_self_consistent_only"
+        assert digest(body) == receipt["reader_digest"]
+        forged = {**body, "integrity": "authenticated"}
+        assert digest(forged) != receipt["reader_digest"]
+
+
+def test_wording_does_not_overstate_what_the_pin_enforces() -> None:
+    """NIT-1: unsigned digest pins are not called immutable, sealed or verified."""
+    source = inspect.getsource(lineage)
+    for overstated in ("immutable", "sealed manifest", "verified manifest", "Every reader receipt"):
+        assert overstated not in source, overstated
+    assert lineage.__doc__ and "denial receipt" in lineage.__doc__
+
+
 def test_foreign_tenant_gets_no_links_and_indistinguishable_from_unknown(tmp_path: Path) -> None:
     store, grants, reader = build(tmp_path, manifest("a"))
     grants.set(OTHER)
@@ -599,6 +1046,8 @@ def test_protected_claim_exposes_aggregate_status_only_even_with_unknown_depende
         ({"schema": "x"}, "manifest_schema"),
         ({"extra": 1}, "manifest_unknown_key"),
         ({"partition": "other"}, "manifest_partition"),
+        ({"grant_epoch": -1}, "manifest_grant_epoch"),
+        ({"correction_version": True}, "manifest_correction_version"),
         ({"claim_refs": []}, "manifest_claim_refs"),
         ({"consumed": [field("a", "bad path")]}, "manifest_consumed_path"),
         ({"consumed": [field("a", "p"), field("a", "p")]}, "manifest_consumed_duplicate"),

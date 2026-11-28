@@ -65,6 +65,36 @@ CREATE TABLE IF NOT EXISTS fence (
  PRIMARY KEY (org, epoch)
 );
 """
+# Defence in depth against code bugs, not a security boundary: the worker or custodian uid
+# that owns these 0700/0600 files can drop the triggers or rewrite both files. Within that
+# limit no write path, including a direct SQL insert, update or REPLACE, can mark a live slot
+# released unless the same row is terminal and its revocation epoch is fenced, and a fence
+# row is never deleted or changed. The authority for a termination is the fsynced journal
+# entry (worker-attested; it still has no external anchor): `record_engagement` admits a
+# successor and `release_slot` frees a slot only when the journal carries the same epoch.
+_RELEASE_REQUIRES_FENCE = (
+    "NEW.slot_released != 0 AND (NEW.state != 'terminal' OR NEW.revocation_epoch IS NULL "
+    "OR NOT EXISTS (SELECT 1 FROM fence WHERE fence.org = NEW.org AND fence.epoch = NEW.epoch "
+    "AND fence.revocation_epoch = NEW.revocation_epoch))"
+)
+_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS slot_release_requires_fence_insert BEFORE INSERT ON engagement "
+    f"WHEN {_RELEASE_REQUIRES_FENCE} "
+    "BEGIN SELECT RAISE(ABORT, 'terminal_state_not_persisted'); END",
+    "CREATE TRIGGER IF NOT EXISTS slot_release_requires_fence_update BEFORE UPDATE ON engagement "
+    f"WHEN {_RELEASE_REQUIRES_FENCE} "
+    "BEGIN SELECT RAISE(ABORT, 'terminal_state_not_persisted'); END",
+    # REPLACE deletes without firing delete triggers (recursive_triggers is off), so refuse
+    # a differing row for an existing key before the insert happens.
+    "CREATE TRIGGER IF NOT EXISTS fence_insert_is_immutable BEFORE INSERT ON fence "
+    "WHEN EXISTS (SELECT 1 FROM fence WHERE fence.org = NEW.org AND fence.epoch = NEW.epoch "
+    "AND fence.revocation_epoch IS NOT NEW.revocation_epoch) "
+    "BEGIN SELECT RAISE(ABORT, 'fence_is_permanent'); END",
+    "CREATE TRIGGER IF NOT EXISTS fence_is_permanent BEFORE DELETE ON fence "
+    "BEGIN SELECT RAISE(ABORT, 'fence_is_permanent'); END",
+    "CREATE TRIGGER IF NOT EXISTS fence_is_immutable BEFORE UPDATE ON fence "
+    "BEGIN SELECT RAISE(ABORT, 'fence_is_permanent'); END",
+)
 
 
 class EngagementError(ValueError):
@@ -178,6 +208,8 @@ class EngagementLedger:
             for statement in _SCHEMA_SQL.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            for trigger in _TRIGGERS:
+                db.execute(trigger)
 
     def _journal_entries(self) -> list[dict[str, Any]]:
         if not self.journal.exists():
@@ -220,12 +252,26 @@ class EngagementLedger:
             "previous": previous,
         }
         line = json.dumps({**body, "digest": _digest(body)}, sort_keys=True) + "\n"
+        created = not os.path.lexists(self.journal)
         fd = os.open(self.journal, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         try:
             os.write(fd, line.encode())
             os.fsync(fd)
         finally:
             os.close(fd)
+        if created:
+            # A new journal's directory entry must survive a crash, not only its bytes.
+            directory = os.open(self.journal.parent, os.O_DIRECTORY | os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+
+    def _journaled_revocation(self, org: str, epoch: str) -> int | None:
+        for entry in self._journal_entries():
+            if (entry["org"], entry["epoch"]) == (org, epoch):
+                return int(entry["revocation_epoch"])
+        return None
 
     def reconcile_fences(self) -> None:
         """Re-apply every journaled fence; a restored older database cannot lift one."""
@@ -233,7 +279,13 @@ class EngagementLedger:
         with self._db() as db:
             for entry in entries:
                 org, epoch, revocation = entry["org"], entry["epoch"], entry["revocation_epoch"]
-                db.execute("INSERT OR IGNORE INTO fence VALUES (?,?,?)", (org, epoch, revocation))
+                try:
+                    db.execute(
+                        "INSERT OR IGNORE INTO fence VALUES (?,?,?)", (org, epoch, revocation)
+                    )
+                except sqlite3.IntegrityError:
+                    # The database fence disagrees with the journal: hold, never pick one.
+                    raise EngagementHold("fence_conflict") from None
                 db.execute(
                     "UPDATE engagement SET state='terminal', "
                     "terminal_kind=coalesce(terminal_kind,'withdrawal'), "
@@ -304,9 +356,17 @@ class EngagementLedger:
                     # A fenced epoch lost to an older backup leaves no reliable checkpoint.
                     raise EngagementHold("prior_lineage_missing")
             high = 0
+            journaled = {
+                entry["epoch"]: entry["revocation_epoch"]
+                for entry in self._journal_entries()
+                if entry["org"] == org
+            }
             for row in prior:
                 if row["state"] != "terminal" or row["revocation_epoch"] is None:
                     raise EngagementHold("prior_engagement_not_terminal")
+                if journaled.get(row["epoch"]) != row["revocation_epoch"]:
+                    # Only a journaled termination admits a successor, not database rows alone.
+                    raise EngagementHold("prior_termination_not_journaled")
                 if not row["slot_released"]:
                     raise EngagementHold("live_slot_not_released")
                 if row["lease_ref"] == lease_ref or row["authority_digest"] == authority_digest:
@@ -398,30 +458,90 @@ class EngagementLedger:
     # -- withdrawal ------------------------------------------------------------------
 
     def withdraw(self, org: str, epoch: str, *, revocation_epoch: int) -> Engagement:
-        """Persist terminal state and revocation epoch (fence first). Idempotent."""
+        """Persist terminal state and revocation epoch (fence first). Idempotent.
+
+        The supplied epoch is only a confirmation: it must equal the one `retire` would use
+        (already recorded, else journaled, else the organization's next), or it is refused.
+        """
         org, epoch = _ref(org), _ref(epoch)
         _int(revocation_epoch, "invalid_revocation_epoch", minimum=1)
         with self.pin(exclusive=True), self._db() as db:
             row = self._require_row(db, org, epoch)
-            if row["revocation_epoch"] is not None and row["revocation_epoch"] != revocation_epoch:
-                raise EngagementError("revocation_epoch_conflict")
-            peak = db.execute(
-                "SELECT max(revocation_epoch) FROM engagement WHERE org=? AND epoch!=?",
-                (org, epoch),
-            ).fetchone()[0]
-            if row["revocation_epoch"] is None and peak is not None and revocation_epoch <= peak:
-                raise EngagementError("revocation_epoch_not_monotonic")
-            self._append_fence(org, epoch, revocation_epoch)
-            db.execute("INSERT OR IGNORE INTO fence VALUES (?,?,?)", (org, epoch, revocation_epoch))
+            recorded = row["revocation_epoch"]
+            if recorded is None:
+                recorded = self._journaled_revocation(org, epoch)
+            assigned = recorded if recorded is not None else self._next_revocation(db, org)
+            if revocation_epoch != assigned:
+                if recorded is not None:
+                    raise EngagementError("revocation_epoch_conflict")
+                if revocation_epoch < assigned:
+                    raise EngagementError("revocation_epoch_not_monotonic")
+                raise EngagementError("revocation_epoch_not_assigned")
+            return self._terminate(db, org, epoch, revocation_epoch)
+
+    def _terminate(
+        self, db: sqlite3.Connection, org: str, epoch: str, revocation_epoch: int
+    ) -> Engagement:
+        row = self._require_row(db, org, epoch)
+        if row["revocation_epoch"] is not None and row["revocation_epoch"] != revocation_epoch:
+            raise EngagementError("revocation_epoch_conflict")
+        peak = db.execute(
+            "SELECT max(revocation_epoch) FROM engagement WHERE org=? AND epoch!=?",
+            (org, epoch),
+        ).fetchone()[0]
+        if row["revocation_epoch"] is None and peak is not None and revocation_epoch <= peak:
+            raise EngagementError("revocation_epoch_not_monotonic")
+        # Journal (fsync) first, then the database row; both commit before any release.
+        self._append_fence(org, epoch, revocation_epoch)
+        db.execute("INSERT OR IGNORE INTO fence VALUES (?,?,?)", (org, epoch, revocation_epoch))
+        if row["state"] != "terminal" or row["revocation_epoch"] != revocation_epoch:
             db.execute(
                 "UPDATE engagement SET state='terminal', terminal_kind='withdrawal', "
                 "revocation_epoch=? WHERE org=? AND epoch=?",
                 (revocation_epoch, org, epoch),
             )
-            return self._row(self._require_row(db, org, epoch))
+        return self._row(self._require_row(db, org, epoch))
+
+    def retire(self, org: str, epoch: str) -> Engagement:
+        """Custody withdrawal: persist terminal state and revocation epoch, then free the slot.
+
+        The revocation epoch is read from this ledger (row, then journal) or assigned by it as
+        the organization's next one; a caller never supplies it. Termination commits in its own
+        transaction before the release transaction begins, so an interruption between them
+        leaves a terminal, fenced epoch with its slot held, which a retry releases. Repeating
+        a completed retirement writes nothing.
+        """
+        org, epoch = _ref(org), _ref(epoch)
+        with self.pin(exclusive=True):
+            with self._db() as db:
+                row = self._require_row(db, org, epoch)
+                revocation = row["revocation_epoch"]
+                if revocation is None:
+                    revocation = self._journaled_revocation(org, epoch)
+                if revocation is None:
+                    revocation = self._next_revocation(db, org)
+                self._terminate(db, org, epoch, revocation)
+            return self.release_slot(org, epoch)
+
+    def _next_revocation(self, db: sqlite3.Connection, org: str) -> int:
+        known = [
+            row[0]
+            for row in db.execute(
+                "SELECT revocation_epoch FROM engagement WHERE org=? AND revocation_epoch "
+                "IS NOT NULL UNION ALL SELECT revocation_epoch FROM fence WHERE org=?",
+                (org, org),
+            )
+        ]
+        known += [e["revocation_epoch"] for e in self._journal_entries() if e["org"] == org]
+        return _int(max(known, default=0) + 1, "invalid_revocation_epoch", minimum=1)
 
     def release_slot(self, org: str, epoch: str) -> Engagement:
-        """Free the live slot only after the terminal state and revocation epoch persist."""
+        """Free the live slot only after the terminal state and revocation epoch persist.
+
+        Persisted means the committed database row, its fence row and the fsynced journal
+        entry all carry the same revocation epoch. Releasing an already released slot is a
+        no-op.
+        """
         org, epoch = _ref(org), _ref(epoch)
         with self._db() as db:
             row = self._require_row(db, org, epoch)
@@ -433,11 +553,13 @@ class EngagementLedger:
                 or row["revocation_epoch"] is None
                 or fenced is None
                 or fenced[0] != row["revocation_epoch"]
+                or self._journaled_revocation(org, epoch) != row["revocation_epoch"]
             ):
                 raise EngagementHold("terminal_state_not_persisted")
-            db.execute(
-                "UPDATE engagement SET slot_released=1 WHERE org=? AND epoch=?", (org, epoch)
-            )
+            if not row["slot_released"]:
+                db.execute(
+                    "UPDATE engagement SET slot_released=1 WHERE org=? AND epoch=?", (org, epoch)
+                )
             return self._row(self._require_row(db, org, epoch))
 
     def restore_backup(self, backup: Path) -> None:

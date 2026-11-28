@@ -22,6 +22,7 @@ from typing import Any, Protocol
 from opentour_cell.pilot.intake_admission import (
     DurableIntake,
     IntakeWork,
+    read_current_benchmark_run,
     require_readonly_snapshot,
 )
 from opentour_cell.pilot.intake_mcp import (
@@ -476,16 +477,23 @@ class WorkflowBenchmarks:
             )
 
     def inspect(
-        self, scope: BenchmarkScope, reference: str, *, current_run: str | None = None
+        self, scope: BenchmarkScope, reference: str | int, *, current_run: str | None = None
     ) -> Json | None:
-        """Only under the caller's explicit benchmark inspection guard, including old versions."""
+        """Read an exact reference or workflow-local version under the inspection guard."""
+        selector: str | int
+        if type(reference) is int:
+            _require(0 < reference < 2**63, "invalid_benchmark_version")
+            field = "version"
+            selector = reference
+        else:
+            field = "reference"
+            selector = require_ref(reference)
         if not self.path.exists():
             return None
         with self._db() as db:
             row = db.execute(
-                "SELECT * FROM benchmarks WHERE tenant=? AND epoch=? AND workflow=? "
-                "AND reference=?",
-                (scope.tenant, scope.engagement_epoch, scope.workflow_ref, reference),
+                f"SELECT * FROM benchmarks WHERE tenant=? AND epoch=? AND workflow=? AND {field}=?",
+                (scope.tenant, scope.engagement_epoch, scope.workflow_ref, selector),
             ).fetchone()
             if row is None:
                 return None
@@ -502,6 +510,34 @@ class WorkflowBenchmarks:
                 "as_of_state": row["state"],
                 "materialized": None if receipt is None else asdict(receipt),
             }
+
+    def match_scored_comparison(
+        self, scope: BenchmarkScope, version: int, result_revision: str
+    ) -> str | None:
+        """Bind a current private managed result to its exact frozen benchmark.
+
+        The caller must already hold the current private read grant for the
+        result and the independently verified intake identity for this scope.
+        The receipt gives no authority to read a result.
+        """
+        _require(type(version) is int and 0 < version < 2**63, "invalid_benchmark_version")
+        order = (self.path.parent, scope.tenant, scope.workflow_ref, scope.engagement_epoch)
+        current_run = read_current_benchmark_run(*order)
+        if current_run is None:
+            return None
+        evidence = self.inspect(scope, version, current_run=current_run)
+        if evidence is None or evidence["benchmark_state"] != "scored":
+            return None
+        receipt = evidence["materialized"]
+        if (
+            receipt is None
+            or receipt["result_digest"] != result_revision
+            or receipt["result_ref"] != "protected-result-" + result_revision
+        ):
+            return None
+        if read_current_benchmark_run(*order) != current_run:
+            return None
+        return str(evidence["benchmark_ref"])
 
     def publish(
         self,
@@ -614,7 +650,7 @@ class BenchmarkIntake:
         return status
 
     def inspect_benchmark(
-        self, actor: IntakePrincipal, workflow: str, reference: str
+        self, actor: IntakePrincipal, workflow: str, reference: str | int
     ) -> Json | None:
         if self.inspection is None:
             return None
@@ -623,7 +659,7 @@ class BenchmarkIntake:
             current_run = self.intake.current_benchmark_run(
                 scope.tenant, workflow, scope.engagement_epoch
             )
-            return self.benchmarks.inspect(scope, require_ref(reference), current_run=current_run)
+            return self.benchmarks.inspect(scope, reference, current_run=current_run)
 
     def adopt_starter_state(
         self,
