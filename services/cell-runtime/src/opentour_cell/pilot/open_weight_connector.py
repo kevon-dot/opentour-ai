@@ -17,7 +17,11 @@ builds no candidate, and ``predict_for_replay``, ``promote`` and ``serve`` refus
 (this route has no ``handoff_reference``; those are the places its result is released).
 ``hold_reason`` reports the reason and is ``None`` unless the job is COMPLETED; the receipt keeps
 the job's own state, and ``usage().settleable`` is False for a held job. An intent bound whose
-maxima are not exactly ``int`` is refused before dispatch and in every receipt (``intent_digest``).
+maxima are not exactly ``int``, are negative, or whose currency is not an ISO-4217-shaped code is
+refused by ``submit`` before anything is journaled or run. ``intent_digest`` applies no shape
+check (review of #241, F1-241, owner-delegate decision): a job journaled by an older build under a
+bound the current rule refuses stays reachable by ``lookup``, ``status``, ``cancel``, ``usage`` and
+``hold_reason``, and its release stays closed (its journaled cap reads as ``cap_unverifiable``).
 
 Simulated: tests drive the connector with generated toy model families through a real subprocess.
 Not proven: no real checkpoint is loaded here and no GPU is used. The connector never reserves or
@@ -42,6 +46,7 @@ from typing import Any, Protocol
 
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot.connector_ext import (
+    UNSERIALIZABLE_DIGEST,
     USAGE_FIELDS,
     FenceReceipt,
     JournaledCap,
@@ -129,11 +134,16 @@ def development_digest(rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def intent_digest(intent: mc.FitIntent) -> str:
-    """The journal's binding to one intent. Refuses a bound whose maxima are not exactly ``int``."""
+    """The journal's binding to one intent. Applies no bound shape check (F1-241).
+
+    ``submit`` refuses a malformed bound before a digest is journaled; a receipt for a job an older
+    build journaled must still reach it. No receipt path compares the caller's bound, so an ``int``
+    subclass that digests like the plain int changes nothing. An intent JSON cannot write digests
+    to ``UNSERIALIZABLE_DIGEST``, which matches no journal.
+    """
     binding = intent.binding
-    require_exact_bound(intent.bound)
-    return _sha(
-        _canonical(
+    try:
+        document = _canonical(
             [
                 [
                     binding.tenant,
@@ -162,7 +172,9 @@ def intent_digest(intent: mc.FitIntent) -> str:
                 ],
             ]
         )
-    )
+    except (TypeError, ValueError):
+        return UNSERIALIZABLE_DIGEST
+    return _sha(document)
 
 
 def _append(path: Path, event: Mapping[str, Any]) -> None:
@@ -390,7 +402,7 @@ class OpenWeightConnector:
 
     def submit(self, intent: mc.FitIntent, development: bytes) -> mc.JobReceipt:
         self._refuse_if_fenced()
-        require_exact_bound(intent.bound)
+        require_exact_bound(intent.bound)  # the one place the bound's shape is checked (F1-241)
         key = self._key(intent)
         job_dir = self._job_dir(key)
         with _SubmitLock(self.root):

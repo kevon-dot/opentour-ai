@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 import toy_families as toy
+from opentour_cell.pilot import connector_ext as ext
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot import open_weight_connector as owc
 from opentour_cell.pilot import open_weight_reference as ref
@@ -1022,8 +1026,10 @@ def test_w7_intent_bound_that_is_not_exactly_int_is_refused_before_dispatch(
     payload = connector.serialize_development(forged, toy.TRAIN)
     with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
         connector.submit(forged, payload)
-    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
-        owc.intent_digest(forged)
+    # Only submit refuses it (F1-241): the digest applies no shape check. A subclass digests like
+    # the plain int; a bool or float digests differently, so it can match no journaled job.
+    same = owc.intent_digest(forged) == owc.intent_digest(intent)
+    assert same is (kind == "subclass")
     assert not list((connector.root / "jobs").iterdir())
 
 
@@ -1036,15 +1042,15 @@ def test_w7_int_subclass_receipt_is_refused_and_cannot_change_the_hold_reason(
         intent, bound=replace(intent.bound, **{limit: SneakyInt(getattr(intent.bound, limit))})
     )
     forged = replace(receipt, intent=sneaky)
-    for call in (
-        lambda: connector.hold_reason(forged),
-        lambda: connector.status(forged),
-        lambda: connector.collect(forged),
-        lambda: connector.lookup(sneaky),
-    ):
-        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
-            call()
-    assert connector.usage(forged) is None  # usage reports an unusable receipt as unknown
+    # F1-241: it names the same journaled job and reads exactly what the genuine receipt reads;
+    # release compares only the journaled cap, so the genuine ``over_cap`` stands.
+    assert connector.hold_reason(forged) == "over_cap"
+    assert connector.status(forged).state is mc.JobState.COMPLETED
+    assert connector.lookup(sneaky).state is mc.JobState.COMPLETED
+    with pytest.raises(ValueError, match="^over_cap$"):
+        connector.collect(forged)
+    usage = connector.usage(forged)
+    assert usage is not None and usage.cap_status == "over_cap" and usage.settleable is False
     assert connector.hold_reason(receipt) == "over_cap"
 
 
@@ -1095,6 +1101,117 @@ def test_w9_invalid_intent_currency_is_refused_before_dispatch(
     payload = connector.serialize_development(forged, toy.TRAIN)
     with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
         connector.submit(forged, payload)
-    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
-        owc.intent_digest(forged)
+    assert connector.lookup(forged) is None  # F1-241: only submit applies the shape check
     assert not list((connector.root / "jobs").iterdir())
+
+
+# Review of #241 at 7ae8613, F1-241 (owner-delegate decision): the bound shape is validated only
+# on submit, where a new digest is journaled; the digest of an intent that is already journaled
+# applies no shape check, so a job dispatched under an older rule stays reachable. On this route a
+# negative maximum never dispatched even then (the resource check refuses it), so the legacy bound
+# that reached the runner is a currency that is not ISO-4217-shaped. Its release stays closed.
+# G1 a RUNNING legacy job answers lookup, status, hold_reason, usage and collect, and cancels
+# G2 a COMPLETED legacy job is held ``cap_unverifiable``, although its measured usage repeats the
+#    legacy currency (without the journaled-currency shape check it would release)
+# G4 a receipt whose bound cannot be serialized names no job: a fixed refusal, never a TypeError
+OW_LEGACY_CURRENCIES = ["usd", "US"]
+
+
+def _old_rule(bound: mc.FitBound) -> None:
+    """The rule an older build applied at dispatch: exact ``int`` maxima only, any code."""
+    if any(type(getattr(bound, limit)) is not int for limit in OW_MAXIMA):
+        raise ValueError("fit_bound_not_exact_int")
+
+
+@contextmanager
+def _older_rule(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    with monkeypatch.context() as patch:
+        patch.setattr(ext, "require_exact_bound", _old_rule)
+        patch.setattr(owc, "require_exact_bound", _old_rule)
+        yield
+
+
+def _legacy_intent(family: toy.Family, key: str, currency: str) -> mc.FitIntent:
+    intent = family.intent(key)
+    return replace(intent, bound=replace(intent.bound, currency=currency))
+
+
+@pytest.mark.parametrize("currency", OW_LEGACY_CURRENCIES)
+def test_g1_running_job_with_a_legacy_bound_stays_reachable(
+    family: toy.Family, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, currency: str
+) -> None:
+    connector = family.connector(tmp_path / "state", slow=True)
+    intent = _legacy_intent(family, "generated-legacy-running", currency)
+    payload = connector.serialize_development(intent, toy.TRAIN)
+    journal = connector.root / "jobs" / connector._key(intent) / "journal.jsonl"
+    thread = threading.Thread(target=lambda: connector.submit(intent, payload))
+    with _older_rule(monkeypatch):
+        thread.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (
+            journal.is_file() and '"started"' in journal.read_text()
+        ):
+            time.sleep(0.02)
+    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
+        owc.require_exact_bound(intent.bound)  # the current rule is back
+    live = connector.lookup(intent)
+    assert live is not None and live.state is mc.JobState.RUNNING
+    assert connector.status(live) == live
+    assert connector.hold_reason(live) is None
+    assert connector.usage(live) is None
+    with pytest.raises(ValueError, match="^CANDIDATE_LINEAGE_UNVERIFIED$"):
+        connector.collect(live)
+    canceled = connector.cancel(live)
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    assert canceled.state is mc.JobState.CANCELED
+    assert connector.status(canceled).state is mc.JobState.CANCELED
+    assert connector.hold_reason(canceled) is None and connector.usage(canceled) is None
+
+
+@pytest.mark.parametrize("currency", OW_LEGACY_CURRENCIES)
+def test_g2_completed_job_with_a_legacy_bound_is_held_and_never_released(
+    family: toy.Family, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, currency: str
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    intent = _legacy_intent(family, "generated-legacy-done", currency)
+    payload = connector.serialize_development(intent, toy.TRAIN)
+    with _older_rule(monkeypatch):
+        receipt = connector.submit(intent, payload)
+    assert receipt.state is mc.JobState.COMPLETED
+    events = [json.loads(line) for line in _journal_of(connector).read_text().splitlines()]
+    assert events[0]["currency"] == events[-1]["currency"] == currency  # same legacy code
+    assert connector.status(receipt) == receipt
+    _assert_ow_held(family, connector, receipt, "cap_unverifiable")
+
+
+@pytest.mark.parametrize(
+    "limit, value",
+    [
+        ("maximum_steps", Decimal(64)),
+        ("maximum_seconds", float("nan")),
+        ("maximum_rows", float("inf")),
+        ("maximum_minor_units", object()),
+    ],
+    ids=["decimal", "nan", "inf", "object"],
+)
+def test_g4_a_receipt_whose_bound_cannot_be_serialized_names_no_job(
+    family: toy.Family, tmp_path: Path, limit: str, value: object
+) -> None:
+    connector = family.connector(tmp_path / "state")
+    _, intent, receipt = dispatch(family, connector, "generated-unserializable")
+    forged_intent = replace(intent, bound=replace(intent.bound, **{limit: value}))
+    assert owc.intent_digest(forged_intent) == ext.UNSERIALIZABLE_DIGEST
+    forged = replace(receipt, intent=forged_intent)
+    for call in (
+        lambda: connector.status(forged),
+        lambda: connector.hold_reason(forged),
+        lambda: connector.collect(forged),
+        lambda: connector.lookup(forged_intent),
+    ):
+        with pytest.raises(owc.ConnectorRefusal, match="^IDEMPOTENCY_CONFLICT$"):
+            call()
+    assert connector.usage(forged) is None  # an unusable receipt is unknown, never an error
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        connector.submit(forged_intent, connector.serialize_development(intent, toy.TRAIN))
+    assert connector.hold_reason(receipt) is None  # the genuine receipt is untouched

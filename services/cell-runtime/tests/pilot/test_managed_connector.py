@@ -32,9 +32,11 @@ import json
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
+from decimal import Decimal
 
 import pytest
 from opentour_cell.pilot import connector_conformance as conformance
+from opentour_cell.pilot import connector_ext as ext
 from opentour_cell.pilot import managed_connector as managed
 from opentour_cell.pilot import model_connector as mc
 from opentour_cell.pilot.connector_ext import EvidenceTier, Fenceable, UsageReporting, UsageSource
@@ -1313,8 +1315,9 @@ def test_h9_invalid_intent_currency_is_refused_before_dispatch(tmp_path, currenc
     intent = make_intent(bound=replace(BOUND, currency=currency))
     with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
         connector.submit(intent, managed.serialize_rows(ROWS))
-    with pytest.raises(ValueError, match="^fit_bound_currency_invalid$"):
-        managed.intent_digest(intent)
+    # F1-241: the digest itself applies no shape check (only submit does), so a job journaled
+    # under an older rule stays reachable; this intent was never journaled, so nothing matches it.
+    assert connector.lookup(intent) is None
     assert provider.uploaded == [] and provider.executions == 0
     assert journal_text(connector) == ""
 
@@ -1388,8 +1391,9 @@ def test_h12_hold_reason_is_none_for_failed_and_unknown_jobs(stack):
 
 # ------------------------------------ OPE-508 follow-ups: L1 exact-int bounds, journaled maxima
 # L1a an intent bound whose maximum is an ``int`` subclass is refused at dispatch
-# L1b a receipt whose bound is an ``int`` subclass is refused everywhere; it can no longer turn a
-#     genuine ``over_cap`` into ``cap_unverifiable`` (the reviewer's reproduction)
+# L1b a receipt whose bound is an ``int`` subclass names the same journaled job (F1-241: the digest
+#     applies no shape check) but can no longer turn a genuine ``over_cap`` into
+#     ``cap_unverifiable``: release reads only the journaled cap (the reviewer's reproduction)
 # L1c dispatch journals all four maxima and the currency
 # L1d release compares usage to the journaled maxima, not the caller's
 # L1e a journal without a dimension maximum (an older journal) is ``cap_unverifiable``
@@ -1414,8 +1418,8 @@ def test_l1a_int_subclass_intent_bound_is_refused_before_dispatch(stack, limit):
     )  # the precondition of the defect: JSON alone cannot tell them apart
     with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
         connector.submit(forged, managed.serialize_rows(ROWS))
-    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
-        managed.intent_digest(forged)
+    # Only submit refuses it (F1-241): the digest is the plain bound's, so it names one job.
+    assert managed.intent_digest(forged) == managed.intent_digest(intent)
     assert provider.uploaded == [] and provider.executions == 0
     assert journal_text(connector) == ""
 
@@ -1430,20 +1434,19 @@ def test_l1b_int_subclass_receipt_cannot_reclassify_a_genuine_over_cap(stack, li
     sneaky = replace(intent, bound=replace(BOUND, **{limit: SneakyInt(getattr(BOUND, limit))}))
     forged = replace(receipt, intent=sneaky)
     candidate = replace(_hand_built(receipt), intent=sneaky)
-    calls = [
-        lambda: connector.hold_reason(forged),
+    # It reaches the same journaled job and reads exactly what the genuine receipt reads.
+    assert connector.hold_reason(forged) == "over_cap"
+    assert connector.status(forged).state is mc.JobState.COMPLETED
+    assert connector.lookup(sneaky).state is mc.JobState.COMPLETED
+    assert connector.retention_disposition(forged) == "unrecorded"
+    usage = connector.usage(forged)
+    assert usage.cap_status == "over_cap" and usage.settleable is False
+    for call in (
         lambda: connector.collect(forged),
-        lambda: connector.usage(forged),
-        lambda: connector.status(forged),
-        lambda: connector.lookup(sneaky),
-        lambda: connector.cancel(forged),
-        lambda: connector.retention_disposition(forged),
-        lambda: connector.dispose_training_file(forged),
         lambda: connector.handoff_reference(candidate, "simulated:recipient-1"),
         lambda: connector.predict_for_replay(candidate, ({"input_text": "generated-x"},)),
-    ]
-    for call in calls:
-        with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+    ):
+        with pytest.raises(ValueError, match="^over_cap$"):
             call()
     assert provider.predictions == [] and provider.cancel_calls == 0
     _assert_held(provider, connector, pre, receipt, "over_cap")  # the genuine reason stands
@@ -1505,3 +1508,191 @@ def test_l1e_journaled_dimension_maximum_that_is_not_a_plain_int_is_cap_unverifi
 
     _rewrite_journal(connector, intent, corrupt)
     _assert_held(provider, connector, pre, receipt, "cap_unverifiable")
+
+
+# ---------------------------------------------- review of #241 at 7ae8613: F1-241 upgrade gap
+# Owner-delegate decision: the bound shape is validated only on submit, where a new digest is
+# journaled. The digest of an intent that is already journaled applies no shape check, so a job
+# dispatched under an older rule stays reachable for status and cancel; its release stays closed.
+# G1 the reviewer's reproduction: a RUNNING job with a legacy bound answers status, lookup,
+#    hold_reason, usage, collect, cancel and disposition, and never yields a candidate
+# G2 a COMPLETED job with a legacy bound is held (``cap_unverifiable``) and never released, even
+#    when the provider reports usage in the legacy bound's own currency
+# G3 no receipt path compares the caller's bound: the provider cap is confirmed against the
+#    journaled maximum on status and lookup (an ``int`` subclass that lies cannot pass it)
+# G4 a receipt whose bound cannot be serialized names no job: a fixed refusal, never a TypeError
+def _old_rule(bound):
+    """The rule an older build applied at dispatch: exact ``int`` maxima only, any sign or code."""
+    if any(type(getattr(bound, limit)) is not int for limit in MAXIMA):
+        raise ValueError("fit_bound_not_exact_int")
+
+
+# A negative row or money maximum never dispatched here even then (the payload check and the
+# provider cap acknowledgement refuse it), so these are the legacy bounds that reached a provider.
+LEGACY_BOUNDS = {
+    "negative-steps": replace(BOUND, maximum_steps=-1),
+    "negative-seconds": replace(BOUND, maximum_seconds=-1),
+    "lowercase-currency": replace(BOUND, currency="usd"),
+}
+
+
+def _legacy_submit(monkeypatch, connector, bound):
+    """Dispatch under the older rule, then restore the current one (the reviewer's repro)."""
+    intent = make_intent("generated-legacy", bound=bound)
+    with monkeypatch.context() as patch:
+        patch.setattr(ext, "require_exact_bound", _old_rule)
+        patch.setattr(managed, "require_exact_bound", _old_rule)
+        receipt = connector.submit(intent, managed.serialize_rows(ROWS))
+    with pytest.raises(ValueError, match="^fit_bound_(negative|currency_invalid)$"):
+        managed.require_exact_bound(bound)  # the current rule is back
+    return intent, receipt
+
+
+@pytest.mark.parametrize("bound", LEGACY_BOUNDS.values(), ids=LEGACY_BOUNDS)
+def test_g1_running_job_with_a_legacy_bound_stays_reachable(tmp_path, monkeypatch, bound):
+    provider = FakeProvider(autocomplete=False)
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent, receipt = _legacy_submit(monkeypatch, connector, bound)
+    assert receipt.state is mc.JobState.RUNNING
+    assert connector.status(receipt) == receipt
+    assert connector.lookup(intent) == receipt
+    assert connector.hold_reason(receipt) is None
+    assert connector.usage(receipt) is None
+    assert connector.retention_disposition(receipt) == "unrecorded"
+    with pytest.raises(ValueError, match="^job_not_collectable$"):
+        connector.collect(receipt)
+    canceled = connector.cancel(receipt)
+    assert canceled.state is mc.JobState.CANCELED and provider.cancel_calls == 1
+    assert connector.status(canceled).state is mc.JobState.CANCELED
+    assert connector.hold_reason(canceled) is None
+    usage = connector.usage(canceled)
+    assert usage is not None and usage.settleable is False and usage.cap_status == "cap_unknown"
+    with pytest.raises(ValueError, match="^job_not_collectable$"):
+        connector.collect(canceled)
+    assert connector.dispose_training_file(canceled) == "deleted"
+    assert provider.predictions == []
+
+
+@pytest.mark.parametrize("bound", LEGACY_BOUNDS.values(), ids=LEGACY_BOUNDS)
+def test_g2_completed_job_with_a_legacy_bound_is_held_and_never_released(
+    tmp_path, monkeypatch, bound
+):
+    provider = FakeProvider()
+    # Within every maximum the legacy bound states, in the legacy bound's own currency.
+    provider._usage = lambda: _usage_with(currency=bound.currency)
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent, receipt = _legacy_submit(monkeypatch, connector, bound)
+    assert receipt.state is mc.JobState.COMPLETED
+    assert connector.status(receipt) == receipt
+    pre = mc.Preflight(connector, conformance.standard_grants(BINDING, intent))
+    _assert_held(provider, connector, pre, receipt, "cap_unverifiable")
+    usage = connector.usage(receipt)
+    assert usage.cap_status == "cap_unknown" and usage.settleable is False
+    # A restart replays the same hold from the journal alone.
+    reopened = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    assert reopened.hold_reason(receipt) == "cap_unverifiable"
+
+
+class LyingInt(int):
+    """An ``int`` subclass that serializes like the plain int and claims to bound any figure."""
+
+    def __ge__(self, other):
+        return True
+
+    __hash__ = int.__hash__
+
+
+def _lying(intent):
+    bound = replace(intent.bound, maximum_minor_units=LyingInt(intent.bound.maximum_minor_units))
+    forged = replace(intent, bound=bound)
+    assert managed.intent_digest(forged) == managed.intent_digest(intent)  # same journaled job
+    assert 10**9 <= forged.bound.maximum_minor_units  # the lie the old status path would believe
+    return forged
+
+
+def test_g3_status_confirms_the_provider_cap_against_the_journaled_maximum(tmp_path):
+    provider = FakeProvider(autocomplete=False)
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent()
+    receipt = connector.submit(intent, managed.serialize_rows(ROWS))
+    assert receipt.state is mc.JobState.RUNNING and provider.cancel_calls == 0
+    token = connector._token(connector._key(intent))
+    provider.jobs[token] = replace(provider.jobs[token], cap_minor_units=10**9)  # cap lifted
+    stopped = connector.status(replace(receipt, intent=_lying(intent)))
+    assert provider.cancel_calls == 1 and '"cancel_requested"' in journal_text(connector)
+    assert stopped.state is mc.JobState.CANCELED
+
+
+def test_g3_lookup_confirms_the_provider_cap_against_the_journaled_maximum(tmp_path):
+    provider = FakeProvider(autocomplete=False)
+    provider.drop_create_response = True  # the job exists, but its id was never journaled
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent()
+    with pytest.raises(OSError, match="response-lost"):
+        connector.submit(intent, managed.serialize_rows(ROWS))
+    token = connector._token(connector._key(intent))
+    provider.jobs[token] = replace(provider.jobs[token], cap_minor_units=10**9)
+    found = connector.lookup(_lying(intent))
+    assert provider.cancel_calls == 1 and '"cap_verified"' not in journal_text(connector)
+    assert found.state is mc.JobState.CANCELED
+
+
+@pytest.mark.parametrize(
+    "limit, value",
+    [
+        ("maximum_steps", Decimal(100)),
+        ("maximum_seconds", float("nan")),
+        ("maximum_rows", float("inf")),
+        ("maximum_minor_units", object()),
+    ],
+    ids=["decimal", "nan", "inf", "object"],
+)
+def test_g4_a_receipt_whose_bound_cannot_be_serialized_names_no_job(stack, limit, value):
+    provider, connector, pre, intent, reservations = stack
+    receipt = dispatch(pre, intent, reservations)
+    forged_intent = replace(intent, bound=replace(BOUND, **{limit: value}))
+    assert managed.intent_digest(forged_intent) == ext.UNSERIALIZABLE_DIGEST
+    forged = replace(receipt, intent=forged_intent)
+    for call in (
+        lambda: connector.status(forged),
+        lambda: connector.cancel(forged),
+        lambda: connector.hold_reason(forged),
+        lambda: connector.usage(forged),
+        lambda: connector.retention_disposition(forged),
+        lambda: connector.dispose_training_file(forged),
+    ):
+        with pytest.raises(ValueError, match="^job_receipt_mismatched$"):
+            call()
+    with pytest.raises(ValueError, match="^job_not_collectable$"):
+        connector.collect(forged)
+    with pytest.raises(ValueError, match="^idempotency_conflict$"):
+        connector.lookup(forged_intent)
+    with pytest.raises(ValueError, match="^fit_bound_not_exact_int$"):
+        connector.submit(forged_intent, managed.serialize_rows(ROWS))
+    assert provider.cancel_calls == 0 and provider.executions == 1
+    assert connector.hold_reason(receipt) is None  # the genuine receipt is untouched
+
+
+@pytest.mark.parametrize("journaled", ["drop", None, True, 500.0, "500", -1])
+def test_g3_an_unusable_journaled_money_maximum_stops_a_running_job_on_status(
+    tmp_path, journaled
+):
+    # The provider's cap (500) is confirmed only against the journaled maximum; when that cannot
+    # bound it (missing, bool, float, string or negative), the job is stopped: fail closed.
+    provider = FakeProvider(autocomplete=False)
+    connector = managed.ManagedConnector(provider, SETTINGS, tmp_path / "state")
+    intent = make_intent()
+    receipt = connector.submit(intent, managed.serialize_rows(ROWS))
+    assert receipt.state is mc.JobState.RUNNING
+
+    def corrupt(event):
+        if event["event"] == "dispatching":
+            if journaled == "drop":
+                event.pop("maximum_minor_units")
+            else:
+                event["maximum_minor_units"] = journaled
+
+    _rewrite_journal(connector, intent, corrupt)
+    stopped = connector.status(receipt)
+    assert provider.cancel_calls == 1 and stopped.state is mc.JobState.CANCELED
+    assert connector.hold_reason(stopped) is None and connector.usage(stopped).settleable is False
