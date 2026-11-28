@@ -16,7 +16,10 @@ import json
 import os
 import subprocess
 import sys
+from collections import OrderedDict
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from opentour_cell.pilot import comparison_packet as cp
@@ -347,6 +350,8 @@ def run(
     if doc["effects"]["improvement_alert_eligible"]:
         assert doc["outcome"] == "verified_gain" and doc["alert_gates"]["cleared"] is True
         assert iv.policy_floor_status(doc["policy"]) == "satisfied"
+        # Review #242 F3: and only on the evaluator-replayed open-weight route.
+        assert iv.candidate_identity_hold(doc) is None
     # A held view (stale, revoked) carries no policy and so never meets the floor.
     if iv.policy_floor_status(doc.get("policy")) != "satisfied":
         assert not any(doc["effects"].values())
@@ -4398,3 +4403,368 @@ def test_p7_route_scope_and_tuned_comparator_rule(tmp_path):
             readback_fn=dict,
             predict_fn=ProviderDouble({}).predict,
         )
+
+
+# ------------------------------------------------- #242 review at 05349a4: F1, F2, F3 and F6
+# Cross-session review of #242 (PASS WITH FINDINGS). The F1 and F3 tests fail on 05349a4. F2
+# and F6 were test gaps in correct code: their tests pass there and kill the mutants that
+# survived the review (M22, M23 and M29 for F2; M26 for F6).
+
+# A clear win at d11.v1: 130 single-case families, 100% coverage, no missing outputs.
+D11_WIN = [("WR", 80), ("RR", 50)]
+
+
+class _SplitTerms(Mapping):
+    """Review F1 probe: ``__getitem__`` (what ``dict()``, ``as_json``, the policy digest and the
+    D11 floor read) shows one set of terms, while ``.get`` (what ``term`` and the gates read)
+    enforces another."""
+
+    def __init__(self, shown, enforced):
+        self._shown, self._enforced = shown, enforced
+
+    def __getitem__(self, key):
+        return self._shown[key]
+
+    def __iter__(self):
+        return iter(self._shown)
+
+    def __len__(self):
+        return len(self._shown)
+
+    def get(self, key, default=None):
+        return self._enforced.get(key, default)
+
+
+class _SplitDict(dict):
+    """The same split as a dict subclass: ``dict()`` copies the storage, ``.get`` lies."""
+
+    def __init__(self, shown, enforced):
+        super().__init__(shown)
+        self._enforced = enforced
+
+    def get(self, key, default=None):
+        return self._enforced.get(key, default)
+
+
+class _List(list):
+    pass
+
+
+class _NeverAbove(int):
+    """Publishes its value but compares as if nothing ever exceeds it."""
+
+    def __lt__(self, other):
+        return False
+
+    def __gt__(self, other):
+        return False
+
+
+def no_verdicts(root):
+    verdicts = root / "evaluator-custody" / "verdicts"
+    return not verdicts.exists() or list(verdicts.iterdir()) == []
+
+
+def custody_mentions(root, text):
+    custody = root / "evaluator-custody"
+    if not custody.exists():
+        return []
+    return [p for p in custody.rglob("*") if p.is_file() and text.encode() in p.read_bytes()]
+
+
+@pytest.mark.parametrize("split", [_SplitTerms, _SplitDict])
+def test_f1_review_242_terms_that_show_the_floor_one_value_are_refused(tmp_path, split):
+    """Review F1: the floor read the terms through ``__getitem__``, enforcement through ``.get``.
+
+    At 05349a4 this 31-case gain came out ``verified_gain`` with ``policy_floor: satisfied``, and
+    ``authorize(improvement_alert)`` authorized it, although its bound policy requires 100
+    verified cases. Now no verdict is issued at all.
+    """
+    shown = {**terms_for(), **D11_TERMS}
+    enforced = {**shown, "minimum_verified_cases": 0}
+    lying = d11_policy(
+        operating_point_terms=split(shown, enforced), operating_point_digest=digest(shown)
+    )
+    # What the floor and the policy digest see is an at-floor policy.
+    assert lying.as_json()["operating_point_terms"] == shown
+    assert iv.policy_floor_status(lying.as_json()) == "satisfied"
+    s = Scenario([("WR", 31)])
+    with pytest.raises(iv.VerdictInputError, match="invalid_gate_policy"):
+        run(tmp_path, s, pol=lying)
+    assert no_verdicts(tmp_path)
+    # Honest control: the same 31 cases under the terms the floor saw are held for support.
+    honest = d11_policy(operating_point_terms=shown, operating_point_digest=digest(shown))
+    held(run(tmp_path / "honest", s, pol=honest), "inconclusive", "below_minimum_verified_cases")
+
+
+@pytest.mark.parametrize(
+    "terms_of",
+    [
+        lambda t: MappingProxyType(t),
+        lambda t: OrderedDict(t),  # an honest dict subclass is refused too: fail closed
+        lambda t: {**t, "error_ceiling_bps": _NeverAbove(500)},
+        lambda t: {**t, "critical_slices": _List(t["critical_slices"])},
+        lambda t: {**t, "material_slices": tuple(t["material_slices"])},
+        lambda t: {**t, "nested": _SplitDict({"a": 1}, {"a": 2})},
+        lambda t: {**t, "nested": [{"deeper": _List([1])}]},
+    ],
+)
+def test_f1_review_242_only_an_exact_dict_of_plain_json_terms_validates(terms_of):
+    """Review F1: the check covers the terms object and every value inside it."""
+    base = {**terms_for((CRITICAL,)), **D11_TERMS}
+    ok = d11_policy(critical_slices=(CRITICAL,), operating_point_terms=base)
+    ok.validate()
+    bad = terms_of(dict(base))
+    pol = d11_policy(critical_slices=(CRITICAL,), operating_point_terms=bad)
+    with pytest.raises(iv.VerdictInputError, match="invalid_gate_policy"):
+        pol.validate()
+
+
+def test_f1_review_242_the_floor_reads_only_an_exact_dict():
+    """Review F1 at the floor itself: a Mapping view of an at-floor policy is not a pass."""
+    floor = _floor()
+    at = d11_policy(critical_slices=(CRITICAL,)).as_json()
+    assert floor.shortfalls(at) == []
+    for view in (MappingProxyType(at), OrderedDict(at), _SplitTerms(at, at)):
+        assert floor.shortfalls(view) == D11_TERM_NAMES
+        assert iv.policy_floor_status(view) == "below_registered_floor"
+    nested = [
+        "operating_point_terms.minimum_verified_cases",
+        "operating_point_terms.minimum_slice_cases",
+    ]
+    t = at["operating_point_terms"]
+    for view in (MappingProxyType(t), OrderedDict(t), _SplitTerms(t, t)):
+        assert floor.shortfalls({**at, "operating_point_terms": view}) == nested
+
+
+class _Loosening(Replay):
+    """A candidate replay that rewrites the caller's terms while it predicts."""
+
+    def __init__(self, terms, *args, **kw):
+        super().__init__(*args, **kw)
+        self.terms = terms
+
+    def predict(self, features, *, expected_artifact):
+        self.terms["minimum_verified_cases"] = 100
+        return super().predict(features, expected_artifact=expected_artifact)
+
+
+def test_f1_review_242_a_replay_cannot_rewrite_the_bound_terms_mid_evaluation(tmp_path):
+    """One view of the terms for the whole evaluation, not only at ``validate``.
+
+    The claim binds a policy that needs 1000 verified cases. A replay callback loosens the
+    caller's terms to 100 while it predicts. Reading the caller's dict, the 200-case win would
+    verify, publish the loosened terms and authorize an alert against a preregistration that
+    holds it.
+    """
+    s = Scenario(CLEAN_WIN)
+    pol = d11_policy(terms={"minimum_verified_cases": 1000})
+    bound = pol.digest()
+    loosen = _Loosening(pol.operating_point_terms, CANDIDATE, s.preds["candidate"])
+    ev = evaluator(tmp_path)
+    v = run(tmp_path, s, ev=ev, pol=pol, replays=s.replays(candidate=loosen))
+    assert loosen.calls and pol.operating_point_terms["minimum_verified_cases"] == 100
+    doc = held(v, "inconclusive", "below_minimum_verified_cases")
+    assert doc["policy"]["operating_point_terms"]["minimum_verified_cases"] == 1000
+    assert doc["policy_digest"] == bound != pol.digest()
+    assert ev.authorize(doc, effect="improvement_alert")["reason"] == "effect_not_eligible"
+
+
+def test_f2_review_242_a_plain_policy_slice_over_substituted_terms_is_refused(tmp_path):
+    """Review F2 (mutant M22): the policy's own ``critical_slices`` must be digest-shaped.
+
+    Earlier tests put the plain name in the policy and its terms, so the terms check always
+    caught it first. Here only the policy is plain; without its own check a held verdict would
+    publish the name in its ``policy`` block.
+    """
+    name = "generated-plain-critical-name"
+    substituted = terms_for((CRITICAL,))
+    pol = policy(
+        critical_slices=(name,),
+        operating_point_terms=substituted,
+        operating_point_digest=digest(substituted),
+    )
+    assert iv.operating_point_binding(substituted, digest(substituted)) is None
+    with pytest.raises(iv.VerdictInputError, match="slice_names_not_substituted") as err:
+        run(tmp_path, Scenario(CLEAN_WIN), pol=pol)
+    assert name not in str(err.value)
+    assert no_verdicts(tmp_path) and custody_mentions(tmp_path, name) == []
+
+
+def test_f2_review_242_a_plain_material_slice_is_refused_and_never_published(tmp_path):
+    """Review F2 (mutants M23, M29): ``material_slices`` are slice names too.
+
+    ``validate`` refuses a plain material entry before anything is issued, and
+    ``operating_point_binding`` refuses it on its own, so neither check rests on the other.
+    """
+    name = "generated-plain-material-name"
+    plain = {**terms_for(), "material_slices": [name]}
+    assert iv.operating_point_binding(plain, digest(plain)) == (
+        "operating_point_slice_names_not_substituted"
+    )
+    pol = policy(operating_point_terms=plain, operating_point_digest=digest(plain))
+    with pytest.raises(iv.VerdictInputError, match="slice_names_not_substituted") as err:
+        run(tmp_path, Scenario(CLEAN_WIN), pol=pol)
+    assert name not in str(err.value)
+    assert no_verdicts(tmp_path) and custody_mentions(tmp_path, name) == []
+    # Control: the same terms with the material entry substituted bind and verify.
+    material = sha("keyed-slice-digest-material-1")
+    keyed = {**terms_for(), "material_slices": [material]}
+    assert iv.operating_point_binding(keyed, digest(keyed)) is None
+    ok = run(
+        tmp_path / "ok",
+        Scenario(CLEAN_WIN),
+        pol=policy(operating_point_terms=keyed, operating_point_digest=digest(keyed)),
+    )
+    assert ok.outcome == "verified_gain"
+    assert ok.document["policy"]["operating_point_terms"]["material_slices"] == [material]
+
+
+@pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
+def test_f3_review_242_provider_and_trainer_gains_never_authorize_at_the_floor(tmp_path, route):
+    """Review F3, owner decision on OPE-528 (2026-11-28): provider and trainer routes hold.
+
+    At 05349a4 this at-floor gain authorized ``improvement_alert``. Its job and serving
+    statements are the provider's or trainer's own (``identity_kind: provider_self_claim``).
+    """
+    ev = evaluator(tmp_path)
+    v, _ = provider_run(tmp_path, Scenario(D11_WIN), route, pol=d11_policy(), ev=ev)
+    doc = v.document
+    assert v.outcome == "verified_gain" and doc["verdict"] == "reproduced"
+    assert doc["statements"]["candidate_served_evaluation"]["status"] == "readback_consistent"
+    assert doc["alert_gates"] == {
+        "cleared": True,
+        "policy_floor": "satisfied",
+        "policy_floor_hold": None,
+        "candidate_identity_hold": "candidate_identity_unauthenticated",
+    }
+    assert doc["effects"]["improvement_alert_eligible"] is False
+    for effect in ("improvement_alert", "release_request", "handoff_request"):
+        assert ev.authorize(doc, effect=effect) == {
+            "authorized": False,
+            "effect": effect,
+            "reason": "candidate_identity_unauthenticated",
+            "state": "verified_gain",
+        }
+
+
+def test_f3_review_242_only_the_open_weight_route_authorizes_a_no_fit_repair_holds(tmp_path):
+    """The decision: only the evaluator-replayed open-weight route can authorize an alert.
+
+    A simple repair claims no fit (``job_produced_candidate: not_applicable``), so it holds
+    like the provider routes. The same gain on the open-weight route authorizes.
+    """
+    ev = evaluator(tmp_path)
+    repair = run(
+        tmp_path,
+        Scenario(D11_WIN, comparators=("incumbent",)),
+        ev=ev,
+        pol=d11_policy(required_comparators=("incumbent",)),
+        manifest=None,
+        candidate_kind="simple_repair",
+        job_manifest_digest=None,
+    )
+    assert repair.outcome == "verified_gain"
+    assert repair.document["statements"]["job_produced_candidate"]["status"] == "not_applicable"
+    assert repair.document["alert_gates"]["candidate_identity_hold"] == (
+        "candidate_identity_unauthenticated"
+    )
+    assert repair.document["effects"]["improvement_alert_eligible"] is False
+    assert ev.authorize(repair.document, effect="improvement_alert")["reason"] == (
+        "candidate_identity_unauthenticated"
+    )
+    fit = run(tmp_path / "fit", Scenario(D11_WIN, prefix="fit-"), pol=d11_policy())
+    assert fit.document["alert_gates"]["candidate_identity_hold"] is None
+    assert fit.document["effects"]["improvement_alert_eligible"] is True
+    out = evaluator(tmp_path / "fit").authorize(fit.document, effect="improvement_alert")
+    assert out["authorized"] is True
+
+
+def test_f3_review_242_the_route_hold_is_recomputed_for_an_earlier_document(tmp_path, monkeypatch):
+    """``authorize`` reads the route from the stored verdict, never its stored effects.
+
+    A provider verdict issued without the hold (as 05349a4 issued it, alert eligible) is still
+    refused once the hold applies, without re-scoring.
+    """
+    ev = evaluator(tmp_path)
+    monkeypatch.setattr(iv, "candidate_identity_hold", lambda document: None)
+    v, _ = provider_run(tmp_path, Scenario(D11_WIN), "managed_provider", pol=d11_policy(), ev=ev)
+    assert v.document["effects"]["improvement_alert_eligible"] is True
+    assert ev.authorize(v.document, effect="improvement_alert")["authorized"] is True
+    monkeypatch.undo()
+    assert ev.authorize(v.document, effect="improvement_alert") == {
+        "authorized": False,
+        "effect": "improvement_alert",
+        "reason": "candidate_identity_unauthenticated",
+        "state": "verified_gain",
+    }
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        None,
+        [],
+        {},
+        {"candidate_kind": "open_weight_fit"},
+        {"candidate_kind": "open_weight_fit", "statements": None},
+        {"candidate_kind": "open_weight_fit", "statements": {"job_produced_candidate": "x"}},
+        {"candidate_kind": "managed_fit", "statements": {"job_produced_candidate": {}}},
+        {
+            "candidate_kind": "open_weight_fit",
+            "statements": {"job_produced_candidate": {"status": "failed"}},
+        },
+        {
+            "candidate_kind": "simple_repair",
+            "statements": {"job_produced_candidate": {"status": "self_consistent_manifest"}},
+        },
+        MappingProxyType(
+            {
+                "candidate_kind": "open_weight_fit",
+                "statements": {"job_produced_candidate": {"status": "self_consistent_manifest"}},
+            }
+        ),
+    ],
+)
+def test_f3_review_242_the_route_hold_fails_closed_on_malformed_input(document):
+    assert iv.candidate_identity_hold(document) == "candidate_identity_unauthenticated"
+    good = {
+        "candidate_kind": "open_weight_fit",
+        "statements": {"job_produced_candidate": {"status": "self_consistent_manifest"}},
+    }
+    assert iv.candidate_identity_hold(good) is None
+
+
+def test_f6_review_242_not_after_follows_the_policy_validity_inclusively(tmp_path, monkeypatch):
+    """Review F6 (mutant M26 survived): no test used a non-default validity.
+
+    ``not_after`` is ``issued_at`` plus the bound policy's ``verdict_validity_seconds``. The
+    verdict is valid through ``not_after`` inclusive, for ``authorize`` and for the replay path
+    alike, and expired one second later.
+    """
+    hour = 3600
+    pol = d11_policy(verdict_validity_seconds=hour)  # stricter than the floor's 7 days
+    assert iv.policy_floor_status(pol.as_json()) == "satisfied"
+    ev = evaluator(tmp_path)
+    s = Scenario(D11_WIN)
+    v = run(tmp_path, s, ev=ev, pol=pol)
+    doc = v.document
+    assert v.outcome == "verified_gain"
+    issued = doc["issued_at"]
+    assert doc["not_after"] == issued + hour
+    assert doc["policy"]["verdict_validity_seconds"] == hour
+    monkeypatch.setattr(iv.time, "time", lambda: issued + hour)  # the last valid second
+    assert ev.authorize(doc, effect="improvement_alert")["authorized"] is True
+    again = run(tmp_path, s, ev=ev, pol=pol)
+    assert again.replayed and again.document == doc
+    monkeypatch.setattr(iv.time, "time", lambda: issued + hour + 1)
+    assert ev.authorize(doc, effect="improvement_alert") == {
+        "authorized": False,
+        "effect": "improvement_alert",
+        "reason": "verdict_expired",
+        "state": "expired",
+    }
+    fresh = run(tmp_path, s, ev=ev, pol=pol)
+    assert not fresh.replayed and fresh.verdict_key == v.verdict_key
+    assert fresh.document["issued_at"] == issued + hour + 1
+    assert fresh.document["not_after"] == issued + 2 * hour + 1

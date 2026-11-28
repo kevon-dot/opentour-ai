@@ -37,7 +37,9 @@ What it verifies, as three separately reported statements:
 
 The operating point is supplied in its OPE-571 form, the frozen terms with every slice name
 already replaced by its keyed digest plus the plain SHA-256 over them, and is checked by
-``operating_point_binding`` alone. The evaluator never holds the slice key or plain slice names.
+``operating_point_binding`` alone. The terms must be exactly a ``dict`` of plain JSON values, and
+one evaluation reads only its own copy of them, so the D11 floor, the published policy and every
+gate see one value. The evaluator never holds the slice key or plain slice names.
 A policy whose slice entries are not digest-shaped is refused before anything is issued
 (``operating_point_slice_names_not_substituted``), so no verdict echoes a name it can tell is
 plain. Every verdict declares ``operating_point_digest_form`` as
@@ -166,7 +168,7 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
@@ -281,11 +283,12 @@ class PolicyFloor:
     def shortfalls(self, policy: Mapping[str, Any]) -> list[str]:
         """Every floor term the bound ``policy`` (its ``as_json`` form) fails, in a fixed order.
 
-        Fail closed: a policy or ``operating_point_terms`` that is not exactly a ``dict`` (any
-        other Mapping, a dict subclass included, could answer one reader differently from
-        another), and a term that is missing or not exactly the floor's type (``type(v) is int``, so ``True`` and int
-        subclasses fail; ``type(v) is str``, so str subclasses fail), is a shortfall, never a
-        pass. ``operating_point_terms.minimum_slice_cases`` is required whenever the policy's
+        Fail closed: a policy or ``operating_point_terms`` that is not exactly a ``dict`` fails
+        every term it would supply (any other Mapping, a dict subclass included, can answer one
+        reader differently from another: review #242 F1), and so does a term that is missing or
+        not exactly the floor's type (``type(v) is int``, so ``True`` and int subclasses fail;
+        ``type(v) is str``, so str subclasses fail). Neither is ever a pass.
+        ``operating_point_terms.minimum_slice_cases`` is required whenever the policy's
         ``critical_slices`` or the terms' ``critical_slices`` is anything but an empty list or
         tuple (a missing or wrong-typed policy ``critical_slices`` therefore requires it).
         """
@@ -422,12 +425,15 @@ def candidate_identity_hold(document: Mapping[str, Any]) -> str | None:
     provider and customer trainer candidates rest on unauthenticated provider or trainer
     statements, and a simple repair carries no job evidence, so their gains hold with
     ``candidate_identity_unauthenticated`` until a provider/trainer attestation verifier exists
-    (OPE-566/OPE-507). Fails closed on any missing or malformed field.
+    (OPE-566/OPE-507). Fails closed on any missing or malformed field, or a non-dict document.
     """
-    statements = document.get("statements") if type(document) is dict else None
+    if type(document) is not dict:
+        return "candidate_identity_unauthenticated"
+    statements = document.get("statements")
     job = statements.get("job_produced_candidate") if type(statements) is dict else None
     status = job.get("status") if type(job) is dict else None
-    if (document.get("candidate_kind"), status) == _EVALUATOR_HELD_IDENTITY:
+    kind = document.get("candidate_kind")
+    if type(kind) is str and type(status) is str and (kind, status) == _EVALUATOR_HELD_IDENTITY:
         return None
     return "candidate_identity_unauthenticated"
 
@@ -825,6 +831,7 @@ class GatePolicy:
     operating_point_digest: str
     # OPE-571 form: the frozen ``terms`` with every critical/material slice name already
     # replaced by its keyed digest. The evaluator never holds the slice key or plain names.
+    # Exactly a ``dict`` of plain JSON values, or ``validate`` refuses it (review #242 F1).
     operating_point_terms: Mapping[str, Any]
     minimum_improvement_bps: int
     alpha_bps: int
@@ -852,23 +859,27 @@ class GatePolicy:
             self.retention_seconds,
             self.verdict_validity_seconds,
         )
+        # Review #242 F1: the terms must be exactly a dict of plain JSON values, checked before
+        # anything reads them. ``as_json`` (and so the policy digest and the D11 floor) copies
+        # them with ``__getitem__`` while ``term`` and the gates use ``.get``, so any other
+        # Mapping, or a dict, list, int or str subclass anywhere inside, could show the floor one
+        # value and enforcement another.
+        plain_terms = type(self.operating_point_terms) is dict and _plain_json(
+            self.operating_point_terms
+        )
         terms: tuple[object, ...] = (
             tuple(
                 self.operating_point_terms.get(k, 0)
                 for k in ("minimum_coverage_bps", "minimum_slice_cases", "minimum_verified_cases")
             )
-            if isinstance(self.operating_point_terms, Mapping)
+            if plain_terms
             else (None,)
         )
         names = (*self.required_comparators, *self.optional_comparators)
         if (
             not _ID.fullmatch(self.policy_revision)
             or not _is_sha(self.operating_point_digest)
-            or not isinstance(self.operating_point_terms, Mapping)
-            # Exactly a dict of plain JSON values: a lying Mapping (or a dict, list or str
-            # subclass) could show ``as_json``/the D11 floor one value and ``term`` another.
-            or type(self.operating_point_terms) is not dict
-            or not _plain_json(self.operating_point_terms)
+            or not plain_terms
             or not all(type(v) is int and v >= 0 for v in ints)
             or not 0 < self.alpha_bps < 10_000
             or self.min_families < 2
@@ -1435,6 +1446,16 @@ def _plain_json(value: object, depth: int = 0) -> bool:
     if type(value) is dict:
         return all(type(k) is str and _plain_json(v, depth + 1) for k, v in value.items())
     return False
+
+
+def _evaluation_copy(policy: GatePolicy) -> GatePolicy:
+    """``policy`` with its terms deep-copied, so no caller-held reference reaches them.
+
+    Only after ``validate``: the terms are then exactly plain JSON, so the round trip is exact
+    and the copy's digest is the original's.
+    """
+    terms = json.loads(json.dumps(policy.operating_point_terms, allow_nan=False))
+    return replace(policy, operating_point_terms=terms)
 
 
 def _is_sha(value: object) -> bool:
@@ -2142,6 +2163,10 @@ class IndependentEvaluator:
         """
         claim.validate()
         policy.validate()
+        # Review #242 F1: one view of the terms for the whole evaluation. From here on only a
+        # private copy is read, so neither the caller's dict nor a replay callback holding the
+        # policy can change what is enforced or published after the policy digest is bound.
+        policy = _evaluation_copy(policy)
         if claim.candidate_kind in _TUNED_KINDS and not (
             set(_TUNED_COMPARATORS) <= set(policy.required_comparators)
             and set(_TUNED_COMPARATORS) <= set(claim.comparator_digests)
