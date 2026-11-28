@@ -136,12 +136,18 @@ bind the two, but a worker may still supply equal values, and then the flag is `
 too. Identifier-form revisions cannot reach an improvement packet, because the fallback digest
 must be 64-hex.
 
-``previous_deployed_version`` is a worker-resolved context identifier and is published verbatim.
-It must not carry the incumbent revision: a context whose ``previous_deployed_version`` equals
-the raw incumbent revision (identifier or 64-hex form, both exact ``str``) is refused with
-``previous_deployed_version_equals_incumbent_revision`` before any key lookup. Only exact
-equality is detected. A value merely derived from the incumbent (a prefix, a suffix, another
-case) is not, so the worker remains responsible for supplying a distinct deployment identifier.
+``previous_deployed_version`` is the revision deployed now, a compare-and-swap token the worker
+resolves, and is published verbatim (decision of the LOW-2 owner, cross-session review of
+1ff8bc8). It normally equals the incumbent revision, and does again after a rollback that
+restores the incumbent, so equality alone is not refused. It is refused, with
+``previous_deployed_version_equals_incumbent_revision`` and before any key lookup, only when it
+equals the raw incumbent revision (identifier or 64-hex form, both exact ``str``) AND
+``binding.fallback_digest`` does not: that is the one case in which publishing it would disclose
+a raw incumbent revision the packet does not already publish. When the fallback digest equals the
+incumbent (always on an improvement packet), the value is already in the packet and the
+refusal would protect nothing. Only exact equality is detected. A value merely derived from the
+incumbent (a prefix, a suffix, another case) is accepted, so on a hold with a distinct fallback
+the worker remains responsible for not deriving the token from the incumbent revision.
 
 Published digests that still cover raw names (recorded, not fixed here). ``comparison
 .evidence_revision`` and ``plan_revision`` are plain SHA-256 over the whole comparison and
@@ -152,14 +158,30 @@ publishes (timestamps, case ids, references, the intake revision). But a verdict
 raw comparison. The follow-up, under OPE-528, is to bind a slice-substituted evidence revision
 instead.
 
-A differential test pins what this module itself derives. It builds the same packet under two
-keys and two sets of slice names (or two incumbent revisions) and requires that no published
-leaf is equal under both keys yet different between the names, except ``comparison
-.evidence_revision`` and its ``protected_comparison`` evidence pointer (F4, above) and, for the
-incumbent on an improvement packet, ``binding.fallback_digest`` (by contract, above). It varies
-the comparison this module receives and holds ``plan_revision`` fixed, because this module copies
-that digest without being able to recompute it. A real re-plan with other names would change
-``plan_revision`` too, so the F4 limit above applies to it unchanged.
+Differential tests pin what this module itself derives. They build the same packet under several
+keys and two sets of slice names (critical, material, or material only) or two incumbent
+revisions of different lengths. After every keyed digest of a varied input is replaced by a role
+token, no published leaf (dict values under digest keys compared as multisets) may be equal
+under two keys yet differ between the inputs, and no 6-character fragment of an alphanumeric
+word may be shared by three keys yet missing under every key for the other input. The only
+exceptions are ``comparison.evidence_revision`` and its ``protected_comparison`` evidence
+pointer (F4, above) and, for the incumbent on an improvement packet, ``binding.fallback_digest``
+(by contract, above). What this proves is limited to those two criteria over these fixtures: a
+value that mixes an unkeyed input into a hash that also covers a keyed one is caught only by a
+fixture in which the unkeyed input is the only one varied (hence the material-only fixture), and
+a leak spread over fragments shorter than six characters, or split into such fragments by
+punctuation, is not caught by the fragment check. A future field is caught only if it falls
+under one of these criteria, not whatever form it takes. The tests vary the comparison this
+module receives and hold ``plan_revision`` fixed, because this module copies that digest without
+being able to recompute it. A real re-plan with other names would change ``plan_revision`` too,
+so the F4 limit above applies to it unchanged.
+
+Schema version (INFO-C, ruling of the cross-session reviewer of 1ff8bc8): no version bump now.
+The packet stays ``opentour.pilot.comparison-packet.v1`` although
+``critical_slice_names.incumbent_revision`` changed shape after #214, because nothing consumes
+v1 yet and stored packets fail closed (``verify_packet`` digest mismatch, ``restage_conflict``).
+A version bump becomes MANDATORY once the Codex-side consumers (OPE-550 and the Slack approval
+listener) bind to v1: from then on, any change to the packet shape must change ``PACKET``.
 """
 
 from __future__ import annotations
@@ -282,7 +304,7 @@ _DECIMAL = re.compile(r"[0-9]{1,40}\.[0-9]{6}")
 # this of ``incumbent_revision``, so the incumbent revision cannot be required to be a digest. The
 # arm field carries only its keyed digest (F6), but an improvement packet also publishes the
 # revision as-is in ``binding.fallback_digest`` (see the module docstring), and
-# ``previous_deployed_version`` may not equal it.
+# ``previous_deployed_version`` may equal it only when the fallback digest does too.
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _ECON_BASES = ("unavailable", "observed", "modeled", "generated")
 _UNCERTAINTY = ("wilson_95_independent_verified_cases", "unavailable")
@@ -975,10 +997,13 @@ def _preflight(comparison: Any, ctx: PacketContext, allow_generated_fixture: boo
         return "comparison_engagement_mismatch"
     incumbent = comparison["arms"].get("incumbent")
     # Both values are exact ``str`` here (``PacketContext.valid`` and ``_arm_vocab_ok``), so
-    # this is plain string equality. The published context must not carry the raw revision.
+    # this is plain string equality. The deployed revision normally IS the incumbent; it is
+    # refused only when publishing it would disclose a raw incumbent revision that the fallback
+    # digest does not already publish (module docstring).
     if (
         ctx.previous_deployed_version is not None
         and incumbent is not None
+        and ctx.fallback_digest != incumbent["revision"]
         and ctx.previous_deployed_version == incumbent["revision"]
     ):
         return "previous_deployed_version_equals_incumbent_revision"

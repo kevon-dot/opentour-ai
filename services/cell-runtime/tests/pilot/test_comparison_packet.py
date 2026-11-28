@@ -2694,14 +2694,28 @@ def test_verdict_with_a_free_text_comparator_is_refused(tmp_path):
     assert b.stage(verdict=good).status == "staged"
 
 
-# ------------- D: differential leak test (cross-session review of 5f7d830, finding MEDIUM)
+# ------------- D: differential leak tests (cross-session reviews of 5f7d830 and 1ff8bc8)
 #
-# The brute force above only tries fixed reconstruction forms. This test needs no forms. It
-# builds the same packet under two engagement keys and two inputs (slice names, or the incumbent
-# revision) and flags every published leaf (packet, event, outbox rows, and JSON stored in those
-# rows) that is EQUAL under both keys for the same input, yet CHANGES when only the input
-# changes. Such a leaf is a key-free function of the input: anyone holding a guess can recompute
-# it and confirm the guess. Whatever form a future field takes, it is flagged.
+# The brute force above only tries fixed reconstruction forms. These tests need no forms. They
+# build the same packet under several engagement keys and two inputs (slice names, or the
+# incumbent revision) and inspect every published leaf: packet, event, outbox rows, and JSON
+# stored in those rows. Two criteria, each a key-free function of the varied input:
+#
+# * Whole leaf (D1, D2). Every keyed digest of a varied input is first replaced by a role token
+#   (``normalised``), re-derived here independently of the module. A leaf then EQUAL under two
+#   keys for one input yet CHANGED when only the input changes is flagged. The tokens expose
+#   structure around keyed digests (an order driven by raw names, an unkeyed suffix on a keyed
+#   digest). Values under digest-shaped dict keys are compared as multisets, so an order that
+#   follows a keyed sort neither hides nor invents a leak.
+# * Fragment (D5). A 6-character fragment of an alphanumeric word that is the same under three
+#   keys for one input and absent under every key for the other input is flagged. It catches an
+#   unkeyed piece glued onto a keyed value of any form, without the token step.
+#
+# What this does NOT prove. A hash over a keyed input AND an unkeyed one is caught only by a
+# fixture that varies the unkeyed input alone (hence the material-only fixture). A leak spread
+# over fragments shorter than six characters, or split by punctuation into such fragments, can
+# escape D5. Only these fixtures are covered. A future field is flagged only if it falls under
+# one of the two criteria, not whatever form it takes.
 
 # F4 (module docstring): plain SHA-256 digests over the whole comparison. They do cover the raw
 # names and the raw incumbent revision, so the differential flags them. They are not a
@@ -2722,7 +2736,7 @@ LOW1_FALLBACK = frozenset({"packet/binding/fallback_digest"})
 
 
 class SaltedKeyring:
-    """TEST DOUBLE ONLY: two different keys (salts) for the SAME tenant and engagement. Derived
+    """TEST DOUBLE ONLY: different keys (salts) for the SAME tenant and engagement. Derived
     from public inputs, which a real ``SliceKeyView`` must never do (OPE-566)."""
 
     def __init__(self, salt):
@@ -2732,8 +2746,10 @@ class SaltedKeyring:
         return bytes.fromhex(digest(["generated-slice-key", self.salt, tenant, engagement]))
 
 
-K1, K2 = SaltedKeyring("k1"), SaltedKeyring("k2")
+K1, K2, K3 = SaltedKeyring("k1"), SaltedKeyring("k2"), SaltedKeyring("k3")
 OTHER_NAMES = ("john_smith", "vip")
+# Unequal length to the base incumbent ("incumbent-v1"), so a length-only leak is visible.
+OTHER_INCUMBENT_ID = "incumbent-version-2"
 
 
 def renamed(value, mapping):
@@ -2755,20 +2771,60 @@ def varied(comparison, mapping):
     return changed
 
 
+def role_tokens(comparison, key):
+    """Each keyed digest this module derives from a varied input, mapped to its role.
+
+    Re-derived here with ``hmac`` (the derivation the KAT test pins), never with the module's
+    own functions, so a mutated module cannot normalise its own leak away. A slice name's role
+    is its position in the terms, which ``varied`` keeps, so a name and its replacement share a
+    token. The incumbent revision has one role."""
+    import hmac
+
+    label = canonical([cp.SLICE_DIGEST, comparison["organization"], comparison["engagement"]])
+    scoped = hmac.digest(key, label.encode(), "sha256")
+    terms = comparison["terms"]
+    tokens = {
+        hmac.digest(scoped, name.encode(), "sha256").hex(): f"<{kind}:{i}>"
+        for kind in ("critical_slices", "material_slices")
+        for i, name in enumerate(terms.get(kind, []))
+    }
+    revision = canonical(["incumbent_revision", comparison["arms"]["incumbent"]["revision"]])
+    tokens[hmac.digest(scoped, revision.encode(), "sha256").hex()] = "<incumbent>"
+    return tokens
+
+
+def normalised(value, tokens):
+    """``value`` with every occurrence of a keyed role digest replaced by its token."""
+
+    def text(s):
+        for hexed, token in tokens.items():
+            s = s.replace(hexed, token)
+        return s
+
+    if isinstance(value, dict):
+        return {
+            text(k) if isinstance(k, str) else k: normalised(v, tokens) for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [normalised(v, tokens) for v in value]
+    return text(value) if isinstance(value, str) else value
+
+
 def published_leaves(*surfaces):
-    """Every published leaf, by path. Dict keys are leaves too (``<path>@key``); a key that is a
-    hex run is addressed by position, so a keyed digest used as a key does not hide in a path.
+    """Every published leaf, by path. Dict keys are leaves too (``<path>@key``). A key that is a
+    hex run is addressed as ``#``: every entry of such a dict shares one path, and its values
+    are compared as a multiset (``same``), so a keyed sort order cannot hide a leaf or move it.
     JSON text stored in outbox rows is parsed and walked again. A packet or event document,
     wherever it appears, is rooted at ``packet`` or ``event``, so the copy stored in a row and
-    the one returned share paths. Repeats at one path are kept in order."""
+    the one returned share paths."""
     leaves = {}
 
     def walk(value, path):
         if isinstance(value, dict):
             schema = value.get("schema_version")
             path = {cp.PACKET: "packet", cp.EVENT: "event"}.get(schema, path)
-            for i, (k, v) in enumerate(value.items()):
-                step = f"#{i}" if HEX_RUN.fullmatch(str(k)) else str(k)
+            for k, v in value.items():
+                step = "#" if HEX_RUN.fullmatch(str(k)) else str(k)
                 leaves.setdefault(f"{path}/{step}@key", []).append(k)
                 walk(v, f"{path}/{step}")
         elif isinstance(value, (list, tuple)):
@@ -2786,48 +2842,131 @@ def published_leaves(*surfaces):
     return leaves
 
 
+def same(x, y):
+    """Leaf values equal as multisets (``None`` when the path is absent)."""
+    return (x is None) == (y is None) and sorted(map(repr, x or ())) == sorted(map(repr, y or ()))
+
+
+class Build:
+    """One staged and dispatched packet under one keyring: its raw and normalised leaves."""
+
+    def __init__(self, path, comparison, keyring, root):
+        receipt = make_receipt()
+        over, verdict_over = {}, {}
+        if path == "hold-identifier-incumbent":
+            over = {"fallback_digest": digest("generated-fallback")}
+            verdict_over = {"comparator_digest": digest("generated-cmp")}
+        ctx = context(comparison, **over)
+        key = keyring.slice_key(comparison["organization"], comparison["engagement"])
+        verdict = make_verdict(comparison, receipt, ctx, slice_key=key, **verdict_over)
+        root.mkdir(parents=True)
+        store = cp.PacketOutbox(
+            root / "outbox.sqlite3",
+            slice_keys=keyring,
+            allow_generated_fixture=not path.startswith("hold"),
+        )
+        authority, sink = Authority(ctx), Sink()
+        out = store.stage(
+            comparison, receipt, verdict, authority=authority, run_ref=ctx.run_ref, now=NOW
+        )
+        assert out.status == "staged", out
+        assert store.dispatch(sink, authority, now=NOW) == [(out.event_id, "delivered")]
+        surfaces = (out.packet, list(sink.effects.values()), store.snapshot())
+        self.raw = published_leaves(*surfaces)
+        self.leaves = published_leaves(*normalised(surfaces, role_tokens(comparison, key)))
+
+
 def differential_build(path, comparison, keyring, root):
     """Stage and dispatch one packet under ``keyring``; return every published leaf."""
-    receipt = make_receipt()
-    over, verdict_over = {}, {}
-    if path == "hold-identifier-incumbent":
-        over = {"fallback_digest": digest("generated-fallback")}
-        verdict_over = {"comparator_digest": digest("generated-cmp")}
-    ctx = context(comparison, **over)
-    key = keyring.slice_key(comparison["organization"], comparison["engagement"])
-    verdict = make_verdict(comparison, receipt, ctx, slice_key=key, **verdict_over)
-    root.mkdir(parents=True)
-    store = cp.PacketOutbox(
-        root / "outbox.sqlite3", slice_keys=keyring, allow_generated_fixture=path == "improvement"
-    )
-    authority, sink = Authority(ctx), Sink()
-    out = store.stage(
-        comparison, receipt, verdict, authority=authority, run_ref=ctx.run_ref, now=NOW
-    )
-    assert out.status == "staged", out
-    assert store.dispatch(sink, authority, now=NOW) == [(out.event_id, "delivered")]
-    return published_leaves(out.packet, list(sink.effects.values()), store.snapshot())
+    return Build(path, comparison, keyring, root).raw
 
 
 def key_free_leaves(path, base, variant, root):
-    """Leaf paths equal under K1 and K2 for one input, yet different when only the input
-    varies: (a) K1+base, (b) K2+base, (c) K1+variant, (d) K2+variant."""
-    a = differential_build(path, base, K1, root / "a")
-    b = differential_build(path, base, K2, root / "b")
-    c = differential_build(path, variant, K1, root / "c")
-    d = differential_build(path, variant, K2, root / "d")
-    assert differential_build(path, base, K1, root / "a2") == a  # deterministic: no noise
+    """Normalised leaf paths equal under K1 and K2 for one input, yet different when only the
+    input varies: (a) K1+base, (b) K2+base, (c) K1+variant, (d) K2+variant."""
+    a = Build(path, base, K1, root / "a").leaves
+    b = Build(path, base, K2, root / "b").leaves
+    c = Build(path, variant, K1, root / "c").leaves
+    d = Build(path, variant, K2, root / "d").leaves
+    assert Build(path, base, K1, root / "a2").leaves == a  # deterministic: no noise
     assert a != b and c != d  # the key reaches the published surfaces
     return {
         p
         for p in set(a) | set(b) | set(c) | set(d)
-        if (a.get(p) == b.get(p) and a.get(p) != c.get(p))
-        or (c.get(p) == d.get(p) and c.get(p) != a.get(p))
+        if (same(a.get(p), b.get(p)) and not same(a.get(p), c.get(p)))
+        or (same(c.get(p), d.get(p)) and not same(c.get(p), a.get(p)))
     }
 
 
+WORD = re.compile(r"[A-Za-z0-9]+")
+FRAGMENT = 6
+
+
+def fragments(values, allowed):
+    """Every 6-character window of every alphanumeric word in the string leaves, except words
+    in ``allowed``. Splitting at punctuation keeps a keyed digest's random characters from
+    joining fixed text into chance fragments."""
+    found = set()
+    for value in values or ():
+        if isinstance(value, str):
+            for word in WORD.findall(value):
+                if word not in allowed:
+                    found.update(word[i : i + FRAGMENT] for i in range(len(word) - FRAGMENT + 1))
+    return found
+
+
+def key_free_fragments(path, base, variant, root, allowed=frozenset()):
+    """Raw leaf paths with a fragment shared by K1, K2 and K3 for one input and absent under
+    all three keys for the other input, with the fragments found. No token step: this works
+    on what is published, whatever form a keyed value takes."""
+    builds = {
+        (side, k.salt): Build(path, comparison, k, root / f"{side}-{k.salt}").raw
+        for side, comparison in (("base", base), ("variant", variant))
+        for k in (K1, K2, K3)
+    }
+    sides = {s: [v for (side, _), v in builds.items() if side == s] for s in ("base", "variant")}
+    flagged = {}
+    for this, other in (("base", "variant"), ("variant", "base")):
+        for p in set().union(*sides[this]):
+            shared = set.intersection(
+                *(fragments(leaves.get(p), allowed) for leaves in sides[this])
+            )
+            hits = shared - set().union(
+                *(fragments(leaves.get(p), allowed) for leaves in sides[other])
+            )
+            if hits:
+                flagged.setdefault(p, set()).update(hits)
+    return flagged
+
+
+def named_material_only_run(root):
+    """A real run whose terms name material slices only: no slice name reaches any keyed
+    published field except through the operating-point digest."""
+    dev, protected = rows("dev"), rows("protected")
+    for r in dev + protected:
+        r["slices"] = list(SLICE_NAMES)
+    comparison = compare(
+        root,
+        development=dev,
+        protected=protected,
+        terms={**STRICT, "material_slices": list(SLICE_NAMES)},
+        allowed_slices=list(SLICE_NAMES),
+    )[0]
+    assert comparison["decision"]["disposition"] == "recommend", comparison["decision"]
+    assert all(arm["critical_slices"] == {} for arm in comparison["arms"].values())
+    return comparison
+
+
+NAME_RUNS = {
+    "improvement": named_slice_run,
+    "hold": named_hold,
+    "material": named_material_run,  # one critical and one material name
+    "material-only": named_material_only_run,
+}
+
+
 def names_variation(path, root):
-    comparison = named_slice_run(root) if path == "improvement" else named_hold(root)
+    comparison = NAME_RUNS[path](root)
     return comparison, varied(comparison, dict(zip(SLICE_NAMES, OTHER_NAMES, strict=True)))
 
 
@@ -2836,14 +2975,20 @@ def incumbent_variation(path, root):
         comparison = named_slice_run(root)
         return comparison, varied(comparison, {digest("incumbent"): digest("incumbent-2")})
     comparison = named_hold(root, incumbent=INCUMBENT_ID)
-    return comparison, varied(comparison, {INCUMBENT_ID: "incumbent-v2"})
+    return comparison, varied(comparison, {INCUMBENT_ID: OTHER_INCUMBENT_ID})
 
 
-@pytest.mark.parametrize("path", ["improvement", "hold"])
+def build_path(path):
+    """The staging path a variation fixture runs on (material runs are improvements)."""
+    return "improvement" if path.startswith("material") else path
+
+
+@pytest.mark.parametrize("path", sorted(NAME_RUNS))
 def test_no_published_leaf_is_a_key_free_function_of_the_slice_names(tmp_path, path):
-    """D1: varying the slice names alone flags exactly the two F4 leaves, nothing else."""
+    """D1: varying the slice names alone (critical, mixed, or material only) flags exactly the
+    two F4 leaves, nothing else, after keyed digests are normalised to role tokens."""
     base, variant = names_variation(path, tmp_path)
-    assert key_free_leaves(path, base, variant, tmp_path / "d") == F4_UNGUESSABLE
+    assert key_free_leaves(build_path(path), base, variant, tmp_path / "d") == F4_UNGUESSABLE
 
 
 @pytest.mark.parametrize(
@@ -2855,8 +3000,12 @@ def test_no_published_leaf_is_a_key_free_function_of_the_slice_names(tmp_path, p
 )
 def test_no_published_leaf_is_a_key_free_function_of_the_incumbent(tmp_path, path, expected):
     """D2: varying the incumbent revision alone flags the F4 leaves and, on an improvement
-    packet only, the contract fallback digest (LOW-1). The keyed arm revision is not flagged."""
+    packet only, the contract fallback digest (LOW-1). The keyed arm revision is not flagged.
+    The identifier-form variants differ in length, so a published length would be flagged
+    (the 64-hex form cannot differ in length)."""
     base, variant = incumbent_variation(path, tmp_path)
+    old, new = (c["arms"]["incumbent"]["revision"] for c in (base, variant))
+    assert (len(old) != len(new)) is (path != "improvement")
     assert key_free_leaves(path, base, variant, tmp_path / "d") == expected
 
 
@@ -2880,8 +3029,7 @@ def test_differential_flags_planted_key_free_digests(tmp_path, monkeypatch):
         patch.setattr(cp, "_mac", unkeyed_slices)
         flagged = key_free_leaves("improvement", names_base, names_variant, tmp_path / "dn")
     assert {
-        "packet/arms/simple/critical_slices/#0@key",
-        "packet/arms/simple/critical_slices/#1@key",
+        "packet/arms/simple/critical_slices/#@key",
         "packet/comparison/operating_point_digest",
     } <= flagged, flagged
     with monkeypatch.context() as patch:
@@ -2890,6 +3038,61 @@ def test_differential_flags_planted_key_free_digests(tmp_path, monkeypatch):
             "hold-identifier-incumbent", inc_base, inc_variant, tmp_path / "di"
         )
     assert "packet/arms/incumbent/revision" in flagged, flagged
+
+
+def _sha8(text):
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()[:8]
+
+
+def test_differential_flags_structure_around_keyed_digests(tmp_path, monkeypatch):
+    """D3 positive controls for the LOW-A gaps (cross-session review of 1ff8bc8): leaks that
+    keep the key in the leaf, so no whole leaf is key-free, are still flagged after the token
+    step. (1) keyed digests listed in the order of the raw names; (2) a keyed digest with an
+    unkeyed name-hash suffix; (3) an unkeyed name hash inside the status under a keyed-sorted
+    dict; (4) the incumbent revision's length."""
+    real_aggregate, real_mac = cp._arm_aggregate, cp._mac
+
+    def ordered(name, arm, slice_key):
+        out = real_aggregate(name, arm, slice_key)
+        return {**out, "x_order": [real_mac(n, slice_key) for n in sorted(arm["critical_slices"])]}
+
+    def suffixed(name, scoped):
+        return real_mac(name, scoped) + ("" if name.startswith("[") else _sha8(name))
+
+    def status_hash(name, arm, slice_key):
+        out = real_aggregate(name, arm, slice_key)
+        slices = {
+            real_mac(k, slice_key): v["status"] + _sha8(k)
+            for k, v in arm["critical_slices"].items()
+        }
+        return {**out, "critical_slices": dict(sorted(slices.items()))}
+
+    def with_length(name, arm, slice_key):
+        out = real_aggregate(name, arm, slice_key)
+        return {**out, "x_length": len(arm["revision"])} if name == "incumbent" else out
+
+    slices = "packet/arms/simple/critical_slices/"
+    cases = [
+        ("names", "_arm_aggregate", ordered, lambda p: p == "packet/arms/simple/x_order/0"),
+        # The token step leaves "<critical_slices:0>" + the unkeyed suffix as the dict key.
+        ("names", "_mac", suffixed, lambda p: p.startswith(slices + "<critical_slices:0>")),
+        ("names", "_arm_aggregate", status_hash, lambda p: p == slices + "<critical_slices:0>"),
+        ("incumbent", "_arm_aggregate", with_length, lambda p: p.endswith("incumbent/x_length")),
+    ]
+    for i, (kind, attr, fake, expected) in enumerate(cases):
+        root = tmp_path / str(i)
+        root.mkdir(mode=0o700)
+        if kind == "names":
+            path, (base, variant) = "improvement", names_variation("improvement", root)
+        else:
+            path = "hold-identifier-incumbent"
+            base, variant = incumbent_variation(path, root)
+        with monkeypatch.context() as patch:
+            patch.setattr(cp, attr, fake)
+            flagged = key_free_leaves(path, base, variant, root / "d")
+        assert any(expected(p) for p in flagged), (i, attr, sorted(flagged))
 
 
 def test_f4_leaves_also_change_with_unpublished_entropy_inputs(tmp_path):
@@ -2907,6 +3110,81 @@ def test_f4_leaves_also_change_with_unpublished_entropy_inputs(tmp_path):
         leaves = differential_build("improvement", variant, K1, tmp_path / field)
         for leaf in F4_UNGUESSABLE:
             assert leaves[leaf] != reference[leaf], (field, leaf)
+
+
+@pytest.mark.parametrize("path", ["improvement", "hold"])
+def test_evidence_pointer_is_the_evidence_revision(tmp_path, path):
+    """INFO-D: the two F4 leaves are one value. The ``protected_comparison`` pointer is
+    ``comparison.evidence_revision`` itself, which is the comparison's own seal."""
+    comparison, b = path_bundle(path, tmp_path)
+    out = b.stage()
+    assert out.status == "staged", out
+    pointer = out.packet["evidence_pointers"][0]
+    assert pointer == {"kind": "protected_comparison", "digest": comparison["evidence_revision"]}
+    assert out.packet["comparison"]["evidence_revision"] == pointer["digest"]
+
+
+def _f4_values(*comparisons):
+    return frozenset(c["evidence_revision"] for c in comparisons)
+
+
+@pytest.mark.parametrize(
+    "variation, path",
+    [
+        ("names", "improvement"),
+        ("names", "hold"),
+        ("names", "material-only"),
+        ("incumbent", "hold-identifier-incumbent"),
+        ("incumbent", "improvement"),
+    ],
+)
+def test_no_published_fragment_is_a_key_free_function_of_the_input(tmp_path, variation, path):
+    """D5 (LOW-A): no 6-character fragment of a published word is shared by three keys yet
+    missing under the other input. The only exceptions are the F4 value itself and, for the
+    incumbent on an improvement packet, the contract fallback digest (LOW-1), both excluded as
+    whole words. Without that exclusion the same scan flags the F4 leaves, which shows it reads
+    them (wiring control), and every fragment it flags then is a window of an excluded value
+    (here the F4 leaves, the stored packet row that carries them, and the fallback digest)."""
+    if variation == "names":
+        base, variant = names_variation(path, tmp_path)
+    else:
+        base, variant = incumbent_variation(path, tmp_path)
+    allowed = _f4_values(base, variant)
+    if variation == "incumbent" and path == "improvement":
+        allowed |= {c["arms"]["incumbent"]["revision"] for c in (base, variant)}
+    run = build_path(path)
+    assert key_free_fragments(run, base, variant, tmp_path / "f", allowed) == {}
+    unfiltered = key_free_fragments(run, base, variant, tmp_path / "u")
+    assert F4_UNGUESSABLE <= set(unfiltered), sorted(unfiltered)
+    windows = fragments(sorted(allowed), frozenset())
+    assert set().union(*unfiltered.values()) <= windows, sorted(unfiltered)
+
+
+def test_fragment_scan_flags_unkeyed_pieces_glued_to_keyed_digests(tmp_path, monkeypatch):
+    """D5 positive control: an unkeyed name hash glued to a keyed slice digest, and an unkeyed
+    incumbent hash glued to the keyed arm revision, are flagged at the fields that carry them,
+    with the fragment that leaks."""
+    real_mac, real_revision_mac = cp._mac, cp._revision_mac
+    (tmp_path / "n").mkdir(mode=0o700)
+    (tmp_path / "i").mkdir(mode=0o700)
+    names_base, names_variant = names_variation("improvement", tmp_path / "n")
+    inc_base, inc_variant = incumbent_variation("hold-identifier-incumbent", tmp_path / "i")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            cp,
+            "_mac",
+            lambda n, s: real_mac(n, s) + ("" if n.startswith("[") else _sha8(n)),
+        )
+        flagged = key_free_fragments(
+            "improvement", names_base, names_variant, tmp_path / "fn", _f4_values(names_base)
+        )
+    assert _sha8(SLICE_NAMES[0])[:FRAGMENT] in flagged["packet/arms/simple/critical_slices/#@key"]
+    with monkeypatch.context() as patch:
+        patch.setattr(cp, "_revision_mac", lambda r, s: real_revision_mac(r, s) + _sha8(r))
+        flagged = key_free_fragments(
+            "hold-identifier-incumbent", inc_base, inc_variant, tmp_path / "fi", _f4_values()
+        )
+    assert _sha8(INCUMBENT_ID)[:FRAGMENT] in flagged["packet/arms/incumbent/revision"]
 
 
 # --------------------------- LOW-1: the incumbent is linkable through ``fallback_digest``
@@ -2941,7 +3219,9 @@ def test_hold_with_a_distinct_fallback_says_the_incumbent_is_not_linked_by_it(tm
     assert out.packet["binding"]["fallback_digest"] != comparison["arms"]["incumbent"]["revision"]
 
 
-# ------------------ LOW-2: ``previous_deployed_version`` may not carry the incumbent revision
+# ------- LOW-2 (narrowed, LOW-B): ``previous_deployed_version`` is the deployed revision. It may
+# equal the incumbent revision, and is refused only when the fallback digest does not already
+# publish that revision.
 
 _PDV_REFUSAL = "previous_deployed_version_equals_incumbent_revision"
 
@@ -2956,12 +3236,17 @@ class _AlwaysUnequal(str):
 
 
 _INCUMBENT = object()  # "use the comparison's own raw incumbent revision"
+# Paths whose fallback digest is NOT the incumbent revision (where the refusal can fire), and
+# paths whose fallback digest IS the incumbent revision (already published).
+UNPUBLISHED = ["hold", "hold-identifier-incumbent"]
+PUBLISHED = ["improvement", "hold-fallback-is-incumbent"]
 
 
-def _pdv_bundle(path, tmp_path, previous):
-    comparison, b = path_bundle(path, tmp_path)
+def _pdv_bundle(path, tmp_path, previous, **over):
+    comparison, b = path_bundle("hold" if path == "hold-fallback-is-incumbent" else path, tmp_path)
+    incumbent = comparison["arms"]["incumbent"]["revision"]
     if previous is _INCUMBENT:
-        previous = comparison["arms"]["incumbent"]["revision"]
+        previous = incumbent
     seen = []
 
     class Spy:
@@ -2969,8 +3254,10 @@ def _pdv_bundle(path, tmp_path, previous):
             seen.append(engagement)
             return KEYS.slice_key(tenant, engagement)
 
-    over = {"fallback_digest": digest("generated-fallback")} if path.startswith("hold") else {}
+    if path in UNPUBLISHED:
+        over.setdefault("fallback_digest", digest("generated-fallback"))
     b.ctx = context(comparison, previous_deployed_version=previous, **over)
+    assert (b.ctx.fallback_digest == incumbent) is (path in PUBLISHED), path
     b.authority = Authority(b.ctx)
     b.store = cp.PacketOutbox(
         tmp_path / "spy.sqlite3",
@@ -2980,25 +3267,79 @@ def _pdv_bundle(path, tmp_path, previous):
     return comparison, b, seen
 
 
-@pytest.mark.parametrize("path", ["improvement", "hold-identifier-incumbent"])
-def test_previous_deployed_version_equal_to_the_incumbent_is_refused(tmp_path, path):
-    """LOW-2 adverse: the raw incumbent revision, 64-hex (improvement) or identifier form
-    ("incumbent-v1", the reviewer's probe value), refuses with its own code, before any key
-    lookup, on stage, assemble and replay, with nothing stored and the value not echoed."""
+def _replay_kw(comparison, path):
+    return {"slice_key": key_for(comparison), "allow_generated_fixture": path == "improvement"}
+
+
+@pytest.mark.parametrize("path", UNPUBLISHED)
+def test_previous_deployed_version_equal_to_an_unpublished_incumbent_is_refused(tmp_path, path):
+    """LOW-2 adverse (the one remaining refusal): on a hold whose fallback digest is NOT the
+    incumbent, a previous version equal to the raw incumbent revision, 64-hex ("hold") or
+    identifier form ("incumbent-v1", the reviewer's probe value), refuses with its own code,
+    before any key lookup, on stage, assemble and replay, with nothing stored and the value not
+    echoed."""
     comparison, b, seen = _pdv_bundle(path, tmp_path, _INCUMBENT)
     incumbent = comparison["arms"]["incumbent"]["revision"]
-    assert b.ctx.previous_deployed_version == incumbent
-    assert (incumbent == INCUMBENT_ID) is (path != "improvement")
+    assert b.ctx.previous_deployed_version == incumbent != b.ctx.fallback_digest
+    assert (incumbent == INCUMBENT_ID) is (path == "hold-identifier-incumbent")
     out = b.stage()
     assert out.status == "refused" and out.reason == _PDV_REFUSAL, out
     assert seen == [] and empty(b.store) and b.dispatch() == []
     assert not _leaks(out, incumbent)
-    kw = {"slice_key": key_for(comparison), "allow_generated_fixture": path == "improvement"}
+    kw = _replay_kw(comparison, path)
     assert cp.assemble_packet(comparison, b.receipt, b.verdict, b.ctx, **kw) == (None, _PDV_REFUSAL)
     assert not cp.verify_packet({}, comparison, b.receipt, b.verdict, b.ctx, **kw)
 
 
-@pytest.mark.parametrize("path", ["improvement", "hold-identifier-incumbent"])
+@pytest.mark.parametrize("path", PUBLISHED)
+def test_previous_deployed_version_equal_to_an_already_published_incumbent_stages(tmp_path, path):
+    """LOW-2 positive (LOW-B): the deployed revision normally IS the incumbent. When the
+    fallback digest already publishes it (always on an improvement packet, and on a hold using
+    the incumbent as fallback), it is accepted on stage, assemble and replay, and published
+    as-is."""
+    comparison, b, seen = _pdv_bundle(path, tmp_path, _INCUMBENT)
+    incumbent = comparison["arms"]["incumbent"]["revision"]
+    out = b.stage()
+    assert out.status == "staged", out
+    binding = out.packet["binding"]
+    assert binding["previous_deployed_version"] == binding["fallback_digest"] == incumbent
+    assert len(seen) == 1 and b.dispatch() == [(out.event_id, "delivered")]
+    kw = _replay_kw(comparison, path)
+    assert cp.assemble_packet(comparison, b.receipt, b.verdict, b.ctx, **kw) == (out.packet, None)
+    assert cp.verify_packet(out.packet, comparison, b.receipt, b.verdict, b.ctx, **kw)
+
+
+@pytest.mark.parametrize("path", PUBLISHED)
+def test_rollback_restoring_the_incumbent_is_accepted(tmp_path, path):
+    """LOW-2 positive (LOW-B): successive proposals of one run, in one store, while the
+    deployment moves from the incumbent to another revision and is rolled back to the
+    incumbent. Every proposal stages and replays, and the rollback proposal publishes the
+    incumbent as its previous version."""
+    comparison, b, _seen = _pdv_bundle(path, tmp_path, _INCUMBENT)
+    incumbent = comparison["arms"]["incumbent"]["revision"]
+    deployed = [
+        ("generated-proposal-v1", incumbent),
+        ("generated-proposal-v2", digest("generated-other-deployment")),
+        ("generated-proposal-v3", incumbent),  # rolled back to the incumbent
+    ]
+    staged = []
+    for version, previous in deployed:
+        b.ctx = context(comparison, proposal_version=version, previous_deployed_version=previous)
+        b.authority = Authority(b.ctx)
+        out = b.stage()
+        assert out.status == "staged", (version, out)
+        assert out.packet["binding"]["previous_deployed_version"] == previous
+        kw = _replay_kw(comparison, path)
+        assert cp.verify_packet(out.packet, comparison, b.receipt, b.verdict, b.ctx, **kw)
+        staged.append(out)
+    assert len({o.event_id for o in staged}) == 3
+    assert all(
+        b.store.packet_status("pkt-" + o.packet["packet_digest"][:32]) == "current" for o in staged
+    )
+    assert len(b.dispatch()) == 3
+
+
+@pytest.mark.parametrize("path", PUBLISHED + UNPUBLISHED)
 @pytest.mark.parametrize("previous", [None, "generated-deployed-v0"])
 def test_previous_deployed_version_distinct_from_the_incumbent_still_stages(
     tmp_path, path, previous
@@ -3007,6 +3348,33 @@ def test_previous_deployed_version_distinct_from_the_incumbent_still_stages(
     _, b, seen = _pdv_bundle(path, tmp_path, previous)
     out = b.stage()
     assert out.status == "staged", out
+    assert out.packet["binding"]["previous_deployed_version"] == previous and len(seen) == 1
+
+
+DERIVED = {
+    "upper": str.upper,
+    "prefix-8": lambda r: r[:8],
+    "prefix": lambda r: r[:-1],
+    "suffix": lambda r: r[1:],
+}
+
+
+@pytest.mark.parametrize("form", sorted(DERIVED))
+@pytest.mark.parametrize("path", UNPUBLISHED)
+def test_previous_deployed_version_derived_from_the_incumbent_is_accepted(tmp_path, path, form):
+    """NIT-E: only exact equality is refused, as the module docstring says. Another case, a
+    prefix or a suffix of the raw incumbent revision stages, even where the refusal is active,
+    and is published as-is."""
+    comparison, b, seen = _pdv_bundle(path, tmp_path, None)
+    incumbent = comparison["arms"]["incumbent"]["revision"]
+    previous = DERIVED[form](incumbent)
+    assert previous != incumbent
+    b.ctx = context(
+        comparison, previous_deployed_version=previous, fallback_digest=b.ctx.fallback_digest
+    )
+    b.authority = Authority(b.ctx)
+    out = b.stage()
+    assert out.status == "staged", (form, out)
     assert out.packet["binding"]["previous_deployed_version"] == previous and len(seen) == 1
 
 
