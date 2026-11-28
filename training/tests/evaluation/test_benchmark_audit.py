@@ -543,3 +543,158 @@ def test_single_label_error_within_registered_tolerance_is_recorded_not_invalid(
     assert beyond["verdict"] == V.INVALID.value
     assert "label_error_exceeds_tolerance" in codes(beyond)
     assert sizes
+
+
+# ---- Adjudicator independence: each recorded condition is load-bearing ----
+
+
+def adjudicator_only(**changes: Any) -> tuple[Any, ...]:
+    """Every protected family verified by the blinded adjudicator alone; r01 takes ``changes``."""
+    return tuple(
+        replace(
+            r,
+            independent_source=None,
+            independent_label_digest=None,
+            **(changes if r.family_id == "generated-r01" else {}),
+        )
+        for r in baseline_records()
+    )
+
+
+def test_blinded_distinct_adjudicator_alone_verifies_every_family() -> None:
+    receipt = run(adjudicator_only())
+    assert receipt["verdict"] == V.EVALUATION_ALLOWED.value
+    assert receipt["denominator_flow"]["verified"] == 12
+
+
+def test_adjudicator_who_saw_predictions_does_not_verify_the_family() -> None:
+    receipt = run(adjudicator_only(adjudicator_saw_predictions=True))
+    assert receipt["denominator_flow"]["verified"] == 11
+    assert receipt["denominator_flow"]["unverified"] == 1
+    every = tuple(replace(r, adjudicator_saw_predictions=True) for r in adjudicator_only())
+    assert run(every)["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+    assert "no_verified_families" in codes(run(every))
+
+
+def test_adjudicator_who_is_the_first_labeler_does_not_verify_the_family() -> None:
+    receipt = run(adjudicator_only(adjudicator_id="generated-labeler-a"))
+    assert receipt["denominator_flow"]["verified"] == 11
+    assert receipt["denominator_flow"]["unverified"] == 1
+    every = tuple(replace(r, adjudicator_id=r.first_labeler_id) for r in adjudicator_only())
+    assert run(every)["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+
+
+@pytest.mark.parametrize(
+    ("changes", "counter"),
+    [
+        ({"adjudicator_saw_predictions": True}, "recorded_blind_to_predictions"),
+        ({"adjudicator_saw_first_label": True}, "recorded_blind_to_first_label"),
+        ({"adjudicator_id": "generated-labeler-a"}, "distinct_from_first_labeler"),
+    ],
+)
+def test_receipt_states_blinding_only_when_recorded_conditions_show_it(
+    changes: dict[str, Any], counter: str
+) -> None:
+    baseline = run()["audit_selection"]
+    assert baseline["adjudicator_independence"] == "blinded_to_first_label_and_predictions"
+    assert baseline["adjudicator_independence_recorded"][counter] == 12
+    # r01 is still verified by the independent record, so the verdict need not move; the
+    # receipt must nonetheless stop claiming that every adjudication was blinded.
+    records = tuple(
+        replace(r, **changes) if r.family_id == "generated-r01" else r for r in baseline_records()
+    )
+    selection = run(records)["audit_selection"]
+    assert selection["adjudicator_independence"] == "independence_not_shown_for_every_adjudication"
+    assert selection["adjudicator_independence_recorded"][counter] == 11
+    assert selection["adjudicator_independence_recorded"]["adjudicated"] == 12
+
+
+def test_receipt_states_no_adjudication_when_only_independent_records_verify() -> None:
+    records = tuple(
+        replace(r, adjudicator_id=None, adjudicator_label_digest=None) for r in baseline_records()
+    )
+    receipt = run(records)
+    assert receipt["verdict"] == V.EVALUATION_ALLOWED.value
+    assert receipt["audit_selection"]["adjudicator_independence"] == "no_adjudication_recorded"
+
+
+# ---- Caller-asserted fields cannot lift a hold ----
+
+
+def test_caller_asserted_exposure_cannot_launder_a_disputed_or_unresolved_family() -> None:
+    wrong = commit("generated-r04", "generated-wrong-action")
+    overturned = tuple(
+        replace(r, final_label_digest=wrong, adjudicator_label_digest=wrong)
+        if r.family_id == "generated-r04"
+        else r
+        for r in baseline_records()
+    )
+    retired = run(overturned, exposed_families=frozenset({"generated-r04"}))
+    assert retired["verdict"] == V.INVALID.value
+    assert "label_overturned_by_independent_record" in codes(retired)
+    assert retired["label_audit"]["label_quality_gate"]["overturned"] == 1
+    unresolved = tuple(
+        replace(
+            r,
+            adjudicator_id=None,
+            adjudicator_label_digest=None,
+            independent_source=None,
+            independent_label_digest=None,
+            unresolved=True,
+        )
+        if r.family_id in {"generated-r07", "generated-r08"}
+        else r
+        for r in baseline_records()
+    )
+    hidden = run(unresolved, exposed_families=frozenset({"generated-r07", "generated-r08"}))
+    assert hidden["verdict"] == V.INSUFFICIENT_EVIDENCE.value
+    assert "unresolved_ambiguity" in codes(hidden)
+
+
+def test_caller_asserted_upstream_verification_cannot_lift_a_held_verdict() -> None:
+    small, sizes = real_sample_records(20, 20)
+    overrides = {
+        "population_kind": PopulationKind.REAL_SAMPLE,
+        "evidence_origin": "observed",
+        "sampling_design": SamplingDesign.STRATIFIED_RANDOM,
+        "sample_sizes": sizes,
+    }
+    held = {
+        "imprecise": run(
+            small,
+            prereg_overrides=overrides,
+            candidate_snapshot=OBSERVED_SNAPSHOT,
+            upstream_snapshot_verified=True,
+        ),
+        "no_snapshot": real(candidate_snapshot=None, upstream_snapshot_verified=True),
+        "unlogged": real(unlogged_disclosures=1, upstream_snapshot_verified=True),
+    }
+    for name, receipt in held.items():
+        assert receipt["verdict"] != V.EVALUATION_ALLOWED.value, name
+        assert receipt["claims"]["customer_accuracy_alert_permitted"] is False, name
+        assert receipt["claims"]["overall_accuracy_claim"] == "not_established", name
+        assert receipt["upstream"]["verification"] == "caller_asserted_by_consumer", name
+
+
+def test_receipt_labels_caller_asserted_fields_and_the_claims_resting_on_them() -> None:
+    provenance = run()["provenance"]
+    assert provenance == {
+        "exposed_families": "caller_asserted",
+        "unlogged_disclosures": "caller_asserted",
+        "exposure_log_covers_protected_families": True,
+        "upstream_snapshot_verified": "caller_asserted",
+        "evidence_origin": "caller_asserted",
+        "adjudicator_blinding_flags": "caller_asserted",
+        "adjudicator_distinct_from_first_labeler": "worker_compared_supplied_ids",
+    }
+    assert run()["claims"]["caller_asserted_dependencies"] == []
+    eligible = real()["claims"]
+    assert eligible["overall_accuracy_claim"] == "eligible_pending_upstream_receipt"
+    assert eligible["caller_asserted_dependencies"] == ["exposed_families", "unlogged_disclosures"]
+    alert = real(upstream_snapshot_verified=True)["claims"]
+    assert alert["caller_asserted_dependencies"] == [
+        "evidence_origin",
+        "exposed_families",
+        "unlogged_disclosures",
+        "upstream_snapshot_verified",
+    ]

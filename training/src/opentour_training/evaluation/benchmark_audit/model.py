@@ -162,6 +162,28 @@ class CandidateSnapshotBinding:
 
 
 @dataclass(frozen=True)
+class ReleaseEntry:
+    """One cell the exposure guard actually released, as the guard recorded it."""
+
+    cell: frozenset[str]
+    protected_role: bool  # the request's roles included selector or evaluator
+    authorized_by: str | None = None
+
+
+@dataclass(frozen=True)
+class ExposureRecord:
+    """The exposure guard's own release history, from which the audit re-derives exposure.
+
+    The audit replays this history instead of trusting a caller's list of exposed families or a
+    caller's count of unlogged disclosures. It is unsigned: it proves only that the replayed
+    history implies the exposure the receipt reports.
+    """
+
+    universe: frozenset[str]
+    releases: tuple[ReleaseEntry, ...]
+
+
+@dataclass(frozen=True)
 class AuditInputs:
     prereg: PreRegistration
     records: tuple[FamilyRecord, ...]
@@ -171,10 +193,14 @@ class AuditInputs:
     consumed_features: tuple[str, ...] = ()
     preprocessing: PreprocessingRecord | None = None
     selection_log: tuple[SelectionUse, ...] = ()
+    # Caller-asserted. The audit can only add to them from ``exposure_record``; a caller's empty
+    # set or zero never overrides exposure that the guard's release history implies.
     exposed_families: frozenset[str] = frozenset()
     unlogged_disclosures: int = 0
+    exposure_record: ExposureRecord | None = None
     candidate_snapshot: CandidateSnapshotBinding | None = None
-    # Contract-test hook for the future OPE-416 consumer. Never true from local evidence.
+    # Caller-asserted contract-test hook for the future OPE-416 consumer; the worker cannot
+    # verify it and the receipt labels it so. Never true from local evidence.
     upstream_snapshot_verified: bool = False
     superseded_by: str | None = None
     successor_of: str | None = None

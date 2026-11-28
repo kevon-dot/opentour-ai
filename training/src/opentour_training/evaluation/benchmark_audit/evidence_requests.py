@@ -36,6 +36,9 @@ NEXT_EVIDENCE: dict[str, str] = {
         "Register the disclosure, retire the exposed families and seal a successor "
         "protected manifest."
     ),
+    "exposure_log_scope_mismatch": (
+        "Supply the exposure guard's release history for every protected family in this audit."
+    ),
     "duplicate_family_id": (
         "Resolve duplicate family identifiers and reconcile the denominator flow."
     ),

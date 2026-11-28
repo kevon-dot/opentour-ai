@@ -20,6 +20,7 @@ from opentour_training.evaluation.benchmark_audit.exposure import (
     QueryRequest,
     Surface,
     isolated_families,
+    replay_exposure,
     successor_protected_manifest,
 )
 from opentour_training.evaluation.benchmark_audit.ledger import (
@@ -27,7 +28,11 @@ from opentour_training.evaluation.benchmark_audit.ledger import (
     DependentEffect,
     LedgerError,
 )
-from opentour_training.evaluation.benchmark_audit.model import Verdict
+from opentour_training.evaluation.benchmark_audit.model import (
+    ExposureRecord,
+    ReleaseEntry,
+    Verdict,
+)
 
 UNIVERSE = frozenset(f"generated-f{i:02d}" for i in range(1, 7))
 DISAGREE = "generated-f03"
@@ -259,3 +264,175 @@ def test_late_consumed_effect_and_disclosure_after_supersession_are_reconciled()
     ledger.log_disclosure("d1", old["receipt_id"], ["generated-f03"])
     assert ledger.reconciliation[old["receipt_id"]] == ["disclosure:generated-f03", "e-late"]
     assert AuditLedger.replay(ledger.events).state_digest() == ledger.state_digest()
+
+
+# ---- Fail-open fix: any selector or evaluator role, judged by the cell released ----
+
+SELECTOR = frozenset({"selector"})
+EVALUATOR = frozenset({"evaluator"})
+READER = frozenset({"reader"})
+PROTECTED_ROLE_SETS = {
+    "selector_only": SELECTOR,
+    "evaluator_only": EVALUATOR,
+    "selector_with_reader": frozenset({"selector", "reader"}),
+    "dual": DUAL,
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROTECTED_ROLE_SETS))
+def test_any_selector_or_evaluator_role_is_denied_single_family_and_complement_cells(
+    name: str,
+) -> None:
+    roles = PROTECTED_ROLE_SETS[name]
+    g = guard()
+    computed: list[object] = []
+    decision, value = g.release(
+        request("one", {DISAGREE}, roles=roles), lambda cell: computed.append(cell) or "answer"
+    )
+    assert not decision.allowed and value is None and computed == []
+    assert decision.reason == "suppressed_answer_revealing_arm_disagreement"
+    single = g.evaluate(request("other", {"generated-f01"}, roles=roles))
+    assert not single.allowed and single.reason == "suppressed_single_family_isolation"
+    complement = g.evaluate(request("comp", set(UNIVERSE - {DISAGREE}), roles=roles))
+    assert not complement.allowed
+    assert [e.decision for e in g.log] == ["suppressed"] * 3
+    assert g.record().releases == () and replay_exposure(g.record()) == (frozenset(), 0)
+
+
+@pytest.mark.parametrize("roles", [SELECTOR, EVALUATOR], ids=["selector", "evaluator"])
+def test_differencing_query_pair_is_suppressed_for_a_single_protected_role(
+    roles: frozenset[str],
+) -> None:
+    g = guard()
+    wide = g.evaluate(request("wide", {"generated-f01", "generated-f02", DISAGREE}, roles=roles))
+    narrow = g.evaluate(request("narrow", {"generated-f01", "generated-f02"}, roles=roles))
+    assert wide.allowed and not narrow.allowed
+    assert narrow.reason == "suppressed_answer_revealing_arm_disagreement"
+    assert replay_exposure(g.record()) == (frozenset(), 0)
+
+
+def test_differencing_pair_already_released_elsewhere_is_still_suppressed_for_a_selector() -> None:
+    """The pair isolates the family before the selector asks; each cell still reveals it."""
+    g = guard()
+    wide = {"generated-f01", "generated-f02", DISAGREE}
+    narrow = {"generated-f01", "generated-f02"}
+    assert g.evaluate(request("r-wide", wide, roles=READER)).allowed
+    assert g.evaluate(request("r-narrow", narrow, roles=READER)).allowed
+    assert DISAGREE in isolated_families([frozenset(wide), frozenset(narrow)], UNIVERSE)
+    for query_id, cell in (("s-narrow", narrow), ("s-wide", wide)):
+        decision = g.evaluate(request(query_id, cell, roles=SELECTOR))
+        assert not decision.allowed, query_id
+        assert decision.reason == "suppressed_answer_revealing_arm_disagreement"
+
+
+def test_repeat_release_of_an_already_isolated_cell_is_suppressed_or_logged() -> None:
+    g = guard()
+    first = g.authorize_disclosure(request("auth-1", {DISAGREE}), "generated-owner")
+    assert first.allowed and g.exposed_families == {DISAGREE}
+    for query_id, roles in (("again-dual", DUAL), ("again-selector", SELECTOR)):
+        repeat = g.evaluate(request(query_id, {DISAGREE}, roles=roles))
+        assert not repeat.allowed, query_id
+        assert repeat.reason == "suppressed_answer_revealing_arm_disagreement"
+    again = g.authorize_disclosure(request("auth-2", {DISAGREE}), "generated-owner")
+    assert again.isolated_digest == first.isolated_digest  # the repeat is recorded as exposure
+    assert [e.decision for e in g.log] == [
+        "authorized_disclosure",
+        "suppressed",
+        "suppressed",
+        "authorized_disclosure",
+    ]
+    assert replay_exposure(g.record()) == (frozenset({DISAGREE}), 0)
+
+
+def test_cell_isolated_by_an_unprotected_release_is_still_suppressed_for_a_selector() -> None:
+    g = guard()
+    reader = g.evaluate(request("reader", {"generated-f01"}, roles=READER))
+    assert reader.allowed and reader.reason == "released_isolating_cell_to_unprotected_role"
+    assert reader.isolated_digest is not None
+    assert g.log[-1].reason == "released_isolating_cell_to_unprotected_role"
+    for roles in (SELECTOR, DUAL):
+        repeat = g.evaluate(request("again", {"generated-f01"}, roles=roles))
+        assert not repeat.allowed and repeat.reason == "suppressed_single_family_isolation"
+        # The complement is a different cell that isolates the same family on its own.
+        complement = g.evaluate(request("comp", set(UNIVERSE - {"generated-f01"}), roles=roles))
+        assert not complement.allowed
+    assert [e.protected_role for e in g.record().releases] == [False]
+
+
+def test_malformed_cell_is_denied_for_every_role_and_never_enters_the_history() -> None:
+    g = guard()
+    for roles in (READER, SELECTOR):
+        for query_id, cell in (("unknown", {"generated-unknown"}), ("empty", set())):
+            decision = g.evaluate(request(query_id, cell, roles=roles))
+            assert not decision.allowed and decision.reason == "suppressed_malformed_cell"
+    assert g.record().releases == ()
+
+
+def test_protected_roles_still_receive_cells_that_reveal_no_family() -> None:
+    g = guard()
+    ab, bc = {"generated-f01", "generated-f02"}, {"generated-f02", DISAGREE}
+    for query_id, cell in (("ab", ab), ("bc", bc), ("ab-again", ab), ("total", set(UNIVERSE))):
+        decision = g.evaluate(request(query_id, cell, roles=SELECTOR))
+        assert decision.allowed and decision.reason == "released", query_id
+    assert [e.protected_role for e in g.record().releases] == [True] * 4
+    assert replay_exposure(g.record()) == (frozenset(), 0)
+    h = guard()
+    assert h.authorize_disclosure(request("auth", {"generated-f05"}), "generated-owner").allowed
+    wider = h.evaluate(request("wider", {"generated-f05", "generated-f04", "generated-f06"}))
+    assert wider.allowed  # f05 is isolated without this cell; the cell reveals nothing new
+    assert replay_exposure(h.record()) == (frozenset({"generated-f05"}), 0)
+
+
+# ---- Caller-asserted exposure fields cannot override the guard's own history ----
+
+BASELINE_PROTECTED = frozenset(r.family_id for r in baseline_records() if r.split == "protected")
+
+
+def test_caller_asserting_no_exposure_cannot_override_the_release_history() -> None:
+    g = ExposureGuard(BASELINE_PROTECTED, frozenset())
+    g.authorize_disclosure(request("auth", {"generated-c01"}), "generated-owner")
+    asserted = audit(inputs_for(baseline_records(), exposed_families=frozenset()))
+    assert asserted["verdict"] == Verdict.EVALUATION_ALLOWED.value
+    assert asserted["provenance"]["exposed_families"] == "caller_asserted"
+    derived = audit(
+        inputs_for(
+            baseline_records(),
+            exposed_families=frozenset(),
+            unlogged_disclosures=0,
+            exposure_record=g.record(),
+        )
+    )
+    assert derived["verdict"] == Verdict.CLAIM_LIMITED.value
+    assert derived["coverage"]["critical"]["label"] == "3/4"
+    assert derived["excluded_reasons"] == ["exposed_answer_key_retired"]
+    assert derived["provenance"]["exposed_families"] == "worker_derived_from_exposure_log"
+
+
+def test_caller_asserting_zero_unlogged_disclosures_cannot_override_the_release_history() -> None:
+    # The history the pre-fix guard produced: a selector-only release of a single-family cell.
+    failopen = ExposureRecord(
+        BASELINE_PROTECTED, (ReleaseEntry(frozenset({"generated-r02"}), True, None),)
+    )
+    assert replay_exposure(failopen) == (frozenset({"generated-r02"}), 1)
+    receipt = audit(
+        inputs_for(baseline_records(), unlogged_disclosures=0, exposure_record=failopen)
+    )
+    assert receipt["verdict"] == Verdict.INVALID.value
+    assert "unlogged_case_level_disclosure" in {r["code"] for r in receipt["reasons"]}
+    assert receipt["denominator_flow"]["excluded"] == 1
+    assert receipt["claims"]["broad_improvement_alert_permitted"] is False
+    clean = ExposureGuard(BASELINE_PROTECTED, frozenset())
+    assert not clean.evaluate(request("s", {"generated-r02"}, roles=SELECTOR)).allowed
+    assert clean.evaluate(request("ok", {"generated-r01", "generated-r02"}, roles=SELECTOR)).allowed
+    allowed = audit(inputs_for(baseline_records(), exposure_record=clean.record()))
+    assert allowed["verdict"] == Verdict.EVALUATION_ALLOWED.value
+    assert allowed["provenance"]["unlogged_disclosures"] == "worker_derived_from_exposure_log"
+
+
+def test_exposure_log_that_does_not_cover_every_protected_family_holds() -> None:
+    partial = ExposureGuard(BASELINE_PROTECTED - {"generated-c04"}, frozenset())
+    receipt = audit(inputs_for(baseline_records(), exposure_record=partial.record()))
+    assert receipt["verdict"] == Verdict.INSUFFICIENT_EVIDENCE.value
+    assert [r["code"] for r in receipt["reasons"]] == ["exposure_log_scope_mismatch"]
+    assert receipt["provenance"]["exposure_log_covers_protected_families"] is False
+    assert receipt["next_evidence_request"]

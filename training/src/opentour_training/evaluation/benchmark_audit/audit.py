@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from opentour_training.evaluation.benchmark_audit.evidence_requests import NEXT_EVIDENCE
+from opentour_training.evaluation.benchmark_audit.exposure import replay_exposure
 from opentour_training.evaluation.benchmark_audit.inference import (
     design_weighted_error,
     families_needed_for_ceiling,
@@ -81,7 +82,7 @@ def _verifier(r: FamilyRecord) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _classify(inputs: AuditInputs) -> list[_Row]:
+def _classify(inputs: AuditInputs, exposed: frozenset[str]) -> list[_Row]:
     prereg = inputs.prereg
     rows: list[_Row] = []
     for r in inputs.records:
@@ -90,7 +91,7 @@ def _classify(inputs: AuditInputs) -> list[_Row]:
         excluded = (
             r.excluded_reason is not None
             or r.decided_day > prereg.temporal_cutoff_day
-            or r.family_id in inputs.exposed_families
+            or r.family_id in exposed
         )
         kind, label = _verifier(r)
         if excluded:
@@ -139,6 +140,57 @@ def _overlaps(records: Sequence[FamilyRecord]) -> tuple[dict[str, int], int]:
     return found, unknown
 
 
+@dataclass(frozen=True)
+class _Exposure:
+    families: frozenset[str]
+    unlogged: int
+    basis: str
+    scope_ok: bool
+
+
+def _exposure(inputs: AuditInputs) -> _Exposure:
+    """Exposure the worker derives from the guard's release history, plus caller additions.
+
+    A caller's list or count can only add to what the replayed history implies. Without a
+    history, exposure is caller-asserted and the receipt says so.
+    """
+    record = inputs.exposure_record
+    if record is None:
+        return _Exposure(
+            inputs.exposed_families, inputs.unlogged_disclosures, "caller_asserted", True
+        )
+    derived, unlogged = replay_exposure(record)
+    protected = {r.family_id for r in inputs.records if r.split == "protected"}
+    return _Exposure(
+        inputs.exposed_families | derived,
+        max(inputs.unlogged_disclosures, unlogged),
+        "worker_derived_from_exposure_log",
+        protected <= record.universe,
+    )
+
+
+def _independence(rows: Sequence[_Row]) -> tuple[str, dict[str, int]]:
+    """State blinding only when every recorded adjudication meets the independence conditions."""
+    adjudicated = [r.record for r in rows if r.record.adjudicator_id]
+    counts = {
+        "adjudicated": len(adjudicated),
+        "distinct_from_first_labeler": sum(
+            1 for r in adjudicated if r.adjudicator_id != r.first_labeler_id
+        ),
+        "recorded_blind_to_first_label": sum(
+            1 for r in adjudicated if not r.adjudicator_saw_first_label
+        ),
+        "recorded_blind_to_predictions": sum(
+            1 for r in adjudicated if not r.adjudicator_saw_predictions
+        ),
+    }
+    if not adjudicated:
+        return "no_adjudication_recorded", counts
+    if all(v == len(adjudicated) for v in counts.values()):
+        return "blinded_to_first_label_and_predictions", counts
+    return "independence_not_shown_for_every_adjudication", counts
+
+
 def _preregistration_gaps(inputs: AuditInputs) -> list[str]:
     p = inputs.prereg
     texts = (
@@ -161,10 +213,17 @@ def _preregistration_gaps(inputs: AuditInputs) -> list[str]:
 def audit(inputs: AuditInputs) -> dict[str, Any]:
     """Return the audit receipt. ``verdict`` is one of the six registered verdict strings."""
     p = inputs.prereg
-    rows = _classify(inputs)
+    exposure = _exposure(inputs)
+    exposed = exposure.families
+    rows = _classify(inputs, exposed)
     by_status: dict[str, list[_Row]] = defaultdict(list)
     for row in rows:
         by_status[row.status].append(row)
+    # Label-quality gates read every protected family, exposure-retired or not: retiring a
+    # family must not launder its disputed label or its unresolved ambiguity.
+    gate_rows = _classify(inputs, frozenset())
+    gate_verified = [r for r in gate_rows if r.status == "verified"]
+    gate_unresolved = sum(1 for r in gate_rows if r.status == "unresolved")
     verified = by_status["verified"]
     mature = verified + by_status["unresolved"] + by_status["unverified"]
     invalid: list[Reason] = []
@@ -202,8 +261,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         invalid.append(Reason("preprocessing_fit_on_protected", pre.revision))
     elif pre is not None and pre.applied_to_protected_revision != pre.revision:
         invalid.append(Reason("preprocessing_not_verified", pre.revision))
-    if inputs.unlogged_disclosures > 0:
-        invalid.append(Reason("unlogged_case_level_disclosure", str(inputs.unlogged_disclosures)))
+    if exposure.unlogged > 0:
+        invalid.append(Reason("unlogged_case_level_disclosure", str(exposure.unlogged)))
     if p.sampling_design is SamplingDesign.STRATIFIED_RANDOM:
         frame = [(r.record.family_id, r.record.stratum) for r in rows]
         expected = draw_audit_sample(frame, p.sample_sizes, p.sampling_seed)
@@ -223,6 +282,12 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         if r.verifier == "independent_record"
         and r.record.adjudicator_label_digest == r.record.final_label_digest
     ]  # fmt: skip
+    gate_overturned = [
+        r for r in gate_verified
+        if r.mismatch and r.verifier == "independent_record"
+        and r.record.adjudicator_label_digest == r.record.final_label_digest
+    ]  # fmt: skip
+    gate_units, gate_errors = _units(gate_verified)
 
     # ---- Staleness: version binding ----
     current = replace(
@@ -239,12 +304,12 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     # Verifier agreement is judged against the frozen label manifest. After a post-freeze
     # relabel the old verifications no longer speak to the new labels: the receipt is stale.
     if "label_manifest" not in changed:
-        if overturned:
+        if gate_overturned:
             invalid.append(
-                Reason("label_overturned_by_independent_record", f"{len(overturned)} families")
+                Reason("label_overturned_by_independent_record", f"{len(gate_overturned)} families")
             )
-        elif verified_n and unit_errors / unit_n > p.tolerable_label_error:
-            invalid.append(Reason("label_error_exceeds_tolerance", f"{unit_errors}/{unit_n}"))
+        elif gate_units and gate_errors / gate_units > p.tolerable_label_error:
+            invalid.append(Reason("label_error_exceeds_tolerance", f"{gate_errors}/{gate_units}"))
 
     # ---- Coverage, unresolved and precision ----
     # A retired (exposed) critical family still counts against coverage: retiring it must not
@@ -252,8 +317,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     mature_critical = [
         r
         for r in rows
-        if r.record.stratum == "critical"
-        and (r in mature or r.record.family_id in inputs.exposed_families)
+        if r.record.stratum == "critical" and (r in mature or r.record.family_id in exposed)
     ]
     verified_critical = [r for r in verified if r.record.stratum == "critical"]
     routine_verified = [r for r in verified if r.record.stratum == "routine"]
@@ -270,6 +334,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     upper_all = upper_error(e_all, n_all, p.alpha)
     upper_critical = upper_error(e_critical, n_critical, p.alpha)
     unresolved_n = len(by_status["unresolved"])
+    if not exposure.scope_ok:
+        insufficient.append(Reason("exposure_log_scope_mismatch", "protected family not covered"))
     correction_only = bool(verified) and (
         p.sampling_design is SamplingDesign.CORRECTION_ONLY
         or all(r.record.outcome_kind == "correction" for r in verified)
@@ -279,8 +345,8 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
     if p.sampling_design is not SamplingDesign.POLICY_ONLY:
         if not verified:
             insufficient.append(Reason("no_verified_families", "empty audit or no verifier"))
-        if unresolved_n > p.max_unresolved:
-            insufficient.append(Reason("unresolved_ambiguity", f"{unresolved_n} unresolved"))
+        if gate_unresolved > p.max_unresolved:
+            insufficient.append(Reason("unresolved_ambiguity", f"{gate_unresolved} unresolved"))
         if pre is None:
             insufficient.append(Reason("preprocessing_revision_missing", "none persisted"))
         snap = inputs.candidate_snapshot
@@ -330,6 +396,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         else None
     )
     matches = sum(1 for r in verified if not r.mismatch)
+    independence, independence_counts = _independence(rows)
     alert_ok = (
         verdict is Verdict.EVALUATION_ALLOWED
         and real
@@ -337,6 +404,16 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         and precision_ok
         and inputs.upstream_snapshot_verified
     )
+    eligible = verdict is Verdict.EVALUATION_ALLOWED and real and precision_ok
+    # Caller assertions a permitted claim currently rests on; the worker cannot verify these.
+    dependencies: set[str] = set()
+    if eligible or alert_ok:
+        if exposure.basis == "caller_asserted":
+            dependencies.update({"exposed_families", "unlogged_disclosures"})
+        if any(r.verifier == "blinded_adjudicator" for r in verified):
+            dependencies.add("adjudicator_blinding_flags")
+    if alert_ok:
+        dependencies.update({"evidence_origin", "upstream_snapshot_verified"})
     receipt: dict[str, Any] = {
         "schema_version": RECEIPT_SCHEMA,
         "verdict": verdict.value,
@@ -366,6 +443,13 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
             ),
             "tolerable_label_error": p.tolerable_label_error,
             "disagreement_rule": p.disagreement_rule,
+            "label_quality_gate": {
+                "basis": "all_protected_families_including_exposure_retired",
+                "overturned": len(gate_overturned),
+                "errors": gate_errors,
+                "families": gate_units,
+                "unresolved": gate_unresolved,
+            },
         },
         "coverage": {
             "routine": {
@@ -385,7 +469,7 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
         "contamination": {
             "cross_split_overlaps": overlaps,
             "unknown_links_recorded": unknown_links,
-            "exposed_families_retired": len(inputs.exposed_families),
+            "exposed_families_retired": len(exposed),
         },
         "fixture_agreement": {"matches": matches, "verified": verified_n},
         "inference_to_future_cases": {
@@ -413,21 +497,21 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
                 else "permitted_if_precision_met"
             ),
             "overall_accuracy_claim": (
-                "eligible_pending_upstream_receipt"
-                if verdict is Verdict.EVALUATION_ALLOWED and real and precision_ok
-                else "not_established"
+                "eligible_pending_upstream_receipt" if eligible else "not_established"
             ),
             "overall_accuracy_alerts_emitted": 0,
             "broad_improvement_alerts_emitted": 0,
             "customer_accuracy_alert_permitted": alert_ok,
             "broad_improvement_alert_permitted": alert_ok,
+            "caller_asserted_dependencies": sorted(dependencies),
         },
         "audit_selection": {
             "frame_digest": canonical_digest(sorted(r.record.family_id for r in rows)),
             "seed": p.sampling_seed,
             "design": p.sampling_design.value,
             "sample_sizes": [list(s) for s in p.sample_sizes],
-            "adjudicator_independence": "blinded_to_first_label_and_predictions",
+            "adjudicator_independence": independence,
+            "adjudicator_independence_recorded": independence_counts,
             "time_cutoff_day": p.temporal_cutoff_day,
             "scoring_version": p.scorer_version,
         },
@@ -436,16 +520,25 @@ def audit(inputs: AuditInputs) -> dict[str, Any]:
             if inputs.candidate_snapshot
             else None,
             "verification": (
-                "supplied_by_consumer"
+                "caller_asserted_by_consumer"
                 if inputs.upstream_snapshot_verified
                 else "unverified_dependency_ope_416"
             ),
+        },
+        "provenance": {
+            "exposed_families": exposure.basis,
+            "unlogged_disclosures": exposure.basis,
+            "exposure_log_covers_protected_families": exposure.scope_ok,
+            "upstream_snapshot_verified": "caller_asserted",
+            "evidence_origin": "caller_asserted",
+            "adjudicator_blinding_flags": "caller_asserted",
+            "adjudicator_distinct_from_first_labeler": "worker_compared_supplied_ids",
         },
         "superseded_by": inputs.superseded_by,
         "successor_of": inputs.successor_of,
         "excluded_reasons": sorted(
             {
-                _exclusion_reason(r.record, p.temporal_cutoff_day, inputs.exposed_families)
+                _exclusion_reason(r.record, p.temporal_cutoff_day, exposed)
                 for r in by_status["excluded"]
             }
         ),

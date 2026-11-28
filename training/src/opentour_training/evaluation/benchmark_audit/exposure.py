@@ -1,19 +1,32 @@
 """Protected-answer exposure controls for charts, text, exports, tooltips and filters.
 
-Every release path (private Slack and worker UI alike) goes through one guard. A dual-role
-evaluator/selector must not receive a cell, or a complementary/differencing combination of
-cells, that isolates one protected family. Suppression and authorized disclosure are both
-logged; earlier as-of manifests are never mutated.
+Every release path (private Slack and worker UI alike) goes through one guard. Any request whose
+roles include selector or evaluator must not receive a cell, or a complementary/differencing
+combination of cells, that isolates one protected family, unless the release is a logged,
+authorized disclosure that retires the affected families. Whether a release is
+answer-revealing depends on the cell released, not on whether a family is newly isolated: a
+repeat release of an already-isolated cell is suppressed or logged like the first one.
+Suppression and authorized disclosure are both logged; earlier as-of manifests are never
+mutated.
+
+Adversary model: released cell counts are pooled knowledge shared by every viewer, and answers
+combine linearly. Per-viewer knowledge and bounds on 0/1 answers are not modelled.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from fractions import Fraction
 
-from opentour_training.evaluation.benchmark_audit.model import canonical_digest
+from opentour_training.evaluation.benchmark_audit.model import (
+    ExposureRecord,
+    ReleaseEntry,
+    canonical_digest,
+)
+
+PROTECTED_ROLES = frozenset({"evaluator", "selector"})
 
 
 class Surface(StrEnum):
@@ -105,6 +118,45 @@ def isolated_families(released: list[frozenset[str]], universe: frozenset[str]) 
     return frozenset(found)
 
 
+def revealed_families(
+    prior: Sequence[frozenset[str]], cell: frozenset[str], universe: frozenset[str]
+) -> frozenset[str]:
+    """Families that releasing ``cell`` lets a viewer pin down, judged by the cell itself.
+
+    Earlier copies of ``cell`` are set aside first, so a repeat release is not masked by its own
+    earlier release. The result is every family whose isolation needs this cell's count
+    (complementary, nested and non-nested differencing) plus every family the cell isolates on
+    its own with the universe total. A malformed cell is treated as revealing everything.
+    """
+    if not cell or not cell <= universe:
+        return universe
+    others = [c for c in prior if c != cell]
+    with_cell = isolated_families([*others, cell], universe)
+    alone = isolated_families([cell], universe)
+    return (with_cell - isolated_families(others, universe)) | alone
+
+
+def replay_exposure(record: ExposureRecord) -> tuple[frozenset[str], int]:
+    """Re-derive exposed families and unlogged disclosures from a guard's release history.
+
+    An authorized release exposes what it revealed. A release to a selector or evaluator that
+    revealed a family without authorization is an unlogged case-level disclosure, and its
+    families are exposed too.
+    """
+    released: list[frozenset[str]] = []
+    exposed: set[str] = set()
+    unlogged = 0
+    for entry in record.releases:
+        revealed = revealed_families(released, entry.cell, record.universe)
+        if entry.authorized_by:
+            exposed.update(revealed)
+        elif entry.protected_role and revealed:
+            unlogged += 1
+            exposed.update(revealed)
+        released.append(entry.cell)
+    return frozenset(exposed), unlogged
+
+
 class ExposureGuard:
     """Single release gate shared by every surface and channel."""
 
@@ -112,6 +164,7 @@ class ExposureGuard:
         self._universe = universe
         self._arm_disagreements = arm_disagreements
         self._released: list[frozenset[str]] = []
+        self._history: list[ReleaseEntry] = []
         self._log: list[LogEntry] = []
         self._exposed: set[str] = set()
 
@@ -122,6 +175,10 @@ class ExposureGuard:
     @property
     def exposed_families(self) -> frozenset[str]:
         return frozenset(self._exposed)
+
+    def record(self) -> ExposureRecord:
+        """The release history the audit replays to derive exposure itself."""
+        return ExposureRecord(self._universe, tuple(self._history))
 
     def _record(self, request: QueryRequest, decision: str, reason: str, by: str | None) -> int:
         index = len(self._log)
@@ -139,36 +196,47 @@ class ExposureGuard:
         )
         return index
 
-    def _would_isolate(self, request: QueryRequest) -> frozenset[str]:
-        if not request.cell <= self._universe or not request.cell:
-            return self._universe  # malformed cell: treat as maximally revealing
-        return isolated_families(self._released + [request.cell], self._universe)
+    def _revealed(self, request: QueryRequest) -> frozenset[str]:
+        return revealed_families(self._released, request.cell, self._universe)
+
+    def _append(self, request: QueryRequest, by: str | None) -> None:
+        self._released.append(request.cell)
+        protected = bool(request.roles & PROTECTED_ROLES)
+        self._history.append(ReleaseEntry(request.cell, protected, by))
 
     def evaluate(self, request: QueryRequest) -> QueryDecision:
-        dual = {"evaluator", "selector"} <= request.roles
-        isolated = self._would_isolate(request) if dual else frozenset()
-        newly = isolated - isolated_families(self._released, self._universe)
-        if dual and newly:
-            reason = (
-                "suppressed_answer_revealing_arm_disagreement"
-                if newly & self._arm_disagreements
-                else "suppressed_single_family_isolation"
-            )
-            digest = canonical_digest(sorted(newly))
+        protected = bool(request.roles & PROTECTED_ROLES)
+        revealed = self._revealed(request)
+        malformed = not request.cell or not request.cell <= self._universe
+        if malformed or (protected and revealed):
+            if malformed:
+                reason = "suppressed_malformed_cell"
+            elif revealed & self._arm_disagreements:
+                reason = "suppressed_answer_revealing_arm_disagreement"
+            else:
+                reason = "suppressed_single_family_isolation"
+            digest = canonical_digest(sorted(revealed))
             index = self._record(request, "suppressed", reason, None)
             return QueryDecision(False, reason, digest, index)
-        self._released.append(request.cell)
+        self._append(request, None)
+        if revealed:
+            # Neither selector nor evaluator: released, and the isolating release is logged.
+            reason = "released_isolating_cell_to_unprotected_role"
+            index = self._record(request, "released", reason, None)
+            return QueryDecision(True, reason, canonical_digest(sorted(revealed)), index)
         return QueryDecision(True, "released", None, self._record(request, "released", "ok", None))
 
     def authorize_disclosure(self, request: QueryRequest, authorized_by: str) -> QueryDecision:
         """Release an isolating cell with a logged authorization; affected families retire."""
         if not authorized_by.strip():
             raise ValueError("authorization requires a named authorizer")
-        newly = self._would_isolate(request) - isolated_families(self._released, self._universe)
-        self._released.append(request.cell)
-        self._exposed.update(newly)
+        revealed = self._revealed(request)
+        self._append(request, authorized_by)
+        self._exposed.update(revealed)
         index = self._record(request, "authorized_disclosure", "authorized", authorized_by)
-        return QueryDecision(True, "authorized_disclosure", canonical_digest(sorted(newly)), index)
+        return QueryDecision(
+            True, "authorized_disclosure", canonical_digest(sorted(revealed)), index
+        )
 
     def release(
         self, request: QueryRequest, compute: Callable[[frozenset[str]], object]
