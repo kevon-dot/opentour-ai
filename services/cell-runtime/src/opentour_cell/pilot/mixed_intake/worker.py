@@ -266,21 +266,33 @@ def ensure_admission_indexes(store: IntakeStore) -> None:
 
 RECEIPT = "ope505_receipt"
 SUBMIT = "ope505_submit"
+OUTCOME = "ope505_submit_outcome"
 RECEIPT_REFUSED = "ope505_receipt_refused"
-# Holds that judge the run itself; a receipt refused for one of these is never adopted.
+# Holds that judge a run's lineage; a receipt refused for one of these is never adopted.
 LINEAGE_HOLDS = frozenset(
     {
         "DRAFT_SUPERSEDED",
         "OPE505_RUN_BOUND_TO_OTHER_DRAFT",
         "OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT",
         "OPE505_LINEAGE_MISMATCH",
+        "OPE505_LINEAGE_UNKNOWN",
     }
 )
+# A superseded draft's own receipt may still stand as its successor's OPE-505 parent; a receipt
+# refused for any other lineage reason may not.
+BLOCKING_HOLDS = LINEAGE_HOLDS - {"DRAFT_SUPERSEDED"}
+UNVERIFIABLE = "unverifiable"
+MAX_CHAIN = 64
 
 
 def idempotency_key(draft_key: str) -> str:
     """The only OPE-505 idempotency key this worker ever derives for `draft_key`."""
     return "mixed-intake-" + draft_key[:48]
+
+
+def parent_matches(lineage: object, expected: str | None) -> bool:
+    """OPE-505's own parent run, captured at submit, is exactly the expected parent."""
+    return type(lineage) is dict and lineage.get("parent_run") == expected
 
 
 def _admitted_rows(db: sqlite3.Connection) -> list[Json]:
@@ -297,12 +309,24 @@ def _journal(db: sqlite3.Connection, kind: str, draft_key: str) -> list[Json]:
     return [json.loads(row["payload"]) for row in rows]
 
 
+def _last(db: sqlite3.Connection, kind: str, draft_key: str) -> Json | None:
+    rows = _journal(db, kind, draft_key)
+    return rows[-1] if rows else None
+
+
 def _admitted_on(db: sqlite3.Connection, draft_key: str) -> Json | None:
     row = db.execute(
         "SELECT payload FROM ledger WHERE kind=? AND json_extract(payload, '$.draft_key')=?",
         (ADMITTED, draft_key),
     ).fetchone()
     return None if row is None else dict(json.loads(row["payload"]))
+
+
+def _superseded(db: sqlite3.Connection, draft_key: str) -> bool:
+    row = db.execute(
+        "SELECT 1 FROM drafts WHERE supersedes=? AND draft_key!=? LIMIT 1", (draft_key, draft_key)
+    ).fetchone()
+    return row is not None
 
 
 def _chain(db: sqlite3.Connection, draft_key: str) -> list[str]:
@@ -325,38 +349,36 @@ def _ancestors(db: sqlite3.Connection, draft_key: str) -> set[str]:
 class StarterBenchmarkSink:
     """`DraftSink` bound to the production OPE-505 starter admission.
 
-    `create_draft` submits one `Starter` intake through `BenchmarkIntake`, which durably admits
-    the run and creates or reuses its versioned benchmark draft before any dispatch. The request
-    values come from the owner's sealed setup grant; the frozen payload only has to contain that
-    exact eligible policy occurrence, and the principal must be the draft's own tenant.
+    A dispatch submits one `Starter` intake to OPE-505's durable admission queue
+    (`BenchmarkIntake.intake`) and then, in OPE-505's own order, admits its versioned benchmark
+    through `BenchmarkIntake.benchmarks` under the run's admitted work, exactly as
+    `BenchmarkIntake.submit_intake` composes them. Splitting the two lets the worker tell a submit
+    that OPE-505 refused (its queue transaction rolled back) from one that bound a run, and
+    capture OPE-505's own lineage for the run (parent run, benchmark version and reference) at
+    submit. The request values come from the owner's sealed setup grant; the frozen payload must
+    contain that exact eligible policy occurrence, and the principal must be the draft's tenant.
 
-    Lineage follows the local supersedes chain only. A superseded draft is never dispatched.
-    The sealed grant, not the draft, fixes the OPE-505 run identity (the grant pins
-    `creation_ref` and both revisions), so one OPE-505 run is bound to one draft, and within one
-    OPE-505 workflow a draft may only follow an admitted draft from its own supersedes chain:
-    a successor under the same grant, or any draft outside that chain, is held before anything
-    is submitted. A chain successor under a fresh owner grant becomes the next OPE-505 version,
-    and is recorded only if OPE-505's own parent run is the chain's admitted run.
+    Lineage follows the local supersedes chain only. A superseded draft is never dispatched and
+    never adopted. The sealed grant fixes the OPE-505 run identity, so one OPE-505 run is bound
+    to one draft, and within one OPE-505 workflow a draft may only follow its own chain: the
+    expected parent is the run of the nearest chain ancestor that is admitted, or whose own
+    journaled receipt verifies (its own key, this workflow, a parent that itself verifies, a run
+    no draft holds, never refused for a blocking lineage reason). A successor under the same
+    grant takes the run its superseded ancestor created. A run is recorded only if OPE-505's own
+    parent run is the expected parent.
 
-    Reconciliation by adoption. Every submit is journaled in the worker store: `ope505_submit`
-    (draft, derived key, run and workflow identity) before the call, and `ope505_receipt`
-    (OPE-505's own receipt for that key: run, correlation, state) right after it returns. A
-    draft held after its submit reached OPE-505 (a record change, a lost lock, a crash, an
-    in-flight regrant) is adopted from its own receipt, as `ope505_admitted` with
-    `reconciled: true`, before a chain successor's lineage is judged, and on its own retry once
-    the grant changed. Only a receipt for the key this worker derives for that exact draft, in
-    the same OPE-505 workflow (tenant, engagement, `creation_ref`), on a run no other draft holds,
-    and never refused for a lineage reason, is adopted. OPE-505 has no read-only lookup by
-    idempotency key, and refuses any read of a run admitted under a grant that is no longer
-    current, so the receipt journal is the only evidence: a submit that reached OPE-505 but
-    whose receipt was never journaled cannot be adopted (it is held as `OPE505_INTENT_CHANGED`
-    once the intent moves on).
+    Reconciliation by adoption: a draft held after its submit reached OPE-505, whose intent has
+    since moved on (a regrant), is adopted from its own receipt as `ope505_admitted` with
+    `reconciled: true` and `provenance: ope505_receipt_at_submit`, only if it is not superseded
+    and its receipt verifies, including OPE-505's parent at submit. A receipt that fails on its
+    lineage is held with a lineage reason, and its refusal marker is written in the same
+    transaction as the decision. OPE-505 itself adjudicates the idempotency key: a retry always
+    submits, and an OPE-505 refusal of a key already bound to an earlier intent is held as
+    `OPE505_INTENT_CHANGED`.
 
-    The final checks and the ledger write run in one `BEGIN IMMEDIATE` transaction, backed by
-    unique indexes, so concurrent dispatchers (the UI host and the stdio launcher on one
-    directory) record at most one admission per draft and per run; the loser re-reads and is
-    held, or reads the same admission when it dispatched the same draft. `enqueue_job` creates
-    nothing: the admitted run is the OPE-505 job, and this call only confirms it was recorded.
+    The final checks and the ledger writes run in `BEGIN IMMEDIATE` transactions, backed by
+    unique indexes, so concurrent dispatchers record at most one admission per draft and per
+    run. `enqueue_job` creates nothing: the admitted run is the OPE-505 job.
     """
 
     def __init__(
@@ -396,32 +418,118 @@ class StarterBenchmarkSink:
             ).fetchone()
         return None if row is None else str(row["tenant"])
 
-    @staticmethod
-    def _adoptable(db: sqlite3.Connection, draft_key: str, workflow: str) -> Json | None:
-        """This worker's own journaled OPE-505 receipt for `draft_key`, if it may be adopted."""
-        if _admitted_on(db, draft_key) is not None:
-            return None
-        receipts = _journal(db, RECEIPT, draft_key)
-        if not receipts:
-            return None
-        receipt = receipts[-1]
-        refused = {r["run_ref"] for r in _journal(db, RECEIPT_REFUSED, draft_key)}
-        bound = {e["run_ref"] for e in _admitted_rows(db)}
+    # -------------------------------------------------------------- lineage
+
+    @classmethod
+    def _receipt_fault(
+        cls, db: sqlite3.Connection, draft_key: str, receipt: Json, workflow: str, depth: int
+    ) -> str | None:
+        """Why this worker's own receipt for `draft_key` cannot stand; None if it verifies."""
         if (
             receipt.get("idempotency_key") != idempotency_key(draft_key)
             or receipt.get("workflow_identity") != workflow
-            or receipt["run_ref"] in refused
-            or receipt["run_ref"] in bound
         ):
-            return None
-        return receipt
+            return "OPE505_LINEAGE_MISMATCH"
+        for marker in _journal(db, RECEIPT_REFUSED, draft_key):
+            if marker["run_ref"] == receipt["run_ref"] and marker["reason"] in BLOCKING_HOLDS:
+                return str(marker["reason"])
+        if any(
+            e["run_ref"] == receipt["run_ref"] and e["draft_key"] != draft_key
+            for e in _admitted_rows(db)
+        ):
+            return "OPE505_RUN_BOUND_TO_OTHER_DRAFT"
+        if type(receipt.get("lineage")) is not dict:
+            return "OPE505_LINEAGE_UNKNOWN"
+        expected, _ = cls._expected_parent(
+            db, draft_key, workflow, str(receipt["run_identity"]), depth + 1
+        )
+        if not parent_matches(receipt["lineage"], expected):
+            return "OPE505_LINEAGE_MISMATCH"
+        return None
 
-    def _adopt(self, db: sqlite3.Connection, draft_key: str, receipt: Json) -> None:
+    @classmethod
+    def _expected_parent(
+        cls, db: sqlite3.Connection, draft_key: str, workflow: str, identity: str, depth: int = 0
+    ) -> tuple[str | None, Json | None]:
+        """OPE-505's expected parent run for `draft_key` in `workflow`, and its chain draft."""
+        if depth > MAX_CHAIN:
+            return UNVERIFIABLE, None
+        for ancestor in _chain(db, draft_key):
+            admitted = _admitted_on(db, ancestor)
+            if admitted is not None:
+                if admitted.get("workflow_identity") != workflow:
+                    continue
+                return str(admitted["run_ref"]), {
+                    "draft_key": ancestor,
+                    "run_ref": admitted["run_ref"],
+                    "basis": "admitted",
+                    "state": "admitted",
+                }
+            receipt = _last(db, RECEIPT, ancestor)
+            if receipt is None or receipt.get("workflow_identity") != workflow:
+                continue
+            if receipt.get("run_identity") == identity:
+                continue  # the same OPE-505 run: under the same intent it is this draft's own
+            if cls._receipt_fault(db, ancestor, receipt, workflow, depth) is not None:
+                return UNVERIFIABLE, None
+            return str(receipt["run_ref"]), {
+                "draft_key": ancestor,
+                "run_ref": receipt["run_ref"],
+                "basis": "own_receipt",
+                "state": "superseded_not_admitted",
+            }
+        return None, None
+
+    @staticmethod
+    def _lineage(
+        db: sqlite3.Connection,
+        draft_key: str,
+        identity: str,
+        workflow: str,
+        link: Json,
+        run_ref: str | None = None,
+    ) -> None:
+        """Hold unless `draft_key` may be admitted in `workflow`."""
+        if _superseded(db, draft_key):
+            raise IntakeError("DRAFT_SUPERSEDED")
+        chain = _ancestors(db, draft_key)
+        others = [e for e in _admitted_rows(db) if e["draft_key"] != draft_key]
+        for entry in others:
+            if entry.get("run_identity") == identity or entry["run_ref"] == run_ref:
+                if entry["draft_key"] in chain:
+                    raise IntakeError("OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT", link)
+                raise IntakeError("OPE505_RUN_BOUND_TO_OTHER_DRAFT")
+        if any(
+            e.get("workflow_identity") == workflow and e["draft_key"] not in chain for e in others
+        ):
+            # Never let a draft outside the chain become the next version of another's run.
+            raise IntakeError("OPE505_RUN_BOUND_TO_OTHER_DRAFT")
+
+    def _refusal(self, db: sqlite3.Connection, draft_key: str, run_ref: str, hold: str) -> None:
+        """Mark a receipt refused for its lineage, in the caller's transaction."""
+        if hold not in LINEAGE_HOLDS:
+            return
+        if any(
+            m["run_ref"] == run_ref and m["reason"] == hold
+            for m in _journal(db, RECEIPT_REFUSED, draft_key)
+        ):
+            return
+        row = db.execute("SELECT session_id FROM drafts WHERE draft_key=?", (draft_key,)).fetchone()
+        self.store.log(
+            db,
+            str(row["session_id"]) if row is not None else "unknown",
+            RECEIPT_REFUSED,
+            {"draft_key": draft_key, "run_ref": run_ref, "reason": hold},
+        )
+
+    def _adopt(self, db: sqlite3.Connection, draft_key: str, receipt: Json, workflow: str) -> None:
         row = db.execute(
             "SELECT session_id, supersedes FROM drafts WHERE draft_key=?", (draft_key,)
         ).fetchone()
         predecessor = None if row is None else row["supersedes"]
         prior = _admitted_on(db, predecessor) if predecessor else None
+        _, parent = self._expected_parent(db, draft_key, workflow, str(receipt["run_identity"]))
+        lineage = receipt["lineage"]
         self.store.log(
             db,
             str(row["session_id"]) if row is not None else "unknown",
@@ -433,71 +541,45 @@ class StarterBenchmarkSink:
                 "run_ref": receipt["run_ref"],
                 "correlation_ref": receipt["correlation_ref"],
                 "run_state": receipt["run_state"],
-                # Not readable from OPE-505 once its grant moved on; never guessed.
-                "workflow_ref": None,
-                "benchmark_ref": None,
-                "benchmark_version": None,
-                "benchmark_state": None,
+                # As OPE-505 reported them at submit; OPE-505 no longer lets this worker read
+                # the run once its grant moved on.
+                "workflow_ref": lineage["workflow_ref"],
+                "benchmark_ref": lineage["benchmark_ref"],
+                "benchmark_version": lineage["benchmark_version"],
+                "benchmark_state": lineage["benchmark_state"],
                 "predecessor_draft_key": predecessor,
                 "predecessor_run_ref": prior["run_ref"] if prior else None,
-                "lineage_parent_draft_key": None,
-                "ope505_parent_run": None,
+                "lineage_parent_draft_key": parent["draft_key"] if parent else None,
+                "lineage_parent": parent,
+                "ope505_parent_run": lineage["parent_run"],
                 "reconciled": True,
+                "provenance": "ope505_receipt_at_submit",
             },
         )
 
-    def _reconcile(
-        self, draft_key: str, workflow: str, identity: str, *, include_self: bool
-    ) -> bool:
-        """Adopt held chain ancestors (oldest first), then this draft if its intent moved on.
-
-        Returns whether this draft itself is now admitted.
-        """
+    def _reconcile(self, draft_key: str, workflow: str, identity: str) -> bool:
+        """Adopt this draft's own receipt once its intent moved on; True if now admitted."""
+        hold: IntakeError | None = None
         with self.store.tx() as db:
             db.execute("BEGIN IMMEDIATE")
-            for ancestor in reversed(_chain(db, draft_key)):
-                receipt = self._adoptable(db, ancestor, workflow)
-                if receipt is not None:
-                    self._adopt(db, ancestor, receipt)
-            if include_self:
-                receipt = self._adoptable(db, draft_key, workflow)
-                # Under the same intent a plain resubmit returns the same run; adopt only when
-                # the key can no longer be resubmitted.
-                if receipt is not None and receipt["run_identity"] != identity:
-                    self._adopt(db, draft_key, receipt)
-            return _admitted_on(db, draft_key) is not None
-
-    @staticmethod
-    def _lineage(
-        db: sqlite3.Connection,
-        draft_key: str,
-        identity: str,
-        workflow: str,
-        link: Json,
-        run_ref: str | None = None,
-    ) -> Json | None:
-        """Hold unless `draft_key` may be admitted; return the admitted chain parent, if any."""
-        superseded = db.execute(
-            "SELECT 1 FROM drafts WHERE supersedes=? AND draft_key!=? LIMIT 1",
-            (draft_key, draft_key),
-        ).fetchone()
-        if superseded is not None:
-            raise IntakeError("DRAFT_SUPERSEDED")
-        chain = _ancestors(db, draft_key)
-        others = [e for e in _admitted_rows(db) if e["draft_key"] != draft_key]
-        for entry in others:
-            if entry.get("run_identity") == identity or entry["run_ref"] == run_ref:
-                if entry["draft_key"] in chain:
-                    raise IntakeError("OPE505_SUCCESSOR_NEEDS_NEW_SETUP_GRANT", link)
-                raise IntakeError("OPE505_RUN_BOUND_TO_OTHER_DRAFT")
-        latest = None
-        for entry in others:
-            if entry.get("workflow_identity") == workflow:
-                latest = entry
-        if latest is not None and latest["draft_key"] not in chain:
-            # Never let a draft outside the chain become the next version of another's run.
-            raise IntakeError("OPE505_RUN_BOUND_TO_OTHER_DRAFT")
-        return latest
+            if _admitted_on(db, draft_key) is not None:
+                return True
+            receipt = _last(db, RECEIPT, draft_key)
+            if (
+                receipt is None
+                or receipt.get("run_identity") == identity  # a plain resubmit returns the run
+                or receipt.get("workflow_identity") != workflow
+                or receipt.get("idempotency_key") != idempotency_key(draft_key)
+                or _superseded(db, draft_key)
+            ):
+                return False
+            fault = self._receipt_fault(db, draft_key, receipt, workflow, 0)
+            if fault is None:
+                self._adopt(db, draft_key, receipt, workflow)
+                return True
+            self._refusal(db, draft_key, str(receipt["run_ref"]), fault)
+            hold = IntakeError(fault)
+        raise hold
 
     def _current(self) -> None:
         try:
@@ -505,18 +587,37 @@ class StarterBenchmarkSink:
         except WorkerRefused as refused:
             raise IntakeError(refused.code) from refused
 
-    def create_draft(self, draft_key: str, payload: Json) -> None:
-        try:
-            self._create(draft_key, payload)
-        except IntakeError:
-            # A successor's dispatch may have adopted this draft's own receipt meanwhile.
-            if self.admitted(draft_key) is not None:
-                return
-            raise
+    def _binding_intents(self, draft_key: str) -> set[str]:
+        """Intents this draft's key may be bound to in OPE-505 (not provably refused)."""
+        with self.store.tx() as db:
+            free = {
+                o["attempt"]
+                for o in _journal(db, OUTCOME, draft_key)
+                if o["outcome"] == "bound_nothing"
+            }
+            return {
+                str(s["run_identity"])
+                for s in _journal(db, SUBMIT, draft_key)
+                if s.get("attempt") not in free
+            }
 
-    def _create(self, draft_key: str, payload: Json) -> None:
+    def _outcome(
+        self, session_id: str, draft_key: str, attempt: str, outcome: str, why: str
+    ) -> None:
+        with self.store.tx() as db:
+            self.store.log(
+                db,
+                session_id,
+                OUTCOME,
+                {"draft_key": draft_key, "attempt": attempt, "outcome": outcome, "reason": why},
+            )
+
+    # -------------------------------------------------------------- dispatch
+
+    def create_draft(self, draft_key: str, payload: Json) -> None:
         if self.admitted(draft_key) is not None:
             return  # recorded: a replay after a crash before the draft was marked dispatched
+        session = str(payload["session_id"])
         predecessor = payload.get("supersedes")
         prior = self.admitted(predecessor) if type(predecessor) is str else None
         link: Json = {
@@ -524,16 +625,11 @@ class StarterBenchmarkSink:
             "predecessor_run_ref": prior["run_ref"] if prior else None,
         }
         key = idempotency_key(draft_key)
+        lineage: Json | None = None
         try:
-            _refuse(
-                self._draft_tenant(payload["session_id"]) == self.tenant,
-                "OPE505_TENANT_MISMATCH",
-            )
+            _refuse(self._draft_tenant(session) == self.tenant, "OPE505_TENANT_MISMATCH")
             with self.store.tx() as db:
-                superseded = db.execute(
-                    "SELECT 1 FROM drafts WHERE supersedes=? LIMIT 1", (draft_key,)
-                ).fetchone()
-            _refuse(superseded is None, "DRAFT_SUPERSEDED")
+                _refuse(not _superseded(db, draft_key), "DRAFT_SUPERSEDED")
             authority, admission = self._open()
             self._current()  # the record may have changed while the grant was opening
             principal = authority.principal
@@ -560,27 +656,25 @@ class StarterBenchmarkSink:
                     creation_ref,
                 ]
             )
-            if self._reconcile(draft_key, workflow, identity, include_self=True):
+            if self._reconcile(draft_key, workflow, identity):
                 return
+            earlier = self._binding_intents(draft_key) - {identity}
+            attempt = digest(["ope505-attempt", draft_key, os.urandom(16).hex()])[:32]
             with self.store.tx() as db:
                 db.execute("BEGIN IMMEDIATE")
                 self._lineage(db, draft_key, identity, workflow, link)
-                earlier = {e["run_identity"] for e in _journal(db, SUBMIT, draft_key)}
-                # The key is bound in OPE-505 to the first intent it was submitted with. If that
-                # intent has moved on and its receipt cannot be adopted, the outcome is unknown.
-                _refuse(earlier <= {identity}, "OPE505_INTENT_CHANGED")
-                if not earlier:
-                    self.store.log(
-                        db,
-                        str(payload["session_id"]),
-                        SUBMIT,
-                        {
-                            "draft_key": draft_key,
-                            "idempotency_key": key,
-                            "run_identity": identity,
-                            "workflow_identity": workflow,
-                        },
-                    )
+                self.store.log(
+                    db,
+                    session,
+                    SUBMIT,
+                    {
+                        "draft_key": draft_key,
+                        "attempt": attempt,
+                        "idempotency_key": key,
+                        "run_identity": identity,
+                        "workflow_identity": workflow,
+                    },
+                )
             request = Starter(
                 policy_resource_ref=policy_ref,
                 source_revision=revision,
@@ -593,52 +687,77 @@ class StarterBenchmarkSink:
                 workflow_ref=None,
             )
             try:
-                receipt = admission.submit_intake(principal, request)
+                # OPE-505's queue admission is one transaction: a refusal binds nothing.
+                receipt = admission.intake.submit_intake(principal, request)
             except AdmissionError as error:
-                if str(error) == "idempotency_conflict":
+                self._outcome(session, draft_key, attempt, "refused", str(error))
+                # OPE-505 refuses a key already bound to an earlier intent (as a conflict, or as
+                # unavailable once that intent's grant moved on).
+                if str(error) == "idempotency_conflict" or (
+                    earlier and str(error) == "intake_unavailable"
+                ):
                     raise WorkerRefused("OPE505_INTENT_CHANGED") from error
                 raise
             if isinstance(receipt, AdmissionHold):
+                self._outcome(session, draft_key, attempt, "bound_nothing", receipt.reason_code)
                 raise WorkerRefused("OPE505_HOLD")
-            with self.store.tx() as db:
-                self.store.log(
-                    db,
-                    str(payload["session_id"]),
-                    RECEIPT,
-                    {
-                        "draft_key": draft_key,
-                        "idempotency_key": key,
-                        "run_identity": identity,
-                        "workflow_identity": workflow,
-                        "run_ref": receipt.run_ref,
-                        "correlation_ref": receipt.correlation_ref,
-                        "run_state": receipt.state,
-                    },
-                )
+            try:
+                # OPE-505's own benchmark step, as `BenchmarkIntake.submit_intake` runs it.
+                with admission.intake.admitted_work(principal, receipt.run_ref) as work:
+                    view = admission.benchmarks.admit(principal.tenant, work)
+                    lineage = {
+                        "parent_run": work.benchmark_parent_run,
+                        "workflow_ref": work.workflow_ref,
+                        "benchmark_ref": view.benchmark_ref,
+                        "benchmark_version": view.version,
+                        "benchmark_state": view.benchmark_state,
+                    }
+            finally:
+                with self.store.tx() as db:
+                    self.store.log(
+                        db,
+                        session,
+                        RECEIPT,
+                        {
+                            "draft_key": draft_key,
+                            "attempt": attempt,
+                            "idempotency_key": key,
+                            "run_identity": identity,
+                            "workflow_identity": workflow,
+                            "run_ref": receipt.run_ref,
+                            "correlation_ref": receipt.correlation_ref,
+                            "run_state": receipt.state,
+                            "lineage": lineage,
+                        },
+                    )
             status = admission.get_run(principal, receipt.run_ref)
-            with admission.intake.admitted_work(principal, receipt.run_ref) as work:
-                parent_run = work.benchmark_parent_run
         except WorkerRefused as refused:
             raise IntakeError(refused.code) from refused
         except (AdmissionError, OSError, sqlite3.Error, ValueError) as error:
             raise IntakeError("OPE505_UNAVAILABLE") from error
         benchmark = status.benchmark
-        self._reconcile(draft_key, workflow, identity, include_self=False)
-        try:
-            # One serialized transaction re-checks everything that a concurrent dispatcher, a
-            # record change or OPE-505's own deduplication may have changed, then records it.
-            with self.store.tx() as db:
-                db.execute("BEGIN IMMEDIATE")
-                self._current()
-                if _admitted_on(db, draft_key) is not None:
-                    return  # another dispatcher of this same draft recorded it first
-                parent = self._lineage(db, draft_key, identity, workflow, link, receipt.run_ref)
-                expected = parent["run_ref"] if parent is not None else None
-                if parent_run != expected:
+        hold: IntakeError | None = None
+        # One serialized transaction re-checks everything that a concurrent dispatcher, a record
+        # change or OPE-505's own deduplication may have changed, then records the admission or
+        # the lineage refusal, atomically with the decision.
+        with self.store.tx() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._current()
+            if _admitted_on(db, draft_key) is not None:
+                return  # another dispatcher of this same draft recorded it first
+            try:
+                self._lineage(db, draft_key, identity, workflow, link, receipt.run_ref)
+                expected, parent = self._expected_parent(db, draft_key, workflow, identity)
+                if not parent_matches(lineage, expected):
                     raise IntakeError("OPE505_LINEAGE_MISMATCH")
+            except IntakeError as error:
+                self._refusal(db, draft_key, receipt.run_ref, error.code)
+                hold = error
+            else:
+                assert lineage is not None
                 self.store.log(
                     db,
-                    str(payload["session_id"]),
+                    session,
                     ADMITTED,
                     {
                         "draft_key": draft_key,
@@ -653,21 +772,15 @@ class StarterBenchmarkSink:
                         "benchmark_state": benchmark.benchmark_state if benchmark else None,
                         **link,
                         "lineage_parent_draft_key": parent["draft_key"] if parent else None,
+                        "lineage_parent": parent,
                         # OPE-505's own lineage field for the benchmark this run admitted.
-                        "ope505_parent_run": parent_run,
+                        "ope505_parent_run": lineage["parent_run"],
                         "reconciled": False,
+                        "provenance": "ope505_read_at_record",
                     },
                 )
-        except IntakeError as hold:
-            if hold.code in LINEAGE_HOLDS:
-                with self.store.tx() as db:
-                    self.store.log(
-                        db,
-                        str(payload["session_id"]),
-                        RECEIPT_REFUSED,
-                        {"draft_key": draft_key, "run_ref": receipt.run_ref, "reason": hold.code},
-                    )
-            raise
+        if hold is not None:
+            raise hold
 
     def enqueue_job(self, job_key: str, draft_key: str) -> None:
         if self.admitted(draft_key) is None:
@@ -964,22 +1077,26 @@ class MixedIntakeWorker:
         """Background recovery: dispatch every pending draft that its own session still may.
 
         Each draft is re-validated against the current record and its own session's tenant;
-        a held draft is skipped and recorded, and never stops the others.
+        a held draft is skipped and recorded, and never stops the others. A draft admitted by
+        adopting its own OPE-505 receipt is also named under `reconciled`.
         """
         with self.store.tx() as db:
             rows = db.execute(
                 "SELECT draft_key, session_id FROM drafts WHERE dispatched=0 ORDER BY rowid"
             ).fetchall()
         admitted: list[str] = []
+        reconciled: list[Json] = []
         held: list[Json] = []
         for row in rows:
             key = str(row["draft_key"])
             result = self._dispatch(str(row["session_id"]), key)
             if result["state"] == "admitted":
                 admitted.append(key)
+                if result.get("reconciled") is True:
+                    reconciled.append({"draft_key": key, "run_ref": result["run_ref"]})
             elif result["state"] == "held":
                 held.append({"draft_key": key, "reason": result["reason"]})
-        return {"admitted": admitted, "held": held}
+        return {"admitted": admitted, "reconciled": reconciled, "held": held}
 
     def _triage(self, service: MixedIntakeService, session_id: str) -> Json:
         """Dispositions as the worker triaged them, ready for an independent reviewer."""
