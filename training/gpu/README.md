@@ -65,8 +65,11 @@ wheels pinned here.
 - **Supported:** NVIDIA Linux driver **580.65.06 or newer**, the CUDA 13.0 minimum. The driver
   must report CUDA 13.0 or higher in `nvidia-smi`.
 - **Not supported:** drivers below 580.65.06, including the 535/550/565/570/575 data-center
-  branches. The base image's `NVIDIA_REQUIRE_CUDA` allows those branches through CUDA forward
-  compatibility. This lock does not rely on that or qualify it.
+  branches. The base image's own `NVIDIA_REQUIRE_CUDA` allows those branches through CUDA
+  forward compatibility. The trainer image overrides it with `NVIDIA_REQUIRE_CUDA=cuda>=13.0`
+  and no brand exceptions, so the NVIDIA container toolkit refuses to start it on an older
+  driver. The image also deletes the base image's `/usr/local/cuda/compat` forward-compatibility
+  `libcuda`. The operator must not set `NVIDIA_DISABLE_REQUIRE`, which skips the check.
 - **GPU:** one 80 GB NVIDIA data-center GPU, Ampere (sm_80) or newer. CUDA 13 no longer
   supports Volta and older GPUs.
 - No upper driver bound is asserted. A newer driver is qualified only on the host where it was
@@ -110,8 +113,11 @@ a recorded commit. Each run records:
     `libcuda` path the NVIDIA container toolkit injected and any `/usr/local/cuda/compat` path.
     A compat path would mean CUDA forward compatibility was used, which this lock does not
     support. Recent NVIDIA container toolkits can select the base image's `cuda-compat-13-0`
-    automatically when the host driver is older than it. So record which `libcuda` the process
-    actually loaded, from `/proc/self/maps`. Qualification does not support use of the compat
+    automatically when the host driver is older than it. The image now deletes
+    `/usr/local/cuda/compat` and requires `cuda>=13.0` with no brand exceptions, so neither
+    should happen. Still, record which `libcuda` the process actually loaded, from
+    `/proc/self/maps`. Also record that the container started with `NVIDIA_REQUIRE_CUDA` in
+    force and `NVIDIA_DISABLE_REQUIRE` unset. Qualification does not support use of the compat
     `libcuda`.
 
 ## Follow-ups for other owners
@@ -120,7 +126,10 @@ a recorded commit. Each run records:
   only `uv.lock`, `training/uv.lock` and `pnpm-lock.yaml`. It does not scan
   `training/gpu/uv.lock`. Adding `--lockfile=training/gpu/uv.lock` is a follow-up for the
   owner of `tools/ci/run.py`. The file's history does not name an owner, so confirm it. AGENTS.md
-  assigns command wrappers to OPE-123. This lane does not edit that file.
+  assigns command wrappers to OPE-123. This lane does not edit that file. The contract test
+  forbids any reference to `training/gpu` in `tools/ci/run.py` and the `justfile`, with one
+  exception: the exact string `"--lockfile=training/gpu/uv.lock"` in `tools/ci/run.py`, so this
+  follow-up stays possible.
 - **Toolchain pointer.** `tools/toolchain.json` (OPE-122/OPE-123) could name this lock.
   `gpu_qualification.status` stays `NOT_RUN`.
 

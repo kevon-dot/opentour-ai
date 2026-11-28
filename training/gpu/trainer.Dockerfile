@@ -64,6 +64,12 @@ RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
 FROM ${CUDA_BASE_IMAGE}
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/venv /opt/venv
+# Driver floor, made mechanical: remove the base image's CUDA forward-compatibility libcuda so it
+# can never be selected, and (below) require CUDA 13.0 from the host driver with no brand
+# exceptions, so the container toolkit refuses hosts on the 535-575 driver branches.
+RUN rm -rf /usr/local/cuda/compat /usr/local/cuda-13.0/compat \
+ && ldconfig \
+ && test ! -e /usr/local/cuda/compat
 RUN groupadd --gid 10001 trainer \
  && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/trainer \
       --shell /usr/sbin/nologin trainer
@@ -74,6 +80,7 @@ RUN groupadd --gid 10001 trainer \
 # environment. (The ld.so.conf entry remains; item 10 records the path actually loaded.)
 ENV PATH="/opt/venv/bin:${PATH}" \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+    NVIDIA_REQUIRE_CUDA="cuda>=13.0" \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 \
     HF_HOME=/home/trainer/.cache/huggingface \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
