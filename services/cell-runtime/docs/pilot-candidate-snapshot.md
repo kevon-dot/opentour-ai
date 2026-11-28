@@ -250,7 +250,7 @@ owns differencing control across released cells.
   later than the as-of one shows as not eligible, absent or on another label. A stale read,
   even one committed as a new snapshot, therefore never re-admits an example to that as-of
   snapshot's training parents.
-- **The cost of sticky retractions (decided by the cross-session author as owner-delegate and recorded on OPE-416; pending product-owner confirmation).** One transient later snapshot is
+- **The cost of sticky retractions (decided by the cross-session author as owner-delegate and confirmed by the product owner on 2026-11-28; both recorded on OPE-416).** One transient later snapshot is
   enough to retract a root for an earlier as-of snapshot for good. Two examples: S2 is captured
   while T1's row is briefly missing and S3 has T1 back with the same label; or S2 catches an
   immature reopen and S3 has a same-value re-final. In both, S1's training parents show T1 as
