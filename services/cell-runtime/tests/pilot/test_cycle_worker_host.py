@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 import pwd
+import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -168,6 +170,20 @@ def test_pinned_constants_match_the_repository_profile_and_runtime():
     assert profile["files"]["model.safetensors"] == open_weight.BASE_SHA256
 
 
+def test_pinned_digests_match_the_product_constants_and_repository_files():
+    from opentour_cell.pilot import open_weight
+
+    worker = ROOT / "training/src/opentour_training/training/open_weight_worker.py"
+    pinned = stage_module["PROFILE_SHA256"]
+    assert pinned == open_weight.PROFILE_SHA256 == hashlib.sha256(PROFILE.read_bytes()).hexdigest()
+    assert f'PROFILE_SHA256 = "{pinned}"' in worker.read_text()
+    assert stage_module["LOCK_SHA256"] == hashlib.sha256(LOCK.read_bytes()).hexdigest()
+    assert stage_module["PINS"] == {
+        "training/profiles/smollm2_135m_lora_v1.json": pinned,
+        "training/profiles/smollm2_135m_lora_v1.requirements.txt": stage_module["LOCK_SHA256"],
+    }
+
+
 @pytest.fixture
 def site(tmp_path):
     """A generated release, offline checkpoint, wheels, interpreter, volume and work dir."""
@@ -191,6 +207,7 @@ def site(tmp_path):
         lock_lines.append(f"{name}=={version} --hash=sha256:{runtime[f'{name}_wheel_sha256']}")
     profile = dict(real, files=files, runtime=runtime)
     release = tmp_path / "release"
+    pins = {}
 
     def write_release(document):
         (release / "training/profiles").mkdir(parents=True, exist_ok=True)
@@ -205,6 +222,8 @@ def site(tmp_path):
         (release / "SHA256SUMS").write_text(
             "".join(f"{hashlib.sha256(p).hexdigest()}  {n}\n" for n, p in payloads.items())
         )
+        # The fixture's own pins stand in for the product pins; only tests pass them.
+        pins.update({n: hashlib.sha256(p).hexdigest() for n, p in payloads.items()})
 
     write_release(profile)
     python = tmp_path / "model-python/bin/python"
@@ -239,6 +258,7 @@ def site(tmp_path):
         "profile": profile,
         "write_release": write_release,
         "write_python": write_python,
+        "pins": pins,
     }
 
 
@@ -251,13 +271,32 @@ def staged(site, revision=REVISION, owner=OWNER):
         site["wheels"],
         str(site["python"]),
         owner,
+        pins=site["pins"],
     )
 
 
 def verified(site, owner=OWNER):
     return stage_module["verify"](
-        site["release"], site["model"], site["wheels"], str(site["python"]), owner
+        site["release"],
+        site["model"],
+        site["wheels"],
+        str(site["python"]),
+        owner,
+        pins=site["pins"],
     )
+
+
+PINNED_HARNESS = (
+    "import json, runpy, sys; "
+    "ns = runpy.run_path(sys.argv[1], run_name='ope577_pinned_cli'); "
+    "raise SystemExit(ns['main'](sys.argv[3:], pins=json.loads(sys.argv[2])))"
+)
+
+
+def pinned_cli(site, *argv):
+    """The isolated stdlib-only CLI, with the fixture's pins passed in-process (tests only)."""
+    script = str(HOST / "stage_open_weight.py")
+    return [*ISOLATED, "-c", PINNED_HARNESS, script, json.dumps(site["pins"]), *argv]
 
 
 def cli_arguments(site):
@@ -323,9 +362,8 @@ def test_stage_accepts_a_correct_sentinel_set_and_promotes_read_only(site):
 
 
 def test_stage_cli_runs_isolated_as_root(site):
-    script = str(HOST / "stage_open_weight.py")
     arguments = cli_arguments(site)
-    command = [*ISOLATED, script, "stage", *arguments, "--source", str(site["source"])]
+    command = pinned_cli(site, "stage", *arguments, "--source", str(site["source"]))
     ready = subprocess.run(
         [*command, "--revision", REVISION],
         capture_output=True,
@@ -343,7 +381,7 @@ def test_stage_cli_runs_isolated_as_root(site):
     assert json.loads(ready.stdout)["route"] == "ready"
     tamper(site["model"] / "config.json")
     held = subprocess.run(
-        [*ISOLATED, script, "verify", *arguments],
+        pinned_cli(site, "verify", *arguments),
         capture_output=True,
         text=True,
         timeout=60,
@@ -353,6 +391,47 @@ def test_stage_cli_runs_isolated_as_root(site):
     assert held.returncode == 2
     assert json.loads(held.stdout)["reason"] == "staged_model_hash_mismatch"
     assert not site["model"].exists() and one_held(site).is_dir()
+
+
+def test_real_pins_refuse_a_self_consistent_release_with_other_digests(site, capsys):
+    """F1: a release whose own SHA256SUMS agree is still refused unless it is the pinned one."""
+    for result in (
+        stage_module["stage"](
+            site["release"],
+            site["source"],
+            REVISION,
+            site["model"],
+            site["wheels"],
+            str(site["python"]),
+            OWNER,
+        ),
+        stage_module["verify"](
+            site["release"], site["model"], site["wheels"], str(site["python"]), OWNER
+        ),
+    ):
+        assert (result["route"], result["reason"]) == ("held", "release_profile_unpinned")
+    assert not site["model"].exists()
+    completed = subprocess.run(
+        [
+            *ISOLATED,
+            str(HOST / "stage_open_weight.py"),
+            "stage",
+            *cli_arguments(site),
+            "--source",
+            str(site["source"]),
+            "--revision",
+            REVISION,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={},
+    )
+    assert completed.returncode == 2 and completed.stderr == ""
+    expected = "release_profile_unpinned" if OWNER == 0 else "installer_root_required"
+    assert json.loads(completed.stdout)["reason"] == expected
+    assert not site["model"].exists()
 
 
 @pytest.mark.parametrize("command", ["stage", "verify"])
@@ -528,15 +607,23 @@ def test_staging_works_with_the_volume_on_a_separate_mount(site, tmp_path):
     if probe.returncode != 0:
         pytest.skip("this host refuses a private mount namespace")
     volume = site["volume"]
-    script = str(HOST / "stage_open_weight.py")
-    arguments = " ".join(f"'{a}'" for a in cli_arguments(site))
-    isolated = " ".join(ISOLATED)
+    stage_command = shlex.join(
+        pinned_cli(
+            site,
+            "stage",
+            *cli_arguments(site),
+            "--source",
+            str(site["source"]),
+            "--revision",
+            REVISION,
+        )
+    )
+    verify_command = shlex.join(pinned_cli(site, "verify", *cli_arguments(site)))
     shell = (
         f"mount -t tmpfs -o mode=0700 tmpfs '{volume}' && "
         f"stat -c %d '{volume}' '{volume.parent}' && "
-        f"{isolated} '{script}' stage {arguments} --source '{site['source']}' "
-        f"--revision {REVISION} && "
-        f"{isolated} '{script}' verify {arguments} && "
+        f"{stage_command} && "
+        f"{verify_command} && "
         f"stat -c %d '{volume}/.opentour-staging' && "
         f"stat -c '%a %u' '{volume}/.opentour-staging'"
     )
@@ -581,7 +668,7 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
         result = verified(site)
     elif OWNER == 0:
         completed = subprocess.run(
-            [*ISOLATED, str(HOST / "stage_open_weight.py"), "verify", *cli_arguments(site)],
+            pinned_cli(site, "verify", *cli_arguments(site)),
             capture_output=True,
             text=True,
             timeout=60,
@@ -601,8 +688,8 @@ def test_hold_moves_the_base_out_even_when_old_held_copies_cannot_be_removed(sit
     rules_only_state_unchanged(site)
 
 
-def run_main(capsys, *argv):
-    code = stage_module["main"](list(argv))
+def run_main(capsys, site, *argv):
+    code = stage_module["main"](list(argv), pins=site["pins"])
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -623,7 +710,7 @@ def test_a_failed_held_rename_reports_move_failed_and_leaves_the_base(
     if via == "module":
         result = verified(site)
     elif OWNER == 0:
-        code, result = run_main(capsys, "verify", *cli_arguments(site))
+        code, result = run_main(capsys, site, "verify", *cli_arguments(site))
         assert code == 2
     else:
         pytest.skip("the CLI acts only as root; the module case covers non-root runners")
@@ -651,7 +738,7 @@ def test_an_io_error_while_hashing_the_base_holds_instead_of_raising(site, monke
         monkeypatch.setattr(hashlib, "file_digest", real_digest)
         assert staged(site)["route"] == "ready"
         monkeypatch.setattr(hashlib, "file_digest", failing_digest)
-        code, cli_result = run_main(capsys, "verify", *cli_arguments(site))
+        code, cli_result = run_main(capsys, site, "verify", *cli_arguments(site))
         assert code == 2
         assert (cli_result["route"], cli_result["reason"]) == ("held", "verification_io_error")
 
@@ -662,7 +749,7 @@ def test_an_io_error_escaping_a_command_is_reported_as_unverified(site, monkeypa
 
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setitem(stage_module, "verify", escaping)
-    code, result = run_main(capsys, "verify", *cli_arguments(site))
+    code, result = run_main(capsys, site, "verify", *cli_arguments(site))
     assert code == 2
     assert (result["route"], result["reason"]) == ("unverified", "installer_io_error")
     assert result["model_base"] == "unchanged"
@@ -792,7 +879,7 @@ def make_snapshot(tmp_path):
     return snapshot
 
 
-def screen(snapshot, restore_to=None, owner=OWNER):
+def screen(snapshot, restore_to=VOLUME, owner=OWNER):
     return boundary_module["check"](snapshot, restore_to, owner_uid=owner)
 
 
@@ -964,8 +1051,24 @@ def test_snapshot_cli_screens_with_the_named_worker_identity(tmp_path):
     )
     (snapshot / "Health-Token").write_text("generated")
     (snapshot / "Health-Token").chmod(0o600)
-    assert cli("--owner", owner) == (2, ["out_of_boundary_material"])
-    assert cli("--owner", "opentour-generated-missing-user") == (2, ["worker_identity_unknown"])
+    assert cli("--owner", owner, "--restore-to", VOLUME) == (2, ["out_of_boundary_material"])
+    assert cli("--owner", "opentour-generated-missing-user", "--restore-to", VOLUME) == (
+        2,
+        ["worker_identity_unknown"],
+    )
+    missing_target = subprocess.run(
+        [*ISOLATED, script, "check", "--snapshot", str(snapshot), "--owner", owner],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={},
+    )
+    assert missing_target.returncode == 2 and "--restore-to" in missing_target.stderr
+    assert boundary_module["check"](snapshot, None, owner_uid=OWNER) == [
+        "out_of_boundary_material",
+        "restore_target_not_worker_volume",
+    ]
     printed = subprocess.run(
         [*ISOLATED, script, "boundary"],
         capture_output=True,
@@ -975,3 +1078,130 @@ def test_snapshot_cli_screens_with_the_named_worker_identity(tmp_path):
         env={},
     )
     assert json.loads(printed.stdout) == boundary_module["boundary"]()
+
+
+def plant_secrets_in_unreadable_subdirectory(snapshot):
+    sub = snapshot / "sub"
+    sub.mkdir(mode=0o700)
+    for name in ("credentials", "health-token", "tls.key"):
+        (sub / name).write_text("generated")
+        (sub / name).chmod(0o600)
+    return sub
+
+
+def test_an_unreadable_snapshot_directory_refuses_instead_of_hiding_its_entries(
+    tmp_path, monkeypatch
+):
+    snapshot = make_snapshot(tmp_path)
+    sub = plant_secrets_in_unreadable_subdirectory(snapshot)
+    assert "out_of_boundary_material" in screen(snapshot)
+    if OWNER != 0:  # a real permission failure; root bypasses directory modes
+        sub.chmod(0o000)
+        try:
+            findings = screen(snapshot)
+        finally:
+            sub.chmod(0o700)
+    else:
+        real_scandir = os.scandir
+
+        def refusing_scandir(path="."):
+            if os.fspath(path) == str(sub):
+                raise PermissionError(13, "generated permission denied", str(sub))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", refusing_scandir)
+        findings = screen(snapshot)
+    assert "unreadable_entry" in findings and findings != []
+
+
+@pytest.mark.parametrize("where", ["listing", "entry"])
+def test_an_io_error_while_screening_refuses(tmp_path, monkeypatch, where):
+    snapshot = make_snapshot(tmp_path)
+    sub = plant_secrets_in_unreadable_subdirectory(snapshot)
+    if where == "listing":
+        real_scandir = os.scandir
+
+        def failing_scandir(path="."):
+            if os.fspath(path) == str(sub):
+                raise OSError(5, "generated I/O error", str(sub))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", failing_scandir)
+    else:
+        real_lstat = os.lstat
+
+        def failing_lstat(path, *, dir_fd=None):
+            if os.fspath(path) == str(snapshot / "authorization.json"):
+                raise OSError(5, "generated I/O error", os.fspath(path))
+            return real_lstat(path, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "lstat", failing_lstat)
+    assert "unreadable_entry" in screen(snapshot)
+
+
+def test_verify_holds_a_model_file_with_an_extra_hard_link(site):
+    """M4: a second name for a staged file would let the worker change it from elsewhere."""
+    assert staged(site)["route"] == "ready"
+    os.link(site["model"] / "tokenizer.json", site["volume"] / "tokenizer-alias")
+    result = verified(site)
+    assert (result["route"], result["reason"]) == ("held", "staged_model_file_required")
+    assert not site["model"].exists()
+
+
+def test_hold_moves_the_base_before_any_cleanup_runs(site, monkeypatch):
+    """M5: cleanup of earlier copies must never run before the failing base is moved out."""
+    assert staged(site)["route"] == "ready"
+    (site["work"] / "held-earlier").mkdir()
+    tamper(site["model"] / "config.json")
+    events = []
+    real_rename, real_remove = os.rename, stage_module["_remove_at"]
+
+    def recording_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        if src == "model-base":
+            events.append("move")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def recording_remove(directory_fd, name, depth=0):
+        if depth == 0:
+            events.append("cleanup")
+        return real_remove(directory_fd, name, depth)
+
+    monkeypatch.setattr(os, "rename", recording_rename)
+    monkeypatch.setitem(stage_module, "_remove_at", recording_remove)
+    result = verified(site)
+    assert (result["model_base"], result["cleanup"]) == ("moved_to_held", "complete")
+    assert events[0] == "move" and "cleanup" in events
+    assert not (site["work"] / "held-earlier").exists()
+
+
+def test_a_runtime_probe_that_exits_non_zero_is_refused(site):
+    """M9: correct-looking output is not enough; the probe must exit 0."""
+    site["write_python"]()
+    script = site["python"].read_text().rstrip("\n") + "\nexit 3\n"
+    site["python"].write_text(script)
+    result = staged(site)
+    assert (result["route"], result["reason"]) == ("held", "unqualified_numeric_runtime")
+    assert not site["model"].exists()
+
+
+def test_a_fifo_in_place_of_a_checkpoint_file_cannot_block_staging(site):
+    """F6: opening the source with O_NONBLOCK refuses a FIFO instead of waiting on it."""
+    target = site["source"] / "config.json"
+    target.unlink()
+    os.mkfifo(target, 0o600)
+
+    class Blocked(Exception):
+        """Not an OSError, so no handler in the script can turn a blocked open into a hold."""
+
+    def timed_out(signum, frame):
+        raise Blocked("staging blocked on a FIFO")
+
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.alarm(5)
+    try:
+        result = staged(site)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert (result["route"], result["reason"]) == ("held", "staged_model_file_required")
+    assert not site["model"].exists()

@@ -8,6 +8,11 @@ read or change its contents. Every step goes through directory descriptors opene
 following links, and the work directory's identity is re-checked before each step. Any
 missing or mismatched file holds the model route by leaving no ``model-base`` in the volume.
 Rules-only workflows do not read ``model-base`` and keep running.
+
+The profile and hash lock must match the SHA-256 values pinned below, the same profile
+digest that open_weight.py and open_weight_worker.py enforce. The release's SHA256SUMS
+alone is not trusted. ``--revision`` is the caller's statement of what was downloaded;
+the pinned file digests, not that argument, are the real check.
 """
 
 import argparse
@@ -24,6 +29,11 @@ PROFILE = "smollm2_135m_lora_v1"
 REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
 PROFILE_PATH = "training/profiles/" + PROFILE + ".json"
 LOCK_PATH = "training/profiles/" + PROFILE + ".requirements.txt"
+# Duplicated from opentour_cell.pilot.open_weight.PROFILE_SHA256 (this script is stdlib-only
+# and runs outside the package); a test keeps both values and the lock file in sync.
+PROFILE_SHA256 = "4bf04f573c4d762f5c4288f56aca2e680ab00f9c57db183ef58dfbbbddb7804c"
+LOCK_SHA256 = "638ac45c19aeef2aa09667847a28fc9d83a02746814fb6fd6df5336f61cbe14f"
+PINS = {PROFILE_PATH: PROFILE_SHA256, LOCK_PATH: LOCK_SHA256}
 MODEL_NAME = "model-base"
 WORK_NAME = ".opentour-staging"
 DIRECTORY_MODE = 0o555
@@ -349,9 +359,17 @@ def _held(areas, reason):
     return _result("held", reason, model_base, cleanup)
 
 
-def _checked_release(release, wheel_dir, python):
+def _pinned_document(release, name, pins):
+    document = _release_document(release, name)
+    if hashlib.sha256(document).hexdigest() != (pins or PINS)[name]:
+        raise Held("release_profile_unpinned")
+    return document
+
+
+def _checked_release(release, wheel_dir, python, pins=None):
+    """``pins`` replaces PINS only for generated test fixtures; the CLI never sets it."""
     profile, lock = check_profile(
-        _release_document(release, PROFILE_PATH), _release_document(release, LOCK_PATH)
+        _pinned_document(release, PROFILE_PATH, pins), _pinned_document(release, LOCK_PATH, pins)
     )
     verify_wheels(wheel_dir, lock)
     verify_runtime(python, profile)
@@ -372,7 +390,7 @@ def _verify_installed(areas, profile, expected_identity=None):
         os.close(model_fd)
 
 
-def verify(release, model_dir, wheel_dir, python, owner_uid=0):
+def verify(release, model_dir, wheel_dir, python, owner_uid=0, *, pins=None):
     """Verify an installed base and runtime. Any failure holds the model route."""
     try:
         areas = Areas(model_dir, owner_uid)
@@ -380,7 +398,7 @@ def verify(release, model_dir, wheel_dir, python, owner_uid=0):
         return _result("unverified", str(error))
     try:
         try:
-            profile = _checked_release(release, wheel_dir, python)
+            profile = _checked_release(release, wheel_dir, python, pins)
             areas.check()
             _verify_installed(areas, profile)
             areas.check()
@@ -400,7 +418,8 @@ def _copy_verified(source_dir, areas, profile, staging):
     try:
         for name, digest in profile["files"].items():
             try:
-                reader_fd = os.open(source_dir / name, os.O_RDONLY | os.O_NOFOLLOW)
+                # O_NONBLOCK: a FIFO in place of a checkpoint file cannot block the open.
+                reader_fd = os.open(source_dir / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             except OSError as error:
                 raise Held("staged_model_file_required") from error
             with os.fdopen(reader_fd, "rb") as reader:
@@ -432,7 +451,7 @@ def _copy_verified(source_dir, areas, profile, staging):
         raise
 
 
-def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid=0):
+def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid=0, *, pins=None):
     """Copy the pinned files from an offline source, verify them, promote, then re-verify."""
     try:
         areas = Areas(model_dir, owner_uid)
@@ -443,7 +462,7 @@ def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid
         try:
             if revision != REVISION:
                 raise Held("checkpoint_revision_mismatch")
-            profile = _checked_release(release, wheel_dir, python)
+            profile = _checked_release(release, wheel_dir, python, pins)
             areas.check()
             staging_fd, identity = _copy_verified(source_dir, areas, profile, staging)
             try:
@@ -467,7 +486,7 @@ def stage(release, source_dir, revision, model_dir, wheel_dir, python, owner_uid
         areas.close()
 
 
-def main(argv=None):
+def main(argv=None, *, pins=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("verify", "stage"):
@@ -496,9 +515,10 @@ def main(argv=None):
                 args.model_dir,
                 args.wheel_dir,
                 args.python,
+                pins=pins,
             )
         else:
-            result = verify(args.release, args.model_dir, args.wheel_dir, args.python)
+            result = verify(args.release, args.model_dir, args.wheel_dir, args.python, pins=pins)
     except OSError:
         # Never a traceback: report the safe outcome and leave the route to the worker's check.
         result = _result("unverified", "installer_io_error")
