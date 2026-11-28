@@ -61,7 +61,18 @@ verdict, archived generations and any re-issue alike. When the consumer says a w
 fired (``watch_fired=True``), exactly one correction-notice record exists for the key, across
 retries, restarts and concurrent callers. ``revoke_scope`` revokes by scope instead: every
 verdict, issued or future, scored by one scorer version or bound to one answer key or audit
-receipt, so a scorer defect is not revoked one key at a time.
+receipt, so a scorer defect is not revoked one key at a time. It refuses a value this custody
+never scored (``revocation_scope_unknown``) instead of reporting a revocation that matches
+nothing.
+
+Semantic re-keying (re-review C1, C2, C4). The producer supplies the population and the audit
+receipt, and the OPE-526 receipt is self-sealed by a plain digest. So a producer can re-mint an
+equivalent receipt under a new digest (C1: escapes an audit-receipt revocation) or rename every
+case id (C2: changes the answer-key digest). C2 is closed: an answer-key revocation also matches
+the key's id-free content digest. C1 is not: nothing here can tell a re-minted receipt from a
+new one. C4, re-minting combined with the A2 id renaming that once emptied the cohort content
+digest, is closed for the cohort gate by the A2 fix, but a re-minted receipt still escapes an
+audit-receipt revocation. Only an authenticated OPE-526 audit issuer closes C1.
 
 Known limits of revocation, kept on purpose and pinned by tests. The revocation lives in the
 same custody directory as the verdict, so whoever can delete files there can also delete a
@@ -294,6 +305,7 @@ class SealedPopulation:
         label_set: Sequence[str],
         benchmark_digest: str,
         evidence_origin: str = "generated",
+        reference_fields: Sequence[str] = (),
     ) -> None:
         ids = [c.case_id for c in cases]
         if (
@@ -306,6 +318,9 @@ class SealedPopulation:
             or not set(labels.values()) <= set(label_set)
             or not _is_sha(benchmark_digest)
             or evidence_origin not in ("generated", "observed")
+            or isinstance(reference_fields, str)
+            or not all(isinstance(f, str) and _ID.fullmatch(f) for f in reference_fields)
+            or len(set(reference_fields)) != len(reference_fields)
         ):
             raise VerdictInputError("invalid_sealed_population")
         self.cases = tuple(sorted(cases, key=lambda c: c.case_id))
@@ -313,6 +328,9 @@ class SealedPopulation:
         self.label_set = frozenset(label_set)
         self.benchmark_digest = benchmark_digest
         self.evidence_origin = evidence_origin
+        # The benchmark schema's declared reference/id fields, by exact field name. They are left
+        # out of the id-free decision content; nothing is ever excluded by what a value contains.
+        self.reference_fields = tuple(sorted(reference_fields))
 
     def __repr__(self) -> str:
         return f"SealedPopulation(<{len(self.cases)} sealed cases>)"
@@ -330,6 +348,7 @@ class SealedPopulation:
             [
                 "opentour.pilot.decision-time-inputs.v1",
                 [[c.case_id, c.family_id, dict(c.features), list(c.slices)] for c in self.cases],
+                list(self.reference_fields),
             ]
         )
 
@@ -343,27 +362,53 @@ class SealedPopulation:
             ]
         )
 
+    @property
+    def answer_key_content_digest(self) -> str | None:
+        """The answer key without ids: each case's decision content paired with its label.
 
-def decision_content_digest(case: DecisionCase) -> str:
+        Renaming every case id changes ``answer_key_digest`` but not this. ``None`` when any case
+        has no id-free content, since such a key cannot be recognised without its ids.
+        """
+        pairs = []
+        for c in self.cases:
+            content = decision_content_digest(c, self.reference_fields)
+            if content is None:
+                return None
+            pairs.append([content, self._labels[c.case_id]])
+        return digest(["opentour.pilot.answer-key-content.v1", sorted(pairs)])
+
+
+def decision_content_digest(case: DecisionCase, reference_fields: Sequence[str] = ()) -> str | None:
     """The id-free content of one decision-time input, for the fresh-cohort register.
 
-    Everything the producer can rename is left out: the case and family ids, feature names
-    (so renaming, re-casing or re-spacing a feature name changes nothing) and the order of the
-    features. Any feature value that contains the case or family id (a reference field such as
-    ``"case_ref": "case-0001"`` or ``"ref:case-0001"``) is left out too, since it renames with
-    the id. The remaining values are digested exactly as given, in sorted order: the decision
-    content itself is NOT normalised, so changing its whitespace or case is changing the input.
+    Left out: the case and family ids, the benchmark schema's declared reference fields (by exact
+    field name, ``SealedPopulation.reference_fields``), every feature name (so renaming,
+    re-casing or re-spacing a name changes nothing) and feature order. String values lose only
+    insignificant surrounding whitespace; their internal content, case included, is kept as is.
+    Returns ``None`` when no content value remains: such a case is ``decision_content_unverifiable``
+    and can never count as fresh.
 
-    Limit: a producer who adds a new field carrying a per-case value that is not the case id
-    (for example a hash of it) changes every digest and evades this check. Binding the content
-    of a benchmark is the audit receipt's job (OPE-526), and that receipt is self-sealed here.
+    Probed bypasses, now closed:
+      A1 renaming case/family ids or feature names, or reordering features;
+      A2 renaming each id to a substring of its own decision text, which defeated the earlier
+         rule of dropping any value containing the id (every case then digested to nothing).
+         Nothing is excluded by what a value contains any more, only by declared field name;
+      A3 adding surrounding whitespace to a value.
+    Remaining evasion class, NOT closed here: the producer controls the population and its
+    schema. Undeclaring a reference field that carries an id, adding a field with a fresh
+    per-case value, or changing the decision text itself yields new content. Only an
+    authenticated OPE-526 audit receipt binding the benchmark content can close that; here the
+    receipt is self-sealed.
     """
-    ids = (case.case_id, case.family_id)
-    values = sorted(
-        json.dumps(v, sort_keys=True, ensure_ascii=False)
-        for v in case.features.values()
-        if not (isinstance(v, str) and any(i in v for i in ids))
-    )
+    excluded = set(reference_fields)
+    kept = [
+        v.strip() if isinstance(v, str) else v
+        for k, v in case.features.items()
+        if k not in excluded
+    ]
+    values = sorted(json.dumps(v, sort_keys=True, ensure_ascii=False) for v in kept if v != "")
+    if not values:  # nothing but declared references or blank strings: no content to compare
+        return None
     return digest(["opentour.pilot.decision-content.v1", values])
 
 
@@ -623,15 +668,18 @@ class ProviderJobRecord:
 
 @dataclass(frozen=True)
 class ProviderEvidence:
-    """The evaluator's frozen expectation for a provider route plus the job record it got.
+    """A caller-supplied expectation for a provider route, plus the job record it got.
 
-    ``parent_model_id`` and ``candidate_id`` come from the frozen experiment, not from the
-    provider; the job record and the serving readback must both agree with them.
+    Every field here is supplied by the caller, so a match proves agreement with what the caller
+    supplied, nothing stronger; labels say ``matches_supplied_expectation`` /
+    ``checked_against_supplied_expectation``, never "verified" or "evaluator-held".
+    ``parent_model_id`` and ``candidate_id`` are meant to come from the frozen experiment, not
+    from the provider; the job record and the serving readback must both agree with them.
 
-    ``expected_intent_sha256`` and ``expected_client_token`` are the evaluator's own copy of the
-    fit intent digest and client token, when it holds one. Today nothing gives the evaluator
-    such a record, so they default to ``None``: the job record's intent and token are then
-    recorded as unchecked, said plainly in the statement, never as bound.
+    ``expected_intent_sha256`` and ``expected_client_token`` are the supplied fit intent digest
+    and client token, when the caller has them. Nothing supplies them today, so they default to
+    ``None``: the job record's intent and token are then recorded as
+    ``unchecked_no_expectation_supplied``, never as bound.
     """
 
     job: ProviderJobRecord | None
@@ -1319,12 +1367,35 @@ class IndependentEvaluator:
             "scorer_version": document["scorer"]["scorer_version"],
             "answer_key_digest": document["answer_key_digest"],
             "audit_receipt_digest": document["audit_receipt_digest"],
+            "answer_key_content_digest": document.get("answer_key_content_digest"),
         }
+
+    @staticmethod
+    def _scope_matches(record: Mapping[str, Any], values: Mapping[str, Any]) -> bool:
+        if values.get(record["scope"]) == record["scope_value"]:
+            return True
+        # An answer-key revocation also follows the key's id-free content (re-review C2), so
+        # renaming every case id does not escape it.
+        content = values.get("answer_key_content_digest")
+        return (
+            record["scope"] == "answer_key_digest"
+            and content is not None
+            and content in record.get("answer_key_content_digests", [])
+        )
 
     def _scope_hits(self, values: Mapping[str, Any]) -> list[Json]:
         """Scope revocations matching any of these verdict values, in a fixed order."""
-        hits = [r for r in self._scope_records() if values.get(r["scope"]) == r["scope_value"]]
+        hits = [r for r in self._scope_records() if self._scope_matches(r, values)]
         return sorted(hits, key=lambda r: str(r["revocation_digest"]))
+
+    def _all_documents(self) -> list[Json]:
+        """Every sealed verdict this custody issued: live and archived generations."""
+        documents = []
+        for path in sorted((self._root / "verdicts").glob("*.json")):
+            documents.append(self._load_stored(path, path.stem).document)
+        for path in sorted((self._root / "expired").glob("verdicts-*.json")):
+            documents.append(self._load_stored(path, path.name[len("verdicts-") :][:64]).document)
+        return documents
 
     def _governing(self, key: str) -> tuple[Json | None, list[Json]]:
         """The key revocation (if any) and every scope revocation matching a verdict of ``key``."""
@@ -1341,11 +1412,20 @@ class IndependentEvaluator:
 
         ``scope`` is one of ``REVOCATION_SCOPES``: a scorer version (a scorer defect invalidates
         every verdict it scored, not one key), an answer key digest or an audit receipt digest.
-        The record is sealed, write-once and idempotent like a key revocation, and it may name a
-        value no verdict here carries yet: it then refuses any verdict that later would. From then
-        on ``authorize`` refuses a matching verdict with ``verdict_revoked_by_scope``,
-        ``read_verdict`` reads it as revoked and ``evaluate`` never scores a matching claim.
-        ``issued_by`` is caller-asserted, as for ``revoke_verdict``.
+        The value must be one this custody has actually scored a verdict with; an unknown value
+        would match nothing, so it is refused with ``revocation_scope_unknown`` rather than
+        reported as a success. The record states how many verdicts it matched when written
+        (``matched_verdicts``). It is sealed, write-once and idempotent like a key revocation, and
+        it also refuses any later verdict with the same value. From then on ``authorize`` refuses
+        a matching verdict with ``verdict_revoked_by_scope``, ``read_verdict`` reads it as revoked
+        and ``evaluate`` never scores a matching claim. ``issued_by`` is caller-asserted.
+
+        An answer-key revocation also records the id-free content digests of the keys it hit
+        (``answer_key_content_digests``) and matches on them, so renaming every case id does not
+        escape it (re-review C2). Known limit (re-review C1, C4): an audit-receipt revocation
+        matches the receipt digest only. The OPE-526 receipt is self-sealed by a plain digest, so
+        a producer can re-mint an equivalent receipt with a new digest; combined with renamed ids
+        that also escapes the answer-key digest. Only an authenticated audit issuer closes this.
         """
         if scope not in REVOCATION_SCOPES:
             raise VerdictInputError("invalid_revocation_scope")
@@ -1363,10 +1443,23 @@ class IndependentEvaluator:
         path = self._root / "revoked_scopes" / self._scope_file(scope, value)
         replayed = path.exists()
         if not replayed:
+            matched = [d for d in self._all_documents() if self._scope_values(d)[scope] == value]
+            if not matched:
+                raise VerdictInputError("revocation_scope_unknown")
             body: Json = {
                 "schema_version": SCOPE_REVOCATION,
                 "scope": scope,
                 "scope_value": value,
+                "matched_verdicts": len({d["verdict_key"] for d in matched}),
+                "answer_key_content_digests": sorted(
+                    {
+                        d["answer_key_content_digest"]
+                        for d in matched
+                        if d.get("answer_key_content_digest") is not None
+                    }
+                )
+                if scope == "answer_key_digest"
+                else [],
                 "reason": reason,
                 "issued_by": issued_by,
                 "issued_by_authenticated": False,
@@ -1621,6 +1714,7 @@ class IndependentEvaluator:
             {
                 "scorer_version": self.scorer.scorer_version,
                 "answer_key_digest": population.answer_key_digest,
+                "answer_key_content_digest": population.answer_key_content_digest,
                 "audit_receipt_digest": audit_receipt.get("receipt_digest"),
             }
         )
@@ -1879,11 +1973,11 @@ class IndependentEvaluator:
         if held[1] is not None and job.client_token != held[1]:
             return failed("job_client_token_mismatch")
         intent_binding = (
-            "checked_against_evaluator_held_intent"
+            "checked_against_supplied_expectation"
             if held[0] is not None and held[1] is not None
-            else "partially_checked_against_evaluator_held_intent"
+            else "partially_checked_against_supplied_expectation"
             if held != (None, None)
-            else "unchecked_evaluator_holds_no_intent_record"
+            else "unchecked_no_expectation_supplied"
         )
         if _mutable_alias(provider.parent_model_id) or _mutable_alias(job.parent_revision):
             return failed("parent_mutable_alias")
@@ -1898,7 +1992,7 @@ class IndependentEvaluator:
             return failed("job_artifact_is_not_the_candidate")
         return {
             "status": _JOB_REPORTER[route],
-            "reason": "job_record_binds_parent_and_immutable_candidate",
+            "reason": "job_record_names_supplied_parent_and_candidate",
             "route": route,
             "job_id": job.job_id,
             "job_record_digest": job.digest(),
@@ -1945,7 +2039,8 @@ class IndependentEvaluator:
         if "parent_revision" in served:
             if served["parent_revision"] != provider.parent_model_id:
                 return "parent_mismatch"
-            drift["parent_revision"] = "checked"
+            # Both sides are statements: the provider's readback and the caller's expectation.
+            drift["parent_revision"] = "matches_supplied_expectation"
         else:
             drift["parent_revision"] = "unavailable"
         reported = job.get("artifact_digest_reported")
@@ -1955,14 +2050,14 @@ class IndependentEvaluator:
                 return "trainer_artifact_digest_unavailable"
             if served["artifact_digest"] != reported:
                 return "candidate_served_other_revision"
-            drift["artifact_digest"] = "checked"
+            drift["artifact_digest"] = "matches_job_record"
         elif "artifact_digest" in served and reported is not None:
             if served["artifact_digest"] != reported:
                 return "candidate_served_other_revision"
-            drift["artifact_digest"] = "checked"
+            drift["artifact_digest"] = "matches_job_record"
         else:
             drift["artifact_digest"] = "unavailable"  # managed weights are opaque
-        drift["served_model_id"] = "checked"
+        drift["served_model_id"] = "matches_supplied_expectation"
         # The provider's own claim that the id is immutable: required, never verified here,
         # and never a reason to raise any tier.
         drift["identity_kind"] = "provider_self_claim"
@@ -2333,8 +2428,12 @@ class IndependentEvaluator:
 
         Case and family ids are the producer's own names, so overlap is also checked on content:
         each case's ``decision_content_digest`` (its decision-time feature values, with feature
-        names, ordering and id-carrying values left out) is registered, and any overlap with a
-        scored cohort holds as ``decision_content_seen_in_scored_cohort``.
+        names, ordering, declared reference fields and surrounding whitespace left out) is
+        registered, and any overlap with a scored cohort holds as
+        ``decision_content_seen_in_scored_cohort``. A population with any case that has no
+        content left to compare holds as ``decision_content_unverifiable``: an empty digest can
+        never count as fresh. See ``decision_content_digest`` for the bypasses this closes and
+        the evasion class it cannot.
 
         This fails closed on purpose and has a cost: ANY second claim on an already scored
         cohort is held, including legitimately preregistered siblings (for example a
@@ -2345,7 +2444,12 @@ class IndependentEvaluator:
         """
         cases = {c.case_id for c in population.cases}
         families = {c.family_id for c in population.cases}
-        contents = {decision_content_digest(c) for c in population.cases}
+        digests = [
+            decision_content_digest(c, population.reference_fields) for c in population.cases
+        ]
+        contents = {d for d in digests if d is not None}
+        if None in digests:
+            reasons.add("inconclusive", "decision_content_unverifiable")
         id_overlap = content_overlap = False
         for path in sorted((self._root / "cohorts").glob("*.json")):
             if path.name == key + ".json":
@@ -2369,7 +2473,16 @@ class IndependentEvaluator:
         marker = {
             "cases": [c.case_id for c in population.cases],
             "families": sorted({c.family_id for c in population.cases}),
-            "contents": sorted({decision_content_digest(c) for c in population.cases}),
+            "contents": sorted(
+                {
+                    d
+                    for d in (
+                        decision_content_digest(c, population.reference_fields)
+                        for c in population.cases
+                    )
+                    if d is not None
+                }
+            ),
         }
         _write_once(self._root / "cohorts" / (key + ".json"), json.dumps(marker).encode())
 
@@ -2433,6 +2546,8 @@ class IndependentEvaluator:
             "audit_receipt_digest": receipt.get("receipt_digest"),
             "benchmark_digest": claim.benchmark_digest,
             "answer_key_digest": population.answer_key_digest,
+            # The same key without ids, so an answer-key revocation survives renamed ids.
+            "answer_key_content_digest": population.answer_key_content_digest,
             "inputs_digest": population.inputs_digest,
             "operating_point_digest": claim.operating_point_digest,
             "target_metric": TARGET_METRIC,

@@ -171,7 +171,11 @@ class Scenario:
                     self.preds[arm][case_id] = _pred(code, truth)
                 index += 1
         self.population = iv.SealedPopulation(
-            cases, labels, label_set=(A, B), benchmark_digest=BENCHMARK
+            cases,
+            labels,
+            label_set=(A, B),
+            benchmark_digest=BENCHMARK,
+            reference_fields=("case_ref",),  # the generated schema's declared id field
         )
         self.comparators = comparators
 
@@ -1463,7 +1467,7 @@ def test_q1b_declared_basis_never_waives_the_fresh_cohort_gate(tmp_path):
     assert "caller-asserted" in (iv.IndependentEvaluator._check_selection.__doc__ or "")
 
 
-def respelled(scenario, features_of):
+def respelled(scenario, features_of, reference_fields=None):
     """The same scenario with each case's features rewritten by ``features_of(case)``."""
     cases = [
         iv.DecisionCase(c.case_id, c.family_id, features_of(c), c.slices)
@@ -1471,7 +1475,39 @@ def respelled(scenario, features_of):
     ]
     labels = {c.case_id: scenario.population.truth(c.case_id) for c in cases}
     scenario.population = iv.SealedPopulation(
-        cases, labels, label_set=(A, B), benchmark_digest=BENCHMARK
+        cases,
+        labels,
+        label_set=(A, B),
+        benchmark_digest=BENCHMARK,
+        reference_fields=(
+            scenario.population.reference_fields if reference_fields is None else reference_fields
+        ),
+    )
+    return scenario
+
+
+def renamed_to(scenario, id_of):
+    """The same scenario with every case id renamed by ``id_of(case)``; content unchanged."""
+    new_ids = {c.case_id: id_of(c) for c in scenario.population.cases}
+    cases = [
+        iv.DecisionCase(
+            new_ids[c.case_id],
+            c.family_id,
+            {**c.features, "case_ref": new_ids[c.case_id]},
+            c.slices,
+        )
+        for c in scenario.population.cases
+    ]
+    labels = {new_ids[c]: scenario.population.truth(c) for c in new_ids}
+    scenario.preds = {
+        arm: {new_ids[c]: p for c, p in preds.items()} for arm, preds in scenario.preds.items()
+    }
+    scenario.population = iv.SealedPopulation(
+        cases,
+        labels,
+        label_set=(A, B),
+        benchmark_digest=BENCHMARK,
+        reference_fields=scenario.population.reference_fields,
     )
     return scenario
 
@@ -1493,23 +1529,28 @@ def test_q1c_review_m1_renamed_ids_over_scored_content_are_held(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "respell",
+    "respell,refs",
     [
         # Feature names renamed, re-cased and re-spaced.
-        lambda c: {"case_ref": c.features["case_ref"], " TEXT ": c.features["text"]},
+        (lambda c: {"case_ref": c.features["case_ref"], " TEXT ": c.features["text"]}, None),
         # Feature order reversed.
-        lambda c: dict(reversed(list(c.features.items()))),
-        # An extra reference field that carries the (renamed) id in another spelling.
-        lambda c: {**c.features, "source": "ref:" + c.case_id + ".json"},
-        # A field carrying the family id.
-        lambda c: {**c.features, "group": c.family_id},
+        (lambda c: dict(reversed(list(c.features.items()))), None),
+        # A declared extra reference field carrying the (renamed) id in another spelling.
+        (
+            lambda c: {**c.features, "source": "ref:" + c.case_id + ".json"},
+            ("case_ref", "source"),
+        ),
+        # A declared field carrying the family id.
+        (lambda c: {**c.features, "group": c.family_id}, ("case_ref", "group")),
+        # A3: insignificant surrounding whitespace on a value.
+        (lambda c: {**c.features, "text": " \t" + c.features["text"] + " \n"}, None),
     ],
-    ids=["renamed_keys", "reordered", "id_in_reference_field", "family_id_field"],
+    ids=["renamed_keys", "reordered", "id_in_reference_field", "family_id_field", "a3_spacing"],
 )
-def test_q1d_nothing_a_producer_can_rename_evades_the_content_register(tmp_path, respell):
+def test_q1d_nothing_a_producer_can_rename_evades_the_content_register(tmp_path, respell, refs):
     ev = evaluator(tmp_path)
     assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
-    moved = respelled(Scenario(CLEAN_WIN, prefix="moved-", content_prefix=""), respell)
+    moved = respelled(Scenario(CLEAN_WIN, prefix="moved-", content_prefix=""), respell, refs)
     held(
         run(tmp_path, moved, ev=ev, result_revision=sha("moved")),
         "inconclusive",
@@ -1538,22 +1579,103 @@ def test_q1g_feature_order_never_changes_content_with_several_values(tmp_path):
     )
 
 
-def test_q1e_decision_content_itself_is_not_normalised(tmp_path):
-    """Changed decision text is a new input, so it is a fresh cohort; ids still are not."""
+def test_q1e_internal_decision_content_is_not_normalised(tmp_path):
+    """Changed decision text is a new input, so it is a fresh cohort; only edges are trimmed."""
     ev = evaluator(tmp_path)
     assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
-    for name, change in (("upper", str.upper), ("spaced", lambda t: t + " ")):
+    for name, change in (
+        ("upper", str.upper),
+        ("inner-space", lambda t: t.replace("-", " - ", 1)),
+        ("appended", lambda t: t + "!"),
+    ):
         fresh = respelled(
             Scenario(CLEAN_WIN, prefix=name + "-", content_prefix=""),
             lambda c, change=change: {**c.features, "text": change(c.features["text"])},
         )
         assert run(tmp_path, fresh, ev=ev).outcome == "verified_gain"
+    refs = ("case_ref",)
     a = Scenario(CLEAN_WIN).population.cases[0]
     b = iv.DecisionCase("other-id", "other-family", {"text": a.features["text"]}, ())
-    assert iv.decision_content_digest(a) == iv.decision_content_digest(b)
-    assert iv.decision_content_digest(a) != iv.decision_content_digest(
-        iv.DecisionCase("other-id", "other-family", {"text": a.features["text"] + "!"}, ())
+    assert iv.decision_content_digest(a, refs) == iv.decision_content_digest(b, refs)
+    assert iv.decision_content_digest(a, refs) == iv.decision_content_digest(
+        iv.DecisionCase("other-id", "f", {"body": "  " + a.features["text"] + "\t"}, ()), refs
     )
+    assert iv.decision_content_digest(a, refs) != iv.decision_content_digest(
+        iv.DecisionCase("other-id", "other-family", {"text": a.features["text"] + "!"}, ()), refs
+    )
+    # Internal whitespace is content: a run of two spaces is not one space.
+    one, two = (iv.DecisionCase("x", "f", {"text": t}, ()) for t in ("a b", "a  b"))
+    assert iv.decision_content_digest(one) != iv.decision_content_digest(two)
+    # Exclusion is by declared field name only, never by what a value contains (A2).
+    c = iv.DecisionCase("input-1", "f", {"text": "generated-input-1"}, ())
+    assert iv.decision_content_digest(c, ()) is not None
+
+
+def test_q1h_review_a2_ids_renamed_to_a_substring_of_their_own_text_are_held(tmp_path):
+    """Re-review A2: ids renamed to substrings of their own text dropped every value."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    a2 = renamed_to(
+        Scenario(CLEAN_WIN, prefix="a2-", content_prefix=""),
+        lambda c: c.features["text"][len("generated-") :],  # "input-<n>", inside its own text
+    )
+    case = a2.population.cases[0]
+    assert case.case_id in case.features["text"]
+    doc = held(
+        run(tmp_path, a2, ev=ev, result_revision=sha("a2")),
+        "inconclusive",
+        "decision_content_seen_in_scored_cohort",
+    )
+    assert "decision_content_unverifiable" not in doc["reasons"]
+
+
+@pytest.mark.parametrize(
+    "features,refs",
+    [
+        (lambda c: {"case_ref": c.case_id}, ("case_ref",)),  # only declared references
+        (lambda c: {**c.features, "text": "   "}, ("case_ref",)),  # blank decision text
+        (lambda c: dict(c.features), ("case_ref", "text")),  # the text declared a reference
+    ],
+    ids=["only_references", "blank_text", "text_declared_as_reference"],
+)
+def test_q1i_an_empty_content_digest_never_counts_as_fresh(tmp_path, features, refs):
+    """An all-excluded case cannot be compared, so it is held even on a first claim."""
+    s = respelled(Scenario(CLEAN_WIN, prefix="empty-"), features, refs)
+    doc = held(run(tmp_path, s), "inconclusive", "decision_content_unverifiable")
+    assert doc["answer_key_content_digest"] is None
+
+
+def test_q1k_declared_reference_fields_are_part_of_the_audited_inputs():
+    """Changing which fields are declared references changes the audited inputs digest."""
+    s = Scenario(CLEAN_WIN)
+    cases = s.population.cases
+    labels = {c.case_id: s.population.truth(c.case_id) for c in cases}
+
+    def pop(refs):
+        return iv.SealedPopulation(
+            cases, labels, label_set=(A, B), benchmark_digest=BENCHMARK, reference_fields=refs
+        )
+
+    assert pop(("case_ref",)).inputs_digest == s.population.inputs_digest
+    assert pop(()).inputs_digest != s.population.inputs_digest
+    assert pop(("case_ref", "text")).inputs_digest != s.population.inputs_digest
+    for bad in ("case_ref", ("case_ref", "case_ref"), ("has spaces",)):
+        with pytest.raises(iv.VerdictInputError, match="invalid_sealed_population"):
+            pop(bad)
+
+
+def test_q1j_documented_limit_an_undeclared_id_field_is_content(tmp_path):
+    """The remaining evasion class, pinned so the docstring stays true: not closed here."""
+    ev = evaluator(tmp_path)
+    assert run(tmp_path, Scenario(CLEAN_WIN), ev=ev).outcome == "verified_gain"
+    undeclared = respelled(
+        Scenario(CLEAN_WIN, prefix="undeclared-", content_prefix="", family_prefix="u-"),
+        lambda c: {**c.features, "source": "ref:" + c.case_id},
+    )
+    doc = run(tmp_path, undeclared, ev=ev, result_revision=sha("undeclared")).document
+    assert "decision_content_seen_in_scored_cohort" not in doc["reasons"]
+    text = " ".join((iv.decision_content_digest.__doc__ or "").split())
+    assert "Remaining evasion class, NOT closed here" in text and "A2" in text and "A3" in text
 
 
 def test_q1f_a_register_marker_without_content_is_corrupt(tmp_path):
@@ -2398,25 +2520,46 @@ def test_v16_answer_key_and_audit_receipt_scopes_revoke_matching_verdicts_only(
     assert again.document["reasons"][-1] == "verdict_revoked_by_scope_" + scope
 
 
-def test_v17_scope_revocations_are_sealed_validated_and_may_be_preemptive(tmp_path):
+def test_v17_scope_revocations_are_sealed_validated_and_refuse_unknown_values(tmp_path):
     ev = evaluator(tmp_path)
     v = run(tmp_path, Scenario(CLEAN_WIN), ev=ev)
+    w = run(tmp_path, Scenario(CLEAN_WIN, prefix="w-"), ev=ev)
     for scope, value, reason in (
         ("tenant", "generated-tenant-1", "invalid_revocation_scope"),
         ("scorer_version", "has spaces", "invalid_revocation_scope_value"),
         ("answer_key_digest", "not-a-digest", "invalid_revocation_scope_value"),
         ("audit_receipt_digest", None, "invalid_revocation_scope_value"),
+        # Re-review LOW: a well-formed value this custody never scored matches nothing.
+        ("scorer_version", "a-future-scorer.v9", "revocation_scope_unknown"),
+        ("answer_key_digest", sha("never-scored-key"), "revocation_scope_unknown"),
+        ("audit_receipt_digest", sha("never-scored-receipt"), "revocation_scope_unknown"),
     ):
         with pytest.raises(iv.VerdictInputError, match="^" + reason + "$"):
             ev.revoke_scope(scope, value, reason="scorer_defect", issued_by=EVALUATOR)
     with pytest.raises(iv.VerdictInputError, match="invalid_revocation_reason"):
         ev.revoke_scope("scorer_version", "x.v9", reason="free text", issued_by=EVALUATOR)
-    # A scope no verdict carries yet is recorded and harms nothing it does not name.
-    ev.revoke_scope(
-        "scorer_version", "a-future-scorer.v9", reason="scorer_defect", issued_by=EVALUATOR
-    )
-    assert ev.read_verdict(v.verdict_key) == v.document
     folder = tmp_path / "evaluator-custody" / "revoked_scopes"
+    assert list(folder.glob("*.json")) == []  # nothing stored for any refusal
+    # A known value: the record says how many verdicts it matched; others are untouched.
+    r = ev.revoke_scope(
+        "answer_key_digest",
+        w.document["answer_key_digest"],
+        reason="answer_key_defect",
+        issued_by=EVALUATOR,
+    )
+    assert r.record["matched_verdicts"] == 1
+    assert r.record["answer_key_content_digests"] == [w.document["answer_key_content_digest"]]
+    s = ev.revoke_scope(
+        "scorer_version", iv.SCORER_VERSION, reason="scorer_defect", issued_by=EVALUATOR
+    )
+    assert s.record["matched_verdicts"] == 2 and s.record["answer_key_content_digests"] == []
+    (
+        tmp_path
+        / "evaluator-custody"
+        / "revoked_scopes"
+        / ev._scope_file("scorer_version", iv.SCORER_VERSION)
+    ).unlink()
+    assert ev.read_verdict(v.verdict_key) == v.document
     (path,) = list(folder.glob("*.json"))
     good = path.read_bytes()
     # Each seal layer on its own: a resealed digest without the key (only the HMAC catches it)
@@ -2450,6 +2593,96 @@ def test_v17_scope_revocations_are_sealed_validated_and_may_be_preemptive(tmp_pa
         ev.read_verdict(v.verdict_key)
     path.write_bytes(good)
     assert ev.read_verdict(v.verdict_key) == v.document
+
+
+def test_v20_review_c2_renamed_ids_do_not_escape_an_answer_key_revocation(
+    tmp_path, registered_floor
+):
+    """Re-review C2: renaming every id changed the answer-key digest and escaped revocation."""
+    ev = evaluator(tmp_path)
+    original = Scenario(CLEAN_WIN)
+    hit = run(tmp_path, original, ev=ev)
+    renamed = renamed_to(
+        Scenario(CLEAN_WIN, prefix="c2-", content_prefix=""), lambda c: "r-" + c.case_id
+    )
+    earlier = run(tmp_path / "other", renamed)  # issued in another custody before revocation
+    assert earlier.document["answer_key_digest"] != hit.document["answer_key_digest"]
+    assert (
+        earlier.document["answer_key_content_digest"] == hit.document["answer_key_content_digest"]
+    )
+    ev.revoke_scope(
+        "answer_key_digest",
+        hit.document["answer_key_digest"],
+        reason="answer_key_defect",
+        issued_by=EVALUATOR,
+    )
+    replays = renamed.replays()
+    again = run(tmp_path, renamed, ev=ev, replays=replays, result_revision=sha("c2"), receipt=None)
+    assert again.outcome == "stale" and replays["candidate"].calls == []
+    assert again.document["reasons"][-1] == "verdict_revoked_by_scope_answer_key_digest"
+    # Different labels on the same content are a different key and are not caught.
+    flipped = Scenario(CLEAN_WIN, prefix="flip-", content_prefix="")
+    flipped = renamed_to(flipped, lambda c: "f-" + c.case_id)
+    labels = {
+        c.case_id: (B if flipped.population.truth(c.case_id) == A else A)
+        for c in flipped.population.cases
+    }
+    assert (
+        iv.SealedPopulation(
+            flipped.population.cases,
+            labels,
+            label_set=(A, B),
+            benchmark_digest=BENCHMARK,
+            reference_fields=("case_ref",),
+        ).answer_key_content_digest
+        != hit.document["answer_key_content_digest"]
+    )
+
+
+def test_v21_documented_limit_c1_a_reminted_receipt_escapes_a_receipt_revocation(tmp_path):
+    """Re-review C1/C4: the self-sealed OPE-526 receipt can be re-minted. Pinned, not closed."""
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    v = run(tmp_path, s, ev=ev)
+    ev.revoke_scope(
+        "audit_receipt_digest",
+        v.document["audit_receipt_digest"],
+        reason="benchmark_audit_superseded",
+        issued_by=EVALUATOR,
+    )
+    reminted = receipt_for(s.population, reasons=["generated-reminted"])
+    assert reminted["receipt_digest"] != v.document["audit_receipt_digest"]
+    doc = run(tmp_path, s, ev=ev, receipt=reminted, result_revision=sha("c1")).document
+    assert doc["outcome"] != "stale"  # the receipt revocation does not follow a re-mint
+    # The cohort gate still holds the re-minted claim (the A2 fix closes the C4 combination).
+    assert "decision_content_seen_in_scored_cohort" in doc["reasons"]
+    text = " ".join((iv.__doc__ or "").split())
+    assert "C1 is not" in text and "self-sealed" in text
+
+
+def test_v22_matched_verdicts_counts_keys_not_generations(tmp_path, monkeypatch):
+    ev = evaluator(tmp_path)
+    s = Scenario(CLEAN_WIN)
+    first = run(tmp_path, s, ev=ev)
+    now = int(iv.time.time())
+    monkeypatch.setattr(iv.time, "time", lambda: now + 8 * 86_400)
+    again = run(tmp_path, s, ev=ev)  # re-issued: one key, two generations
+    assert not again.replayed and again.verdict_key == first.verdict_key
+    r = ev.revoke_scope(
+        "scorer_version", iv.SCORER_VERSION, reason="scorer_defect", issued_by=EVALUATOR
+    )
+    assert r.record["matched_verdicts"] == 1
+    # An archived generation alone is enough to make a value known.
+    (tmp_path / "evaluator-custody" / "verdicts" / (first.verdict_key + ".json")).unlink()
+    assert (
+        ev.revoke_scope(
+            "answer_key_digest",
+            first.document["answer_key_digest"],
+            reason="answer_key_defect",
+            issued_by=EVALUATOR,
+        ).record["matched_verdicts"]
+        == 1
+    )
 
 
 def test_v18_one_correction_notice_per_scope_revoked_verdict_that_fired(tmp_path):
@@ -2639,15 +2872,19 @@ def test_p1_provider_route_win_is_provider_reported_never_verified(tmp_path, rou
     assert served["status"] == "readback_consistent"
     assert served["serving_evidence"] == "provider_reported_readback"
     assert served["drift_checks"] == {
-        "artifact_digest": "checked" if route == "custom_trainer" else "unavailable",
+        # Statements matched against statements: never "checked" or "verified".
+        "artifact_digest": "matches_job_record" if route == "custom_trainer" else "unavailable",
         "identity_kind": "provider_self_claim",
-        "parent_revision": "checked",
-        "served_model_id": "checked",
+        "parent_revision": "matches_supplied_expectation",
+        "served_model_id": "matches_supplied_expectation",
     }
     # The evaluator holds no fit-intent record of its own here, and says so.
-    assert job["job_intent_binding"] == "unchecked_evaluator_holds_no_intent_record"
+    assert job["job_intent_binding"] == "unchecked_no_expectation_supplied"
     statements = json.dumps([job, served])
     assert "verified" not in statements and "sha256" not in json.dumps(job["weights"])
+    # Immutability is the provider's claim, so no label asserts it.
+    assert job["reason"] == "job_record_names_supplied_parent_and_candidate"
+    assert "immutable" not in statements
     assert doc["candidate_kind"] == KINDS[route]
     assert doc["alert_gates"]["cleared"] is True  # same gates as open weight; D11 floor unset
     assert doc["effects"]["improvement_alert_eligible"] is False
@@ -2861,7 +3098,7 @@ def test_p8_review_l3_a_trainer_route_without_an_artifact_digest_fails_closed(tm
             held(v, outcome, "served_candidate_served_other_revision")
         else:
             served = v.document["statements"]["candidate_served_evaluation"]
-            assert served["drift_checks"]["artifact_digest"] == "checked"
+            assert served["drift_checks"]["artifact_digest"] == "matches_job_record"
 
 
 @pytest.mark.parametrize("route", ["managed_provider", "custom_trainer"])
@@ -2880,12 +3117,12 @@ def test_p9_review_l3_intent_and_client_token_bind_only_when_the_evaluator_holds
     v, _ = provider_run(tmp_path / "both", s, route, evidence=both)
     assert v.outcome == "verified_gain"
     assert v.document["statements"]["job_produced_candidate"]["job_intent_binding"] == (
-        "checked_against_evaluator_held_intent"
+        "checked_against_supplied_expectation"
     )
     one = evidence(expected_intent_sha256=job.intent_sha256)
     v, _ = provider_run(tmp_path / "one", s, route, evidence=one)
     assert v.document["statements"]["job_produced_candidate"]["job_intent_binding"] == (
-        "partially_checked_against_evaluator_held_intent"
+        "partially_checked_against_supplied_expectation"
     )
     for name, over, reason in (
         ("intent", {"expected_intent_sha256": sha("other-intent")}, "job_intent_mismatch"),
