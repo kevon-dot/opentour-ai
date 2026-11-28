@@ -2261,6 +2261,66 @@ def test_j11_placeholders_cannot_be_forged_and_kinds_are_distinct():
         )
 
 
+def test_j13_review_r9_z1_a_nul_before_an_id_cannot_forge_a_repeat():
+    """Round 9 Z1: without escaping before a span, "\\x00c"+id equals id+id: count reopens."""
+    case = iv.DecisionCase("case-0001", "fam-0001x", {}, ())
+    before = iv._id_free_remainder(case, "\x00c" + "case-0001")
+    repeat = iv._id_free_remainder(case, "case-0001case-0001")
+    assert before == "\x00\x00c\x00c" and repeat == "\x00c\x00c" and before != repeat
+    # A NUL after the last span too: escaped, so it is not a placeholder either.
+    assert iv._id_free_remainder(case, "case-0001\x00c") == "\x00c\x00\x00c"
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        overlap_population(
+            lambda i: (
+                f"case-{i:04d}",
+                f"fam-{i:04d}x",
+                ("\x00c" + f"case-{i:04d}") if i % 2 else f"case-{i:04d}case-{i:04d}",
+            )
+        )
+
+
+def embedding_population(case_of, family_of, n=200):
+    cases = [
+        iv.DecisionCase(
+            case_of(i), family_of(i), {"case_ref": case_of(i), "text": f"generated-text-{i}"}, ()
+        )
+        for i in range(n)
+    ]
+    return iv.SealedPopulation(
+        cases,
+        {c.case_id: A for c in cases},
+        label_set=(A, B),
+        benchmark_digest=BENCHMARK,
+        reference_fields=("case_ref",),
+    )
+
+
+@pytest.mark.parametrize(
+    "case_of,family_of,embedded",
+    [
+        (lambda i: f"grp-{i:05d}x", lambda i: f"grp-{i // 7:04d}", 12),
+        (lambda i: f"item-{i:06d}", lambda i: f"item-{i % 40:04d}", 5),
+    ],
+    ids=["grp_families", "item_families"],
+)
+def test_j14_review_r9_coincidental_embedding_in_one_scheme_is_refused(
+    case_of, family_of, embedded
+):
+    """Round 9 docs: a family id inside a few unrelated case ids refuses the population."""
+    count = sum(family_of(i) in case_of(i) for i in range(200))
+    assert count == embedded  # the counts the docstring states
+    with pytest.raises(iv.VerdictInputError, match="^reference_field_carries_content$"):
+        embedding_population(case_of, family_of)
+    # Positive control: distinct prefixes for case and family ids are accepted.
+    assert (
+        len(embedding_population(lambda i: f"case-{i:05d}x", lambda i: f"fam-{i // 7:04d}x").cases)
+        == 200
+    )
+    doc = " ".join((iv._id_free_remainder.__doc__ or "").split())
+    assert "A family id must never occur inside an unrelated case id" in doc
+    assert "Use one id scheme" not in doc
+
+
 def test_j12_documented_cost_mixed_id_schemes_are_refused():
     """The family id inside SOME case ids gives "\\x00m" there and "\\x00c" elsewhere."""
 

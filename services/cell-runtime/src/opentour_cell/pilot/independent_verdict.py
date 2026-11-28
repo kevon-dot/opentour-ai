@@ -462,9 +462,12 @@ def _id_free_remainder(case: DecisionCase, value: object) -> str:
 
     Cost: because the token records which ids a span covers, a population in which the family
     id sits inside SOME case ids (``\\x00m``) but not others (``\\x00c``) is refused, even when
-    each reference is honest. Use one id scheme for the whole population. Not visible: the
-    number of overlapping repeats of one self-overlapping id (``aaaaaaaaa`` and ``aaaaaaaaaa``
-    both mask to one span).
+    each reference is honest. That includes coincidental embedding within one id scheme: case
+    ids ``grp-{i:05d}x`` with families ``grp-{i//7:04d}`` (12 of 200 case ids contain their
+    family id), or ``item-{i:06d}`` with ``item-{i%40:04d}`` (5 of 200), are refused. A family
+    id must never occur inside an unrelated case id: give case and family ids distinct prefixes
+    or random parts. Not visible: the number of overlapping repeats of one self-overlapping id
+    (``aaaaaaaaa`` and ``aaaaaaaaaa`` both mask to one span).
     """
     text = _value_text(value)
     spans: list[tuple[int, int, str]] = []
